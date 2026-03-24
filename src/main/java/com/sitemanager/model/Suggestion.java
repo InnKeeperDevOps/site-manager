@@ -46,6 +46,9 @@ public class Suggestion {
     @Column
     private String workingDirectory;
 
+    @Column(columnDefinition = "TEXT")
+    private String pendingClarificationQuestions;
+
     @Column(nullable = false)
     private Instant createdAt;
 
@@ -94,6 +97,8 @@ public class Suggestion {
     public void setDownVotes(int downVotes) { this.downVotes = downVotes; }
     public String getWorkingDirectory() { return workingDirectory; }
     public void setWorkingDirectory(String workingDirectory) { this.workingDirectory = workingDirectory; }
+    public String getPendingClarificationQuestions() { return pendingClarificationQuestions; }
+    public void setPendingClarificationQuestions(String pendingClarificationQuestions) { this.pendingClarificationQuestions = pendingClarificationQuestions; }
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }

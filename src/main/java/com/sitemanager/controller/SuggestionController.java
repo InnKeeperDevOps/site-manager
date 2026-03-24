@@ -1,5 +1,6 @@
 package com.sitemanager.controller;
 
+import com.sitemanager.dto.ClarificationRequest;
 import com.sitemanager.dto.MessageRequest;
 import com.sitemanager.dto.SuggestionRequest;
 import com.sitemanager.dto.VoteRequest;
@@ -81,6 +82,27 @@ public class SuggestionController {
 
         suggestionService.handleUserReply(id, senderName, request.getContent());
         return ResponseEntity.ok(Map.of("message", "Reply sent"));
+    }
+
+    @PostMapping("/{id}/clarifications")
+    public ResponseEntity<?> submitClarifications(@PathVariable Long id,
+                                                   @Valid @RequestBody ClarificationRequest request,
+                                                   HttpSession session) {
+        String username = (String) session.getAttribute("username");
+        String senderName = username != null ? username :
+                (request.getSenderName() != null ? request.getSenderName() : "Anonymous");
+
+        suggestionService.handleClarificationAnswers(id, senderName, request.getAnswers());
+        return ResponseEntity.ok(Map.of("message", "Clarification answers submitted"));
+    }
+
+    @GetMapping("/{id}/clarification-questions")
+    public ResponseEntity<?> getClarificationQuestions(@PathVariable Long id) {
+        java.util.List<String> questions = suggestionService.getPendingQuestions(id);
+        if (questions == null || questions.isEmpty()) {
+            return ResponseEntity.ok(Map.of("questions", java.util.List.of(), "hasPending", false));
+        }
+        return ResponseEntity.ok(Map.of("questions", questions, "hasPending", true));
     }
 
     @PostMapping("/{id}/approve")

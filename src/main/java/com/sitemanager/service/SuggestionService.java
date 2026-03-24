@@ -1,5 +1,10 @@
 package com.sitemanager.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sitemanager.dto.ClarificationRequest;
 import com.sitemanager.model.Suggestion;
 import com.sitemanager.model.SuggestionMessage;
 import com.sitemanager.model.enums.SenderType;
@@ -22,6 +27,7 @@ import java.util.Optional;
 public class SuggestionService {
 
     private static final Logger log = LoggerFactory.getLogger(SuggestionService.class);
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final SuggestionRepository suggestionRepository;
     private final SuggestionMessageRepository messageRepository;
@@ -113,16 +119,90 @@ public class SuggestionService {
             suggestion.setStatus(SuggestionStatus.PLANNED);
             suggestion.setCurrentPhase("Plan ready - awaiting admin approval");
             suggestion.setPlanSummary(extractPlan(response));
+            suggestion.setPendingClarificationQuestions(null);
         } else if (response.contains("NEEDS_CLARIFICATION")) {
             suggestion.setStatus(SuggestionStatus.DISCUSSING);
             suggestion.setCurrentPhase("Awaiting user clarification");
+
+            // Extract questions array from the response
+            List<String> questions = extractQuestions(response);
+            if (questions != null && !questions.isEmpty()) {
+                try {
+                    suggestion.setPendingClarificationQuestions(objectMapper.writeValueAsString(questions));
+                } catch (JsonProcessingException e) {
+                    log.error("Failed to serialize clarification questions", e);
+                }
+                // Broadcast clarification questions via WebSocket
+                broadcastClarificationQuestions(suggestionId, questions);
+            }
         } else {
             suggestion.setStatus(SuggestionStatus.DISCUSSING);
             suggestion.setCurrentPhase("In discussion with AI");
+            suggestion.setPendingClarificationQuestions(null);
         }
 
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
+    }
+
+    @Transactional
+    public void handleClarificationAnswers(Long suggestionId, String senderName,
+                                            List<ClarificationRequest.ClarificationAnswer> answers) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId)
+                .orElseThrow(() -> new IllegalArgumentException("Suggestion not found"));
+
+        suggestion.setLastActivityAt(Instant.now());
+        suggestion.setPendingClarificationQuestions(null);
+        suggestionRepository.save(suggestion);
+
+        // Format the Q&A pairs as a structured message
+        StringBuilder formattedMessage = new StringBuilder();
+        for (ClarificationRequest.ClarificationAnswer qa : answers) {
+            formattedMessage.append("**Q: ").append(qa.getQuestion()).append("**\n");
+            formattedMessage.append("A: ").append(qa.getAnswer()).append("\n\n");
+        }
+        String userMessage = formattedMessage.toString().trim();
+
+        // Store the combined clarification response as a user message
+        addMessage(suggestionId, SenderType.USER, senderName, userMessage);
+
+        // Build the prompt for Claude with the structured answers
+        StringBuilder claudePrompt = new StringBuilder();
+        claudePrompt.append("The user has provided the following clarification answers:\n\n");
+        for (ClarificationRequest.ClarificationAnswer qa : answers) {
+            claudePrompt.append("Question: ").append(qa.getQuestion()).append("\n");
+            claudePrompt.append("Answer: ").append(qa.getAnswer()).append("\n\n");
+        }
+        claudePrompt.append("Based on these answers and the original suggestion, please evaluate again:\n");
+        claudePrompt.append("1. If you still need more information, respond with NEEDS_CLARIFICATION status and a new set of questions.\n");
+        claudePrompt.append("2. If you now have enough information, create the implementation plan and respond with PLAN_READY status.\n\n");
+        claudePrompt.append("Respond in this JSON format:\n");
+        claudePrompt.append("If clarification needed:\n");
+        claudePrompt.append("{\"status\": \"NEEDS_CLARIFICATION\", ");
+        claudePrompt.append("\"message\": \"brief summary of what you still need to know\", ");
+        claudePrompt.append("\"questions\": [\"specific question 1\", \"specific question 2\", ...]}\n\n");
+        claudePrompt.append("If ready to plan:\n");
+        claudePrompt.append("{\"status\": \"PLAN_READY\", ");
+        claudePrompt.append("\"message\": \"your response to the user\", ");
+        claudePrompt.append("\"plan\": \"implementation plan\"}\n\n");
+        claudePrompt.append("IMPORTANT: When status is NEEDS_CLARIFICATION, you MUST include a \"questions\" array with each clarifying question as a separate string element.");
+
+        // Continue the Claude conversation
+        suggestion.setCurrentPhase("AI is reviewing your clarifications...");
+        suggestionRepository.save(suggestion);
+        broadcastUpdate(suggestion);
+
+        claudeService.continueConversation(
+                suggestion.getClaudeSessionId(),
+                claudePrompt.toString(),
+                progress -> {
+                    webSocketHandler.sendToSuggestion(suggestionId,
+                            "{\"type\":\"progress\",\"content\":\"" +
+                                    escapeJson(progress) + "\"}");
+                }
+        ).thenAccept(response -> {
+            handleAiResponse(suggestionId, response);
+        });
     }
 
     @Transactional
@@ -318,6 +398,58 @@ public class SuggestionService {
                 .replace("\n", "\\n")
                 .replace("\r", "\\r")
                 .replace("\t", "\\t");
+    }
+
+    private List<String> extractQuestions(String response) {
+        try {
+            // Try to find JSON in the response
+            String json = extractJsonBlock(response);
+            if (json != null) {
+                JsonNode root = objectMapper.readTree(json);
+                JsonNode questionsNode = root.get("questions");
+                if (questionsNode != null && questionsNode.isArray()) {
+                    return objectMapper.convertValue(questionsNode,
+                            new TypeReference<List<String>>() {});
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to extract questions from AI response: {}", e.getMessage());
+        }
+        return null;
+    }
+
+    private String extractJsonBlock(String response) {
+        // Find the first { and last } to extract the JSON object
+        int start = response.indexOf('{');
+        int end = response.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+            return response.substring(start, end + 1);
+        }
+        return null;
+    }
+
+    private void broadcastClarificationQuestions(Long suggestionId, List<String> questions) {
+        try {
+            String questionsJson = objectMapper.writeValueAsString(questions);
+            webSocketHandler.sendToSuggestion(suggestionId,
+                    "{\"type\":\"clarification_questions\",\"questions\":" + questionsJson + "}");
+        } catch (JsonProcessingException e) {
+            log.error("Failed to broadcast clarification questions", e);
+        }
+    }
+
+    public List<String> getPendingQuestions(Long suggestionId) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null || suggestion.getPendingClarificationQuestions() == null) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(suggestion.getPendingClarificationQuestions(),
+                    new TypeReference<List<String>>() {});
+        } catch (JsonProcessingException e) {
+            log.error("Failed to parse pending questions", e);
+            return null;
+        }
     }
 
     private String extractPlan(String response) {

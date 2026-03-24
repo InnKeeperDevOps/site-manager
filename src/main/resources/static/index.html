@@ -150,6 +150,33 @@
         <h3 style="margin-top:1rem">Discussion Thread</h3>
         <div class="thread-container" id="threadContainer"></div>
 
+        <!-- Clarification Wizard -->
+        <div id="clarificationWizard" class="card clarification-wizard" style="display:none">
+            <div class="clarification-header">
+                <h4>Clarification Needed</h4>
+                <div class="clarification-progress">
+                    <span id="clarificationStep">Question 1</span>
+                    <span id="clarificationTotal">of 1</span>
+                </div>
+            </div>
+            <div class="clarification-progress-bar">
+                <div class="clarification-progress-fill" id="clarificationProgressFill"></div>
+            </div>
+            <div id="clarificationQuestionText" class="clarification-question"></div>
+            <div class="form-group" style="margin-top:1rem">
+                <textarea id="clarificationAnswer" rows="3" placeholder="Type your answer..."></textarea>
+            </div>
+            <div class="clarification-actions">
+                <button class="btn btn-outline btn-sm" id="clarificationPrevBtn"
+                        onclick="app.prevClarification()" style="display:none">Previous</button>
+                <div style="flex:1"></div>
+                <button class="btn btn-primary btn-sm" id="clarificationNextBtn"
+                        onclick="app.nextClarification()">Next</button>
+                <button class="btn btn-success btn-sm" id="clarificationSubmitBtn"
+                        onclick="app.submitClarifications()" style="display:none">Submit All Answers</button>
+            </div>
+        </div>
+
         <div class="reply-box" id="replyBox">
             <input type="text" id="replyInput" placeholder="Type your reply..."
                    onkeydown="if(event.key==='Enter')app.reply()">
