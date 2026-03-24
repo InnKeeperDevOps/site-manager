@@ -28,6 +28,9 @@ public class ClaudeService {
     @Value("${app.workspace-dir:/workspace}")
     private String workspaceDir;
 
+    @Value("${app.git-ssh-key-path:}")
+    private String gitSshKeyPath;
+
     public String generateSessionId() {
         return UUID.randomUUID().toString();
     }
@@ -117,6 +120,13 @@ public class ClaudeService {
 
         if (workingDir != null) {
             pb.directory(new File(workingDir));
+        }
+
+        // Propagate SSH key to Claude CLI subprocess so git operations use SSH auth
+        String sshKeyPath = resolveGitSshKeyPath();
+        if (sshKeyPath != null) {
+            String sshCommand = "ssh -i " + sshKeyPath + " -o StrictHostKeyChecking=no";
+            pb.environment().put("GIT_SSH_COMMAND", sshCommand);
         }
 
         pb.redirectErrorStream(true);
@@ -257,18 +267,41 @@ public class ClaudeService {
         return null;
     }
 
+    /**
+     * Clone the repository into main-repo/ for the initial Claude session workspace.
+     */
+    public String cloneMainRepository(String repoUrl) throws Exception {
+        String targetDir = workspaceDir + "/main-repo";
+        return gitClone(repoUrl, targetDir);
+    }
+
+    /**
+     * Clone the repository into suggestion-{id}-repo/ when a suggestion is approved.
+     */
     public String cloneRepository(String repoUrl, String suggestionId) throws Exception {
-        String targetDir = workspaceDir + "/suggestion-" + suggestionId;
+        String targetDir = workspaceDir + "/suggestion-" + suggestionId + "-repo";
+        return gitClone(repoUrl, targetDir);
+    }
+
+    private String gitClone(String repoUrl, String targetDir) throws Exception {
         File dir = new File(targetDir);
         if (dir.exists()) {
-            // Clean and re-clone
             ProcessBuilder cleanup = new ProcessBuilder("rm", "-rf", targetDir);
             cleanup.start().waitFor();
         }
 
-        ProcessBuilder pb = new ProcessBuilder("git", "clone", repoUrl, targetDir);
+        String sshRepoUrl = toSshUrl(repoUrl);
+        ProcessBuilder pb = new ProcessBuilder("git", "clone", sshRepoUrl, targetDir);
         pb.redirectErrorStream(true);
         pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+
+        String sshKeyPath = resolveGitSshKeyPath();
+        if (sshKeyPath != null) {
+            String sshCommand = "ssh -i " + sshKeyPath + " -o StrictHostKeyChecking=no";
+            pb.environment().put("GIT_SSH_COMMAND", sshCommand);
+            log.info("Using SSH key for git clone: {}", sshKeyPath);
+        }
+
         Process process = pb.start();
 
         try (BufferedReader reader = new BufferedReader(
@@ -284,7 +317,83 @@ public class ClaudeService {
             throw new RuntimeException("Failed to clone repository: exit code " + exitCode);
         }
 
+        log.info("Repository cloned to {}", targetDir);
         return targetDir;
+    }
+
+    /**
+     * Resolve the SSH key path. Uses the configured path if set, otherwise
+     * auto-detects from the user's ~/.ssh directory (id_rsa, id_ed25519, etc.)
+     * or falls back to the git config core.sshCommand key if present.
+     */
+    private String resolveGitSshKeyPath() {
+        // Use explicitly configured path first
+        if (gitSshKeyPath != null && !gitSshKeyPath.isBlank()) {
+            File key = new File(gitSshKeyPath);
+            if (key.exists() && key.isFile()) {
+                return gitSshKeyPath;
+            }
+            log.warn("Configured SSH key not found at {}", gitSshKeyPath);
+        }
+
+        // Auto-detect from ~/.ssh
+        String userHome = System.getProperty("user.home");
+        if (userHome == null) {
+            return null;
+        }
+
+        String sshDir = userHome + "/.ssh";
+        String[] candidates = {"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"};
+        for (String candidate : candidates) {
+            File key = new File(sshDir, candidate);
+            if (key.exists() && key.isFile()) {
+                log.info("Auto-detected SSH key: {}", key.getAbsolutePath());
+                return key.getAbsolutePath();
+            }
+        }
+
+        // Check if git config has a key configured
+        try {
+            ProcessBuilder pb = new ProcessBuilder("git", "config", "--get", "core.sshCommand");
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            p.waitFor();
+            if (!output.isBlank()) {
+                log.info("Using git config core.sshCommand: {}", output);
+                // Already handled by git itself, no need to override
+                return null;
+            }
+        } catch (Exception e) {
+            log.debug("Could not read git config core.sshCommand: {}", e.getMessage());
+        }
+
+        log.info("No SSH key found; git clone will use default SSH agent or credentials");
+        return null;
+    }
+
+    /**
+     * Convert an HTTPS GitHub URL to SSH format for SSH-based authentication.
+     * If the URL is already SSH or not a recognized HTTPS GitHub URL, return as-is.
+     */
+    private String toSshUrl(String repoUrl) {
+        if (repoUrl == null) {
+            return repoUrl;
+        }
+        // Already SSH format
+        if (repoUrl.startsWith("git@")) {
+            return repoUrl;
+        }
+        // Convert https://github.com/owner/repo(.git) to git@github.com:owner/repo.git
+        if (repoUrl.startsWith("https://github.com/") || repoUrl.startsWith("http://github.com/")) {
+            String path = repoUrl.replaceFirst("https?://github\\.com/", "");
+            if (!path.endsWith(".git")) {
+                path = path + ".git";
+            }
+            return "git@github.com:" + path;
+        }
+        // Non-GitHub URL, return as-is
+        return repoUrl;
     }
 
     public void shutdown() {
