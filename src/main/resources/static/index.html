@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Site Suggestion Platform</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<header>
+    <div class="container">
+        <h1 id="siteName" onclick="app.navigate('list')">Site Suggestions</h1>
+        <div class="header-actions">
+            <span id="userBadge" class="user-badge" style="display:none"></span>
+            <button id="settingsBtn" class="btn btn-outline btn-sm" style="display:none"
+                    onclick="app.navigate('settings')">Settings</button>
+            <button id="loginBtn" class="btn btn-outline btn-sm" onclick="app.navigate('login')">Login</button>
+            <button id="logoutBtn" class="btn btn-outline btn-sm" style="display:none"
+                    onclick="app.logout()">Logout</button>
+        </div>
+    </div>
+</header>
+
+<div class="container">
+
+    <!-- Setup View (first-time root admin creation) -->
+    <div id="setupView" class="view">
+        <div class="setup-container">
+            <h2>Welcome</h2>
+            <p>No administrator exists yet. Create the root admin account to get started.</p>
+            <div class="card">
+                <form id="setupForm" onsubmit="app.setup(event)">
+                    <div class="form-group">
+                        <label>Username</label>
+                        <input type="text" id="setupUsername" required minlength="3">
+                    </div>
+                    <div class="form-group">
+                        <label>Password</label>
+                        <input type="password" id="setupPassword" required minlength="6">
+                    </div>
+                    <button type="submit" class="btn btn-primary" style="width:100%">Create Root Admin</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Login View -->
+    <div id="loginView" class="view">
+        <div class="setup-container">
+            <h2>Login</h2>
+            <p>Sign in to manage suggestions.</p>
+            <div class="card">
+                <form id="loginForm" onsubmit="app.login(event)">
+                    <div class="form-group">
+                        <label>Username</label>
+                        <input type="text" id="loginUsername" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Password</label>
+                        <input type="password" id="loginPassword" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary" style="width:100%">Login</button>
+                </form>
+                <p style="text-align:center;margin-top:1rem">
+                    <a href="#" onclick="app.navigate('list')" style="color:var(--text-muted);font-size:0.85rem">
+                        Continue as guest
+                    </a>
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Suggestion List View -->
+    <div id="listView" class="view">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+            <h2>Suggestions</h2>
+            <button class="btn btn-primary" onclick="app.navigate('create')">+ New Suggestion</button>
+        </div>
+        <div id="suggestionList">
+            <div class="loading">Loading suggestions...</div>
+        </div>
+    </div>
+
+    <!-- Create Suggestion View -->
+    <div id="createView" class="view">
+        <span class="back-btn" onclick="app.navigate('list')">&larr; Back</span>
+        <h2>New Suggestion</h2>
+        <div class="card" style="margin-top:1rem">
+            <form id="createForm" onsubmit="app.createSuggestion(event)">
+                <div class="form-group" id="anonNameGroup">
+                    <label>Your Name (optional)</label>
+                    <input type="text" id="createAuthorName" placeholder="Anonymous">
+                </div>
+                <div class="form-group">
+                    <label>Title</label>
+                    <input type="text" id="createTitle" required maxlength="200"
+                           placeholder="Brief summary of your suggestion">
+                </div>
+                <div class="form-group">
+                    <label>Description</label>
+                    <textarea id="createDescription" required rows="5"
+                              placeholder="Describe the change you'd like to see. Be as specific as possible - what should change, why, and how it should work."></textarea>
+                </div>
+                <button type="submit" class="btn btn-primary">Submit Suggestion</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Suggestion Detail View -->
+    <div id="detailView" class="view">
+        <span class="back-btn" onclick="app.navigate('list')">&larr; Back to list</span>
+
+        <div class="card">
+            <div class="suggestion-header">
+                <div>
+                    <div class="suggestion-title" id="detailTitle"></div>
+                    <div class="suggestion-meta" id="detailMeta"></div>
+                </div>
+                <span class="status-badge" id="detailStatus"></span>
+            </div>
+            <p id="detailDescription" style="margin-top:0.75rem;white-space:pre-wrap"></p>
+
+            <div id="detailVoteSection" style="margin-top:1rem">
+                <div class="vote-controls">
+                    <button class="vote-btn" onclick="app.vote(1)">&#9650;</button>
+                    <span class="vote-count" id="detailUpVotes">0</span>
+                    <button class="vote-btn" onclick="app.vote(-1)">&#9660;</button>
+                    <span class="vote-count" id="detailDownVotes">0</span>
+                </div>
+            </div>
+
+            <div id="detailPhase" class="phase-indicator" style="display:none;margin-top:1rem">
+                <div class="spinner"></div>
+                <span id="detailPhaseText"></span>
+            </div>
+
+            <div id="detailPlan" class="card" style="display:none;margin-top:1rem;background:#f0fdf4">
+                <strong>Implementation Plan:</strong>
+                <pre id="detailPlanText" style="white-space:pre-wrap;margin-top:0.5rem;font-size:0.85rem"></pre>
+            </div>
+
+            <div id="adminActions" class="admin-actions" style="display:none">
+                <button class="btn btn-success btn-sm" onclick="app.approve()">Approve</button>
+                <button class="btn btn-danger btn-sm" onclick="app.deny()">Deny</button>
+            </div>
+        </div>
+
+        <!-- Thread / Chat -->
+        <h3 style="margin-top:1rem">Discussion Thread</h3>
+        <div class="thread-container" id="threadContainer"></div>
+
+        <div class="reply-box" id="replyBox">
+            <input type="text" id="replyInput" placeholder="Type your reply..."
+                   onkeydown="if(event.key==='Enter')app.reply()">
+            <button class="btn btn-primary btn-sm" onclick="app.reply()">Send</button>
+        </div>
+    </div>
+
+    <!-- Settings View -->
+    <div id="settingsView" class="view">
+        <span class="back-btn" onclick="app.navigate('list')">&larr; Back</span>
+        <h2>Site Settings</h2>
+        <div class="card" style="margin-top:1rem">
+            <div class="settings-grid">
+                <div class="form-group">
+                    <label>Site Name</label>
+                    <input type="text" id="settingSiteName">
+                </div>
+                <div class="form-group">
+                    <label>Target Repository URL</label>
+                    <input type="text" id="settingRepoUrl" placeholder="https://github.com/user/repo.git">
+                </div>
+                <div class="form-group">
+                    <label>Suggestion Timeout (minutes)</label>
+                    <input type="text" id="settingTimeout">
+                </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">Allow Anonymous Suggestions</span>
+                    <label class="toggle">
+                        <input type="checkbox" id="settingAnonymous">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">Allow Voting</span>
+                    <label class="toggle">
+                        <input type="checkbox" id="settingVoting">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">Require Admin Approval</span>
+                    <label class="toggle">
+                        <input type="checkbox" id="settingApproval">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <button class="btn btn-primary" onclick="app.saveSettings()" style="margin-top:1rem">
+                    Save Settings
+                </button>
+
+                <div style="margin-top:2rem;padding-top:1rem;border-top:1px solid var(--border)">
+                    <h3>Create Admin User</h3>
+                    <form onsubmit="app.createAdmin(event)" style="margin-top:0.75rem">
+                        <div class="form-group">
+                            <label>Username</label>
+                            <input type="text" id="newAdminUsername" required minlength="3">
+                        </div>
+                        <div class="form-group">
+                            <label>Password</label>
+                            <input type="password" id="newAdminPassword" required minlength="6">
+                        </div>
+                        <button type="submit" class="btn btn-outline">Create Admin</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<script src="/js/app.js"></script>
+</body>
+</html>
