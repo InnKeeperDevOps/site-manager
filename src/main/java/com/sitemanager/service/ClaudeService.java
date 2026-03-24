@@ -44,9 +44,15 @@ public class ClaudeService {
                 "2. If NOT detailed enough, ask specific clarifying questions to the user.\n" +
                 "3. If it IS detailed enough, look at the repository and create a concrete implementation plan.\n\n" +
                 "Respond in this JSON format:\n" +
-                "{\"status\": \"NEEDS_CLARIFICATION\" or \"PLAN_READY\", " +
+                "If clarification needed:\n" +
+                "{\"status\": \"NEEDS_CLARIFICATION\", " +
+                "\"message\": \"brief summary of what you need to know\", " +
+                "\"questions\": [\"specific question 1\", \"specific question 2\", ...]}\n\n" +
+                "If ready to plan:\n" +
+                "{\"status\": \"PLAN_READY\", " +
                 "\"message\": \"your response to the user\", " +
-                "\"plan\": \"implementation plan if ready, null otherwise\"}",
+                "\"plan\": \"implementation plan\"}\n\n" +
+                "IMPORTANT: When status is NEEDS_CLARIFICATION, you MUST include a \"questions\" array with each clarifying question as a separate string element. Each question should be self-contained and specific.",
                 repoUrl != null ? repoUrl : "not configured",
                 suggestionTitle,
                 suggestionDescription
