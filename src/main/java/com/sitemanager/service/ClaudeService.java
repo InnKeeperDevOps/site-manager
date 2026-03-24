@@ -58,12 +58,13 @@ public class ClaudeService {
                 suggestionDescription
         );
 
-        return sendToClaudeAsync(prompt, sessionId, null, progressCallback);
+        return sendToClaudeAsync(prompt, sessionId, null, null, progressCallback);
     }
 
     public CompletableFuture<String> continueConversation(String sessionId, String userMessage,
+                                                           String conversationContext,
                                                            Consumer<String> progressCallback) {
-        return sendToClaudeAsync(userMessage, sessionId, null, progressCallback);
+        return sendToClaudeAsync(userMessage, sessionId, null, conversationContext, progressCallback);
     }
 
     public CompletableFuture<String> executePlan(String sessionId, String plan, String workingDir,
@@ -82,15 +83,15 @@ public class ClaudeService {
                 workingDir, plan
         );
 
-        return sendToClaudeAsync(prompt, sessionId, workingDir, progressCallback);
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
     }
 
     private CompletableFuture<String> sendToClaudeAsync(String prompt, String sessionId,
-                                                         String workingDir,
+                                                         String workingDir, String conversationContext,
                                                          Consumer<String> progressCallback) {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                return sendToClaude(prompt, sessionId, workingDir, progressCallback);
+                return sendToClaude(prompt, sessionId, workingDir, conversationContext, progressCallback);
             } catch (Exception e) {
                 log.error("Claude CLI error for session {}: {}", sessionId, e.getMessage(), e);
                 return "{\"status\": \"ERROR\", \"message\": \"" +
@@ -100,16 +101,18 @@ public class ClaudeService {
     }
 
     private String sendToClaude(String prompt, String sessionId, String workingDir,
+                                 String conversationContext,
                                  Consumer<String> progressCallback) throws Exception {
         ProcessBuilder pb = new ProcessBuilder();
 
-        boolean isResume = sessionMap.containsKey(sessionId);
+        String cliSessionId = sessionMap.get(sessionId);
+        boolean isResume = cliSessionId != null;
 
         if (isResume) {
-            pb.command(claudeCliPath, "--resume", sessionMap.get(sessionId),
-                    "-p", prompt, "--output-format", "text", "--verbose");
+            pb.command(claudeCliPath, "--resume", cliSessionId,
+                    "-p", prompt, "--output-format", "json");
         } else {
-            pb.command(claudeCliPath, "-p", prompt, "--output-format", "text", "--verbose");
+            pb.command(claudeCliPath, "-p", prompt, "--output-format", "json");
         }
 
         if (workingDir != null) {
@@ -117,6 +120,7 @@ public class ClaudeService {
         }
 
         pb.redirectErrorStream(true);
+        pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
         Process process = pb.start();
 
         StringBuilder output = new StringBuilder();
@@ -132,20 +136,125 @@ public class ClaudeService {
         }
 
         int exitCode = process.waitFor();
-        String result = output.toString().trim();
+        String rawOutput = output.toString().trim();
 
-        if (!isResume) {
-            // Store the session for future continuation
-            // The actual session ID from Claude would be extracted from verbose output
-            // For now, use a mapping approach
-            sessionMap.put(sessionId, sessionId);
+        // Try to parse as JSON to extract session_id and result
+        String resultText = rawOutput;
+        String parsedCliSessionId = null;
+
+        try {
+            String jsonStr = extractJsonObject(rawOutput);
+            if (jsonStr != null) {
+                JsonNode root = objectMapper.readTree(jsonStr);
+
+                // Extract the CLI session ID for future --resume calls
+                if (root.has("session_id")) {
+                    parsedCliSessionId = root.get("session_id").asText();
+                }
+
+                // Extract the actual result text
+                if (root.has("result")) {
+                    resultText = root.get("result").asText();
+                }
+
+                // Check for error responses (e.g., dead session)
+                if (root.has("is_error") && root.get("is_error").asBoolean()) {
+                    String errorMsg = root.has("result") ? root.get("result").asText() : rawOutput;
+                    if (isResume && isDeadSessionError(errorMsg)) {
+                        return handleDeadSession(prompt, sessionId, workingDir,
+                                conversationContext, progressCallback);
+                    }
+                    log.warn("Claude CLI returned error for session {}: {}", sessionId, errorMsg);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Could not parse Claude CLI output as JSON: {}", e.getMessage());
+        }
+
+        // Fallback: check raw output for dead session error
+        if (isResume && isDeadSessionError(rawOutput)) {
+            return handleDeadSession(prompt, sessionId, workingDir,
+                    conversationContext, progressCallback);
+        }
+
+        // Store the CLI session ID for future --resume calls
+        if (parsedCliSessionId != null && !parsedCliSessionId.isBlank()) {
+            sessionMap.put(sessionId, parsedCliSessionId);
         }
 
         if (exitCode != 0) {
             log.warn("Claude CLI exited with code {} for session {}", exitCode, sessionId);
         }
 
-        return result;
+        return resultText;
+    }
+
+    private boolean isDeadSessionError(String output) {
+        return output != null && (
+                output.contains("No conversation found") ||
+                output.contains("session not found") ||
+                output.contains("Session not found"));
+    }
+
+    private String handleDeadSession(String prompt, String sessionId, String workingDir,
+                                      String conversationContext,
+                                      Consumer<String> progressCallback) throws Exception {
+        log.warn("Session {} is dead, starting fresh session with conversation context", sessionId);
+        sessionMap.remove(sessionId);
+
+        String rebuiltPrompt;
+        if (conversationContext != null && !conversationContext.isBlank()) {
+            rebuiltPrompt = "Here is the prior conversation history for context. " +
+                    "Continue naturally from where the conversation left off.\n\n" +
+                    "--- CONVERSATION HISTORY ---\n" +
+                    conversationContext +
+                    "\n--- END HISTORY ---\n\n" +
+                    "Now, the user says:\n\n" + prompt;
+        } else {
+            rebuiltPrompt = prompt;
+        }
+
+        // Retry with a fresh session (no resume, no context to avoid infinite loop)
+        return sendToClaude(rebuiltPrompt, sessionId, workingDir, null, progressCallback);
+    }
+
+    /**
+     * Extract the outermost JSON object from output that may contain
+     * non-JSON lines (warnings, verbose output, etc.) before or after the JSON.
+     */
+    private String extractJsonObject(String raw) {
+        int start = raw.indexOf('{');
+        if (start < 0) return null;
+
+        int depth = 0;
+        boolean inString = false;
+        boolean escaped = false;
+
+        for (int i = start; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\' && inString) {
+                escaped = true;
+                continue;
+            }
+            if (c == '"') {
+                inString = !inString;
+                continue;
+            }
+            if (!inString) {
+                if (c == '{') depth++;
+                else if (c == '}') {
+                    depth--;
+                    if (depth == 0) {
+                        return raw.substring(start, i + 1);
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     public String cloneRepository(String repoUrl, String suggestionId) throws Exception {
@@ -159,6 +268,7 @@ public class ClaudeService {
 
         ProcessBuilder pb = new ProcessBuilder("git", "clone", repoUrl, targetDir);
         pb.redirectErrorStream(true);
+        pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
         Process process = pb.start();
 
         try (BufferedReader reader = new BufferedReader(

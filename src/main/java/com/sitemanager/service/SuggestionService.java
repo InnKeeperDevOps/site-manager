@@ -192,9 +192,11 @@ public class SuggestionService {
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
 
+        String context = buildConversationContext(suggestionId);
         claudeService.continueConversation(
                 suggestion.getClaudeSessionId(),
                 claudePrompt.toString(),
+                context,
                 progress -> {
                     webSocketHandler.sendToSuggestion(suggestionId,
                             "{\"type\":\"progress\",\"content\":\"" +
@@ -220,9 +222,11 @@ public class SuggestionService {
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
 
+        String context = buildConversationContext(suggestionId);
         claudeService.continueConversation(
                 suggestion.getClaudeSessionId(),
                 message,
+                context,
                 progress -> {
                     webSocketHandler.sendToSuggestion(suggestionId,
                             "{\"type\":\"progress\",\"content\":\"" +
@@ -450,6 +454,30 @@ public class SuggestionService {
             log.error("Failed to parse pending questions", e);
             return null;
         }
+    }
+
+    private String buildConversationContext(Long suggestionId) {
+        List<SuggestionMessage> messages = messageRepository.findBySuggestionIdOrderByCreatedAtAsc(suggestionId);
+        if (messages == null || messages.isEmpty()) {
+            return null;
+        }
+
+        StringBuilder context = new StringBuilder();
+        for (SuggestionMessage msg : messages) {
+            switch (msg.getSenderType()) {
+                case USER:
+                    context.append("[User (").append(msg.getSenderName()).append(")]: ");
+                    break;
+                case AI:
+                    context.append("[Assistant]: ");
+                    break;
+                case SYSTEM:
+                    context.append("[System]: ");
+                    break;
+            }
+            context.append(msg.getContent()).append("\n\n");
+        }
+        return context.toString().trim();
     }
 
     private String extractPlan(String response) {
