@@ -125,20 +125,20 @@ public class SuggestionService {
 
         suggestion.setLastActivityAt(Instant.now());
 
-        // Add AI response as a message
-        addMessage(suggestionId, SenderType.AI, "Claude", response);
-
         // Try to parse JSON response to determine status
         if (response.contains("PLAN_READY")) {
+            // Post plan responses to the discussion
+            addMessage(suggestionId, SenderType.AI, "Claude", response);
             suggestion.setStatus(SuggestionStatus.PLANNED);
             suggestion.setCurrentPhase("Plan ready - awaiting admin approval");
             suggestion.setPlanSummary(extractPlan(response));
             suggestion.setPendingClarificationQuestions(null);
         } else if (response.contains("NEEDS_CLARIFICATION")) {
+            // Do NOT post clarification questions to the user discussion;
+            // they are delivered via WebSocket as structured prompts instead
             suggestion.setStatus(SuggestionStatus.DISCUSSING);
             suggestion.setCurrentPhase("Awaiting user clarification");
 
-            // Extract questions array from the response
             List<String> questions = extractQuestions(response);
             if (questions != null && !questions.isEmpty()) {
                 try {
@@ -146,10 +146,10 @@ public class SuggestionService {
                 } catch (JsonProcessingException e) {
                     log.error("Failed to serialize clarification questions", e);
                 }
-                // Broadcast clarification questions via WebSocket
                 broadcastClarificationQuestions(suggestionId, questions);
             }
         } else {
+            addMessage(suggestionId, SenderType.AI, "Claude", response);
             suggestion.setStatus(SuggestionStatus.DISCUSSING);
             suggestion.setCurrentPhase("In discussion with AI");
             suggestion.setPendingClarificationQuestions(null);
