@@ -7,9 +7,9 @@ RUN gradle bootJar --no-daemon -x test
 FROM eclipse-temurin:17-jre
 WORKDIR /app
 
-# Install Node.js (required by Claude CLI) and git
+# Install Node.js (required by Claude CLI), git, and openssh-client for SSH-based cloning
 RUN apt-get update && \
-    apt-get install -y curl git && \
+    apt-get install -y curl git openssh-client && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
     apt-get clean && rm -rf /var/lib/apt/lists/*

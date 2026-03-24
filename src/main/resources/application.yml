@@ -21,3 +21,4 @@ app:
   workspace-dir: /workspace
   claude-cli-path: claude
   suggestion-timeout-minutes: 1440
+  git-ssh-key-path: ${GIT_SSH_KEY_PATH:}

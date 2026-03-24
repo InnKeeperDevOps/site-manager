@@ -84,6 +84,20 @@ public class SuggestionService {
         String repoUrl = settingsService.getSettings().getTargetRepoUrl();
 
         suggestion.setStatus(SuggestionStatus.DISCUSSING);
+        suggestion.setCurrentPhase("Cloning repository for AI session...");
+        suggestionRepository.save(suggestion);
+        broadcastUpdate(suggestion);
+
+        // Clone main-repo/ for Claude to use during the evaluation session
+        if (repoUrl != null && !repoUrl.isBlank()) {
+            try {
+                String mainRepoDir = claudeService.cloneMainRepository(repoUrl);
+                log.info("Main repo cloned to {} for suggestion {}", mainRepoDir, suggestion.getId());
+            } catch (Exception e) {
+                log.warn("Failed to clone main-repo for evaluation session: {}", e.getMessage());
+            }
+        }
+
         suggestion.setCurrentPhase("AI is evaluating the suggestion...");
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
@@ -267,11 +281,11 @@ public class SuggestionService {
         }
 
         suggestion.setStatus(SuggestionStatus.IN_PROGRESS);
-        suggestion.setCurrentPhase("Cloning repository...");
+        suggestion.setCurrentPhase("Cloning repository into suggestion-" + suggestion.getId() + "-repo...");
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
 
-        // Clone repo and execute in background
+        // Clone repo into suggestion-{id}-repo/ and execute in background
         new Thread(() -> {
             try {
                 String workDir = claudeService.cloneRepository(repoUrl, suggestion.getId().toString());
