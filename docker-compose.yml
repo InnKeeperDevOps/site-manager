@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  site-manager:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - TARGET_REPO_URL=${TARGET_REPO_URL:-}
+      - SPRING_DATASOURCE_URL=jdbc:h2:file:/data/sitemanager;DB_CLOSE_ON_EXIT=FALSE
+      - SPRING_DATASOURCE_DRIVER_CLASS_NAME=org.h2.Driver
+      - SPRING_JPA_DATABASE_PLATFORM=org.hibernate.dialect.H2Dialect
+    volumes:
+      - app-data:/data
+      - workspace:/workspace
+    restart: unless-stopped
+
+volumes:
+  app-data:
+  workspace:
