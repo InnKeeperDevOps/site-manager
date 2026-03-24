@@ -117,6 +117,7 @@ public class ClaudeService {
         }
 
         pb.redirectErrorStream(true);
+        pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
         Process process = pb.start();
 
         StringBuilder output = new StringBuilder();
