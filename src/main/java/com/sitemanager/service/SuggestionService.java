@@ -110,6 +110,7 @@ public class SuggestionService {
                 suggestion.getDescription(),
                 repoUrl,
                 suggestion.getClaudeSessionId(),
+                claudeService.getMainRepoDir(),
                 progress -> {
                     // Send real-time progress via WebSocket
                     webSocketHandler.sendToSuggestion(suggestion.getId(),
@@ -128,10 +129,12 @@ public class SuggestionService {
 
         suggestion.setLastActivityAt(Instant.now());
 
+        // Extract the human-readable message from JSON, never show raw JSON in discussion
+        String displayMessage = extractMessage(response);
+
         // Try to parse JSON response to determine status
         if (response.contains("PLAN_READY")) {
-            // Post plan responses to the discussion
-            addMessage(suggestionId, SenderType.AI, "Claude", response);
+            addMessage(suggestionId, SenderType.AI, "Claude", displayMessage);
             suggestion.setStatus(SuggestionStatus.PLANNED);
             suggestion.setCurrentPhase("Plan ready - awaiting admin approval");
             suggestion.setPlanSummary(extractPlan(response));
@@ -152,7 +155,7 @@ public class SuggestionService {
                 broadcastClarificationQuestions(suggestionId, questions);
             }
         } else {
-            addMessage(suggestionId, SenderType.AI, "Claude", response);
+            addMessage(suggestionId, SenderType.AI, "Claude", displayMessage);
             suggestion.setStatus(SuggestionStatus.DISCUSSING);
             suggestion.setCurrentPhase("In discussion with AI");
             suggestion.setPendingClarificationQuestions(null);
@@ -214,6 +217,7 @@ public class SuggestionService {
                 suggestion.getClaudeSessionId(),
                 claudePrompt.toString(),
                 context,
+                claudeService.getMainRepoDir(),
                 progress -> {
                     webSocketHandler.sendToSuggestion(suggestionId,
                             "{\"type\":\"progress\",\"content\":\"" +
@@ -244,6 +248,7 @@ public class SuggestionService {
                 suggestion.getClaudeSessionId(),
                 message,
                 context,
+                claudeService.getMainRepoDir(),
                 progress -> {
                     webSocketHandler.sendToSuggestion(suggestionId,
                             "{\"type\":\"progress\",\"content\":\"" +
@@ -292,6 +297,11 @@ public class SuggestionService {
         new Thread(() -> {
             try {
                 String workDir = claudeService.cloneRepository(repoUrl, suggestion.getId().toString());
+
+                // Create a new branch from main for this suggestion's changes
+                String branchName = "suggestion-" + suggestion.getId();
+                claudeService.createBranch(workDir, branchName);
+
                 suggestion.setWorkingDirectory(workDir);
                 suggestion.setCurrentPhase("Executing implementation plan...");
                 suggestionRepository.save(suggestion);
@@ -497,6 +507,23 @@ public class SuggestionService {
         return context.toString().trim();
     }
 
+    private String extractMessage(String response) {
+        try {
+            String json = extractJsonBlock(response);
+            if (json != null) {
+                JsonNode root = objectMapper.readTree(json);
+                JsonNode messageNode = root.get("message");
+                if (messageNode != null && messageNode.isTextual()) {
+                    return messageNode.asText();
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to extract message from AI response: {}", e.getMessage());
+        }
+        // Fallback: return the raw response if no JSON message found
+        return response;
+    }
+
     private String extractPlan(String response) {
         // Try to extract plan from JSON response
         int planIdx = response.indexOf("\"plan\"");
@@ -589,6 +616,7 @@ public class SuggestionService {
                     suggestion.getClaudeSessionId(),
                     reEvalPrompt,
                     context,
+                    claudeService.getMainRepoDir(),
                     progress -> {
                         webSocketHandler.sendToSuggestion(suggestionId,
                                 "{\"type\":\"progress\",\"content\":\"" +
