@@ -10,9 +10,9 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - TARGET_REPO_URL=${TARGET_REPO_URL:-}
       - GIT_SSH_KEY_PATH=${GIT_SSH_KEY_PATH:-}
-      - SPRING_DATASOURCE_URL=jdbc:h2:file:/data/sitemanager;DB_CLOSE_ON_EXIT=FALSE
-      - SPRING_DATASOURCE_DRIVER_CLASS_NAME=org.h2.Driver
-      - SPRING_JPA_DATABASE_PLATFORM=org.hibernate.dialect.H2Dialect
+      - SPRING_DATASOURCE_URL=jdbc:sqlite:/data/sitemanager.db
+      - SPRING_DATASOURCE_DRIVER_CLASS_NAME=org.sqlite.JDBC
+      - SPRING_JPA_DATABASE_PLATFORM=org.hibernate.community.dialect.SQLiteDialect
     volumes:
       - app-data:/data
       - workspace:/workspace

@@ -22,12 +22,9 @@ public class SecurityConfig {
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
             .csrf(csrf -> csrf.disable())
-            .headers(headers -> headers.frameOptions(fo -> fo.sameOrigin()))
             .authorizeHttpRequests(auth -> auth
                 // Static resources
                 .requestMatchers("/", "/index.html", "/css/**", "/js/**", "/favicon.ico").permitAll()
-                // H2 console for dev
-                .requestMatchers("/h2-console/**").permitAll()
                 // Auth endpoints
                 .requestMatchers("/api/auth/**").permitAll()
                 // Settings read is public, write requires auth
