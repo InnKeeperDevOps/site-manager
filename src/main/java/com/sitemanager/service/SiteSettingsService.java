@@ -2,15 +2,26 @@ package com.sitemanager.service;
 
 import com.sitemanager.model.SiteSettings;
 import com.sitemanager.repository.SiteSettingsRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
 @Service
 public class SiteSettingsService {
 
-    private final SiteSettingsRepository settingsRepository;
+    private static final Logger log = LoggerFactory.getLogger(SiteSettingsService.class);
 
-    public SiteSettingsService(SiteSettingsRepository settingsRepository) {
+    private final SiteSettingsRepository settingsRepository;
+    private final ClaudeService claudeService;
+    private final ApplicationEventPublisher eventPublisher;
+
+    public SiteSettingsService(SiteSettingsRepository settingsRepository,
+                               ClaudeService claudeService,
+                               ApplicationEventPublisher eventPublisher) {
         this.settingsRepository = settingsRepository;
+        this.claudeService = claudeService;
+        this.eventPublisher = eventPublisher;
     }
 
     public SiteSettings getSettings() {
@@ -27,6 +38,22 @@ public class SiteSettingsService {
         current.setSuggestionTimeoutMinutes(updated.getSuggestionTimeoutMinutes());
         current.setRequireApproval(updated.isRequireApproval());
         current.setSiteName(updated.getSiteName());
-        return settingsRepository.save(current);
+        SiteSettings saved = settingsRepository.save(current);
+
+        // Re-clone the target repository into main-repo/ so files are up to date
+        String repoUrl = saved.getTargetRepoUrl();
+        if (repoUrl != null && !repoUrl.isBlank()) {
+            try {
+                log.info("Settings updated, re-cloning repository: {}", repoUrl);
+                claudeService.cloneMainRepository(repoUrl);
+
+                // Notify listeners that main-repo has been refreshed
+                eventPublisher.publishEvent(new MainRepoUpdatedEvent(this, repoUrl));
+            } catch (Exception e) {
+                log.error("Failed to re-clone repository after settings update: {}", e.getMessage(), e);
+            }
+        }
+
+        return saved;
     }
 }
