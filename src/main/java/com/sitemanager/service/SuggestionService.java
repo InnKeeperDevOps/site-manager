@@ -14,12 +14,14 @@ import com.sitemanager.repository.SuggestionRepository;
 import com.sitemanager.websocket.SuggestionWebSocketHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.File;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
@@ -47,6 +49,106 @@ public class SuggestionService {
         this.claudeService = claudeService;
         this.settingsService = settingsService;
         this.webSocketHandler = webSocketHandler;
+    }
+
+    /**
+     * On application startup, find any suggestions that were mid-execution
+     * (APPROVED, IN_PROGRESS, or TESTING) and resume Claude to continue the plan.
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    public void resumeSuggestionsOnStartup() {
+        List<Suggestion> toResume = suggestionRepository.findByStatusIn(
+                List.of(SuggestionStatus.APPROVED, SuggestionStatus.IN_PROGRESS, SuggestionStatus.TESTING)
+        );
+
+        if (toResume.isEmpty()) {
+            log.info("No approved/in-progress suggestions to resume on startup");
+            return;
+        }
+
+        log.info("Found {} suggestion(s) to resume on startup", toResume.size());
+
+        for (Suggestion suggestion : toResume) {
+            try {
+                if (suggestion.getStatus() == SuggestionStatus.APPROVED) {
+                    // Approved but execution never started (or crashed before cloning).
+                    // Re-trigger the full execution flow.
+                    log.info("Resuming approved suggestion {} — starting execution", suggestion.getId());
+                    addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                            "Application restarted. Resuming execution of approved suggestion...");
+                    executeApprovedSuggestion(suggestion);
+                } else {
+                    // IN_PROGRESS or TESTING — Claude was mid-execution. Resume it.
+                    resumeInProgressSuggestion(suggestion);
+                }
+            } catch (Exception e) {
+                log.error("Failed to resume suggestion {} on startup: {}", suggestion.getId(), e.getMessage(), e);
+                addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                        "Failed to resume after application restart: " + e.getMessage());
+                suggestion.setCurrentPhase("Resume failed — can retry");
+                suggestionRepository.save(suggestion);
+                broadcastUpdate(suggestion);
+            }
+        }
+    }
+
+    private void resumeInProgressSuggestion(Suggestion suggestion) {
+        String workDir = suggestion.getWorkingDirectory();
+
+        // If no working directory or it doesn't exist, fall back to full re-execution
+        if (workDir == null || !new File(workDir).exists()) {
+            log.info("Suggestion {} has no valid working directory, re-executing from scratch",
+                    suggestion.getId());
+            suggestion.setStatus(SuggestionStatus.APPROVED);
+            suggestionRepository.save(suggestion);
+            addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                    "Application restarted. Working directory not found — re-executing plan from scratch...");
+            executeApprovedSuggestion(suggestion);
+            return;
+        }
+
+        log.info("Resuming in-progress suggestion {} in {}", suggestion.getId(), workDir);
+
+        addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                "Application restarted. Resuming implementation — checking what remains from the plan...");
+
+        suggestion.setCurrentPhase("Resuming after restart — checking progress...");
+        suggestionRepository.save(suggestion);
+        broadcastUpdate(suggestion);
+
+        String plan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription();
+        String context = buildConversationContext(suggestion.getId());
+
+        String resumePrompt = "The application was restarted while you were executing an implementation plan. " +
+                "You need to resume where you left off.\n\n" +
+                "The implementation plan is:\n" + plan + "\n\n" +
+                "Please examine the current state of the code in this repository to determine:\n" +
+                "1. Which parts of the plan have already been completed\n" +
+                "2. Which parts still need to be done\n" +
+                "3. Whether any in-progress work needs to be fixed or finished\n\n" +
+                "Then continue executing the remaining steps of the plan. " +
+                "Write unit tests for all new code and run existing tests to ensure nothing is broken.\n\n" +
+                "Respond in JSON format for each phase:\n" +
+                "{\"phase\": \"description\", \"status\": \"IN_PROGRESS\" or \"COMPLETED\" or \"FAILED\", " +
+                "\"message\": \"details\", \"testsRun\": number, \"testsPassed\": number}";
+
+        String executionSessionId = claudeService.generateSessionId();
+
+        new Thread(() -> {
+            claudeService.continueConversation(
+                    executionSessionId,
+                    resumePrompt,
+                    context,
+                    workDir,
+                    progress -> {
+                        webSocketHandler.sendToSuggestion(suggestion.getId(),
+                                "{\"type\":\"execution_progress\",\"content\":\"" +
+                                        escapeJson(progress) + "\"}");
+                    }
+            ).thenAccept(result -> {
+                handleExecutionResult(suggestion.getId(), result);
+            });
+        }).start();
     }
 
     public List<Suggestion> getAllSuggestions() {
