@@ -129,10 +129,12 @@ public class SuggestionService {
 
         suggestion.setLastActivityAt(Instant.now());
 
+        // Extract the human-readable message from JSON, never show raw JSON in discussion
+        String displayMessage = extractMessage(response);
+
         // Try to parse JSON response to determine status
         if (response.contains("PLAN_READY")) {
-            // Post plan responses to the discussion
-            addMessage(suggestionId, SenderType.AI, "Claude", response);
+            addMessage(suggestionId, SenderType.AI, "Claude", displayMessage);
             suggestion.setStatus(SuggestionStatus.PLANNED);
             suggestion.setCurrentPhase("Plan ready - awaiting admin approval");
             suggestion.setPlanSummary(extractPlan(response));
@@ -153,7 +155,7 @@ public class SuggestionService {
                 broadcastClarificationQuestions(suggestionId, questions);
             }
         } else {
-            addMessage(suggestionId, SenderType.AI, "Claude", response);
+            addMessage(suggestionId, SenderType.AI, "Claude", displayMessage);
             suggestion.setStatus(SuggestionStatus.DISCUSSING);
             suggestion.setCurrentPhase("In discussion with AI");
             suggestion.setPendingClarificationQuestions(null);
@@ -503,6 +505,23 @@ public class SuggestionService {
             context.append(msg.getContent()).append("\n\n");
         }
         return context.toString().trim();
+    }
+
+    private String extractMessage(String response) {
+        try {
+            String json = extractJsonBlock(response);
+            if (json != null) {
+                JsonNode root = objectMapper.readTree(json);
+                JsonNode messageNode = root.get("message");
+                if (messageNode != null && messageNode.isTextual()) {
+                    return messageNode.asText();
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to extract message from AI response: {}", e.getMessage());
+        }
+        // Fallback: return the raw response if no JSON message found
+        return response;
     }
 
     private String extractPlan(String response) {
