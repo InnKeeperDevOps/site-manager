@@ -206,6 +206,27 @@ const app = {
             planEl.style.display = 'none';
         }
 
+        // PR link
+        const prEl = document.getElementById('detailPr');
+        const prLink = document.getElementById('detailPrLink');
+        if (suggestion.prUrl) {
+            prEl.style.display = '';
+            prLink.href = suggestion.prUrl;
+            prLink.textContent = suggestion.prUrl;
+        } else {
+            prEl.style.display = 'none';
+        }
+
+        // Changelog
+        const changelogEl = document.getElementById('detailChangelog');
+        const changelogText = document.getElementById('detailChangelogText');
+        if (suggestion.changelogEntry) {
+            changelogEl.style.display = '';
+            changelogText.textContent = suggestion.changelogEntry;
+        } else {
+            changelogEl.style.display = 'none';
+        }
+
         // Admin actions
         const isAdmin = this.state.role === 'ROOT_ADMIN' || this.state.role === 'ADMIN';
         const canApprove = ['PLANNED', 'DISCUSSING'].includes(suggestion.status);
@@ -505,6 +526,16 @@ const app = {
                 }
                 break;
             }
+            case 'pr_created': {
+                const prEl = document.getElementById('detailPr');
+                const prLink = document.getElementById('detailPrLink');
+                if (data.prUrl) {
+                    prEl.style.display = '';
+                    prLink.href = data.prUrl;
+                    prLink.textContent = data.prUrl;
+                }
+                break;
+            }
             case 'progress':
             case 'execution_progress': {
                 // Show progress in phase indicator
@@ -524,6 +555,7 @@ const app = {
         document.getElementById('settingSiteName').value = settings.siteName || '';
         document.getElementById('settingRepoUrl').value = settings.targetRepoUrl || '';
         document.getElementById('settingTimeout').value = settings.suggestionTimeoutMinutes || 1440;
+        document.getElementById('settingGithubToken').value = settings.githubToken || '';
         document.getElementById('settingAnonymous').checked = settings.allowAnonymousSuggestions;
         document.getElementById('settingVoting').checked = settings.allowVoting;
         document.getElementById('settingApproval').checked = settings.requireApproval;
@@ -536,6 +568,7 @@ const app = {
                 siteName: document.getElementById('settingSiteName').value,
                 targetRepoUrl: document.getElementById('settingRepoUrl').value,
                 suggestionTimeoutMinutes: parseInt(document.getElementById('settingTimeout').value) || 1440,
+                githubToken: document.getElementById('settingGithubToken').value || null,
                 allowAnonymousSuggestions: document.getElementById('settingAnonymous').checked,
                 allowVoting: document.getElementById('settingVoting').checked,
                 requireApproval: document.getElementById('settingApproval').checked

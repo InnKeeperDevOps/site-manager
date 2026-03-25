@@ -38,6 +38,7 @@ public class SiteSettingsService {
         current.setSuggestionTimeoutMinutes(updated.getSuggestionTimeoutMinutes());
         current.setRequireApproval(updated.isRequireApproval());
         current.setSiteName(updated.getSiteName());
+        current.setGithubToken(updated.getGithubToken());
         SiteSettings saved = settingsRepository.save(current);
 
         // Re-clone the target repository into main-repo/ so files are up to date

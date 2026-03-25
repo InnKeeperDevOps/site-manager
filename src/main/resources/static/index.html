@@ -140,6 +140,17 @@
                 <pre id="detailPlanText" style="white-space:pre-wrap;margin-top:0.5rem;font-size:0.85rem"></pre>
             </div>
 
+            <div id="detailPr" class="card" style="display:none;margin-top:1rem;background:#f0f4ff">
+                <strong>Pull Request:</strong>
+                <a id="detailPrLink" href="#" target="_blank" rel="noopener"
+                   style="margin-left:0.5rem;color:var(--primary);font-weight:600"></a>
+            </div>
+
+            <div id="detailChangelog" class="card" style="display:none;margin-top:1rem;background:#fffbf0">
+                <strong>Changelog:</strong>
+                <pre id="detailChangelogText" style="white-space:pre-wrap;margin-top:0.5rem;font-size:0.85rem"></pre>
+            </div>
+
             <div id="adminActions" class="admin-actions" style="display:none">
                 <button class="btn btn-success btn-sm" onclick="app.approve()">Approve</button>
                 <button class="btn btn-danger btn-sm" onclick="app.deny()">Deny</button>
@@ -201,6 +212,11 @@
                 <div class="form-group">
                     <label>Suggestion Timeout (minutes)</label>
                     <input type="text" id="settingTimeout">
+                </div>
+                <div class="form-group">
+                    <label>GitHub Token (for PR creation)</label>
+                    <input type="password" id="settingGithubToken"
+                           placeholder="ghp_... (leave blank to skip PR creation)">
                 </div>
                 <div class="toggle-row">
                     <span class="toggle-label">Allow Anonymous Suggestions</span>

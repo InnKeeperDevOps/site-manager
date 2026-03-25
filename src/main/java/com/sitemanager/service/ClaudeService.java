@@ -8,6 +8,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.*;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
@@ -598,6 +602,141 @@ public class ClaudeService {
         }
         // Non-GitHub URL, return as-is
         return repoUrl;
+    }
+
+    /**
+     * Push a branch to the remote origin.
+     */
+    public void pushBranch(String repoDir, String branchName) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder("git", "push", "-u", "origin", branchName);
+        pb.directory(new File(repoDir));
+        pb.redirectErrorStream(true);
+        pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+
+        String sshKeyPath = resolveGitSshKeyPath();
+        if (sshKeyPath != null) {
+            pb.environment().put("GIT_SSH_COMMAND",
+                    "ssh -i " + sshKeyPath + " -o StrictHostKeyChecking=no");
+        }
+
+        Process process = pb.start();
+        StringBuilder output = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append("\n");
+                log.info("Git push: {}", line);
+            }
+        }
+
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            throw new RuntimeException("Failed to push branch " + branchName + ": " + output.toString().trim());
+        }
+        log.info("Pushed branch {} in {}", branchName, repoDir);
+    }
+
+    /**
+     * Get the commit log for a branch relative to the default branch.
+     */
+    public String getCommitLog(String repoDir) throws Exception {
+        String defaultBranch = detectDefaultBranch(repoDir);
+        ProcessBuilder pb = new ProcessBuilder("git", "log",
+                "origin/" + defaultBranch + "..HEAD", "--pretty=format:%s");
+        pb.directory(new File(repoDir));
+        pb.redirectErrorStream(true);
+        Process process = pb.start();
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+        process.waitFor();
+        return output;
+    }
+
+    /**
+     * Create a pull request on GitHub using the REST API.
+     * Returns a map with "html_url" and "number" from the response.
+     */
+    public Map<String, Object> createGitHubPullRequest(String repoUrl, String branchName,
+                                                        String title, String body,
+                                                        String githubToken) throws Exception {
+        // Extract owner/repo from the URL
+        String ownerRepo = extractOwnerRepo(repoUrl);
+        if (ownerRepo == null) {
+            throw new RuntimeException("Cannot extract owner/repo from URL: " + repoUrl);
+        }
+
+        String defaultBranch = "main"; // GitHub default
+
+        String jsonBody = objectMapper.writeValueAsString(Map.of(
+                "title", title,
+                "body", body,
+                "head", branchName,
+                "base", defaultBranch
+        ));
+
+        HttpClient client = HttpClient.newHttpClient();
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create("https://api.github.com/repos/" + ownerRepo + "/pulls"))
+                .header("Authorization", "Bearer " + githubToken)
+                .header("Accept", "application/vnd.github+json")
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+                .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+
+        if (response.statusCode() == 422) {
+            // May fail if base branch is "master" instead of "main", retry
+            String retryBody = objectMapper.writeValueAsString(Map.of(
+                    "title", title,
+                    "body", body,
+                    "head", branchName,
+                    "base", "master"
+            ));
+            request = HttpRequest.newBuilder()
+                    .uri(URI.create("https://api.github.com/repos/" + ownerRepo + "/pulls"))
+                    .header("Authorization", "Bearer " + githubToken)
+                    .header("Accept", "application/vnd.github+json")
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(retryBody))
+                    .build();
+            response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        }
+
+        if (response.statusCode() != 201) {
+            throw new RuntimeException("GitHub API error (" + response.statusCode() + "): " + response.body());
+        }
+
+        JsonNode root = objectMapper.readTree(response.body());
+        String htmlUrl = root.get("html_url").asText();
+        int number = root.get("number").asInt();
+
+        return Map.of("html_url", htmlUrl, "number", number);
+    }
+
+    /**
+     * Extract "owner/repo" from a GitHub URL.
+     */
+    private String extractOwnerRepo(String repoUrl) {
+        if (repoUrl == null) return null;
+
+        // Handle SSH format: git@github.com:owner/repo.git
+        if (repoUrl.startsWith("git@github.com:")) {
+            String path = repoUrl.substring("git@github.com:".length());
+            if (path.endsWith(".git")) path = path.substring(0, path.length() - 4);
+            return path;
+        }
+
+        // Handle HTTPS format: https://github.com/owner/repo(.git)
+        if (repoUrl.contains("github.com/")) {
+            String path = repoUrl.replaceFirst(".*github\\.com/", "");
+            if (path.endsWith(".git")) path = path.substring(0, path.length() - 4);
+            // Remove trailing slash
+            if (path.endsWith("/")) path = path.substring(0, path.length() - 1);
+            return path;
+        }
+
+        return null;
     }
 
     public void shutdown() {

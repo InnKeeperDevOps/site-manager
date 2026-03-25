@@ -49,6 +49,15 @@ public class Suggestion {
     @Column(columnDefinition = "TEXT")
     private String pendingClarificationQuestions;
 
+    @Column
+    private String prUrl;
+
+    @Column
+    private Integer prNumber;
+
+    @Column(columnDefinition = "TEXT")
+    private String changelogEntry;
+
     @Column(nullable = false)
     private Instant createdAt;
 
@@ -105,4 +114,10 @@ public class Suggestion {
     public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }
     public Instant getLastActivityAt() { return lastActivityAt; }
     public void setLastActivityAt(Instant lastActivityAt) { this.lastActivityAt = lastActivityAt; }
+    public String getPrUrl() { return prUrl; }
+    public void setPrUrl(String prUrl) { this.prUrl = prUrl; }
+    public Integer getPrNumber() { return prNumber; }
+    public void setPrNumber(Integer prNumber) { this.prNumber = prNumber; }
+    public String getChangelogEntry() { return changelogEntry; }
+    public void setChangelogEntry(String changelogEntry) { this.changelogEntry = changelogEntry; }
 }
