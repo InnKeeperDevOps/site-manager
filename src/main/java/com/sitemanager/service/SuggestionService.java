@@ -110,6 +110,7 @@ public class SuggestionService {
                 suggestion.getDescription(),
                 repoUrl,
                 suggestion.getClaudeSessionId(),
+                claudeService.getMainRepoDir(),
                 progress -> {
                     // Send real-time progress via WebSocket
                     webSocketHandler.sendToSuggestion(suggestion.getId(),
@@ -214,6 +215,7 @@ public class SuggestionService {
                 suggestion.getClaudeSessionId(),
                 claudePrompt.toString(),
                 context,
+                claudeService.getMainRepoDir(),
                 progress -> {
                     webSocketHandler.sendToSuggestion(suggestionId,
                             "{\"type\":\"progress\",\"content\":\"" +
@@ -244,6 +246,7 @@ public class SuggestionService {
                 suggestion.getClaudeSessionId(),
                 message,
                 context,
+                claudeService.getMainRepoDir(),
                 progress -> {
                     webSocketHandler.sendToSuggestion(suggestionId,
                             "{\"type\":\"progress\",\"content\":\"" +
@@ -292,6 +295,11 @@ public class SuggestionService {
         new Thread(() -> {
             try {
                 String workDir = claudeService.cloneRepository(repoUrl, suggestion.getId().toString());
+
+                // Create a new branch from main for this suggestion's changes
+                String branchName = "suggestion-" + suggestion.getId();
+                claudeService.createBranch(workDir, branchName);
+
                 suggestion.setWorkingDirectory(workDir);
                 suggestion.setCurrentPhase("Executing implementation plan...");
                 suggestionRepository.save(suggestion);
@@ -589,6 +597,7 @@ public class SuggestionService {
                     suggestion.getClaudeSessionId(),
                     reEvalPrompt,
                     context,
+                    claudeService.getMainRepoDir(),
                     progress -> {
                         webSocketHandler.sendToSuggestion(suggestionId,
                                 "{\"type\":\"progress\",\"content\":\"" +

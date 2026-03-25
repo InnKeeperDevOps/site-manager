@@ -36,8 +36,40 @@ public class ClaudeService {
         return UUID.randomUUID().toString();
     }
 
+    public String getMainRepoDir() {
+        return workspaceDir + "/main-repo";
+    }
+
+    /**
+     * Create a new branch from the current HEAD in the given repo directory.
+     */
+    public void createBranch(String repoDir, String branchName) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder("git", "checkout", "-b", branchName);
+        pb.directory(new File(repoDir));
+        pb.redirectErrorStream(true);
+        pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+        Process process = pb.start();
+
+        StringBuilder output = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append("\n");
+                log.info("Git checkout -b: {}", line);
+            }
+        }
+
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            throw new RuntimeException("Failed to create branch " + branchName + ": " + output.toString().trim());
+        }
+        log.info("Created branch {} in {}", branchName, repoDir);
+    }
+
     public CompletableFuture<String> evaluateSuggestion(String suggestionTitle, String suggestionDescription,
                                                          String repoUrl, String sessionId,
+                                                         String workingDir,
                                                          Consumer<String> progressCallback) {
         String prompt = String.format(
                 "You are evaluating a site suggestion for a repository at: %s\n\n" +
@@ -62,13 +94,14 @@ public class ClaudeService {
                 suggestionDescription
         );
 
-        return sendToClaudeAsync(prompt, sessionId, null, null, progressCallback);
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
     }
 
     public CompletableFuture<String> continueConversation(String sessionId, String userMessage,
                                                            String conversationContext,
+                                                           String workingDir,
                                                            Consumer<String> progressCallback) {
-        return sendToClaudeAsync(userMessage, sessionId, null, conversationContext, progressCallback);
+        return sendToClaudeAsync(userMessage, sessionId, workingDir, conversationContext, progressCallback);
     }
 
     public CompletableFuture<String> executePlan(String sessionId, String plan, String workingDir,
