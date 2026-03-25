@@ -28,6 +28,9 @@ public class SiteSettings {
     @Column
     private String siteName = "Site Suggestion Platform";
 
+    @Column
+    private String githubToken;
+
     public SiteSettings() {}
 
     public Long getId() { return id; }
@@ -44,4 +47,6 @@ public class SiteSettings {
     public void setRequireApproval(boolean v) { this.requireApproval = v; }
     public String getSiteName() { return siteName; }
     public void setSiteName(String v) { this.siteName = v; }
+    public String getGithubToken() { return githubToken; }
+    public void setGithubToken(String v) { this.githubToken = v; }
 }

@@ -447,7 +447,13 @@ public class SuggestionService {
 
         if (result.contains("COMPLETED")) {
             suggestion.setStatus(SuggestionStatus.COMPLETED);
-            suggestion.setCurrentPhase("Implementation completed");
+            suggestion.setCurrentPhase("Implementation completed — creating PR...");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+
+            // Push branch and create PR in background
+            new Thread(() -> createPrForSuggestion(suggestion)).start();
+            return;
         } else if (result.contains("FAILED")) {
             suggestion.setStatus(SuggestionStatus.PLANNED);
             suggestion.setCurrentPhase("Execution failed - can retry");
@@ -458,6 +464,126 @@ public class SuggestionService {
 
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
+    }
+
+    private void createPrForSuggestion(Suggestion suggestion) {
+        String repoUrl = settingsService.getSettings().getTargetRepoUrl();
+        String githubToken = settingsService.getSettings().getGithubToken();
+        String branchName = "suggestion-" + suggestion.getId();
+        String workDir = suggestion.getWorkingDirectory();
+
+        // Step 1: Generate changelog entry
+        String changelog = generateChangelog(suggestion);
+        suggestion.setChangelogEntry(changelog);
+        suggestionRepository.save(suggestion);
+
+        // Step 2: Push branch
+        try {
+            suggestion.setCurrentPhase("Pushing branch to remote...");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+
+            claudeService.pushBranch(workDir, branchName);
+
+            addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                    "Branch `" + branchName + "` pushed to remote.");
+        } catch (Exception e) {
+            log.error("Failed to push branch for suggestion {}: {}", suggestion.getId(), e.getMessage(), e);
+            addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                    "Failed to push branch: " + e.getMessage());
+            suggestion.setCurrentPhase("Implementation completed (push failed)");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+            return;
+        }
+
+        // Step 3: Create PR
+        if (githubToken == null || githubToken.isBlank()) {
+            log.warn("No GitHub token configured, skipping PR creation for suggestion {}", suggestion.getId());
+            addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                    "Branch pushed but no GitHub token configured — PR creation skipped. " +
+                    "Configure a token in Settings to enable automatic PR creation.");
+            suggestion.setCurrentPhase("Implementation completed (branch pushed)");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+            return;
+        }
+
+        try {
+            suggestion.setCurrentPhase("Creating pull request...");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+
+            String prTitle = "Suggestion #" + suggestion.getId() + ": " + suggestion.getTitle();
+            String prBody = buildPrBody(suggestion);
+
+            var prResult = claudeService.createGitHubPullRequest(
+                    repoUrl, branchName, prTitle, prBody, githubToken);
+
+            String prUrl = (String) prResult.get("html_url");
+            int prNumber = (int) prResult.get("number");
+
+            suggestion.setPrUrl(prUrl);
+            suggestion.setPrNumber(prNumber);
+            suggestion.setCurrentPhase("Implementation completed — PR created");
+            suggestionRepository.save(suggestion);
+
+            addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                    "Pull request created: " + prUrl);
+
+            broadcastUpdate(suggestion);
+            // Send PR URL via WebSocket so frontend can display it immediately
+            webSocketHandler.sendToSuggestion(suggestion.getId(),
+                    "{\"type\":\"pr_created\",\"prUrl\":\"" + escapeJson(prUrl) +
+                    "\",\"prNumber\":" + prNumber + "}");
+
+        } catch (Exception e) {
+            log.error("Failed to create PR for suggestion {}: {}", suggestion.getId(), e.getMessage(), e);
+            addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                    "Branch pushed but PR creation failed: " + e.getMessage());
+            suggestion.setCurrentPhase("Implementation completed (PR creation failed)");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+        }
+    }
+
+    private String generateChangelog(Suggestion suggestion) {
+        StringBuilder entry = new StringBuilder();
+        entry.append("### Suggestion #").append(suggestion.getId())
+                .append(": ").append(suggestion.getTitle()).append("\n\n");
+
+        entry.append("**Author:** ").append(suggestion.getAuthorName() != null ?
+                suggestion.getAuthorName() : "Anonymous").append("\n");
+        entry.append("**Date:** ").append(java.time.LocalDate.now()).append("\n");
+        entry.append("**Branch:** `suggestion-").append(suggestion.getId()).append("`\n\n");
+
+        entry.append("**Description:**\n").append(suggestion.getDescription()).append("\n\n");
+
+        if (suggestion.getPlanSummary() != null) {
+            entry.append("**Implementation Plan:**\n").append(suggestion.getPlanSummary()).append("\n");
+        }
+
+        return entry.toString();
+    }
+
+    private String buildPrBody(Suggestion suggestion) {
+        StringBuilder body = new StringBuilder();
+        body.append("## Changelog\n\n");
+        body.append(suggestion.getChangelogEntry()).append("\n");
+
+        body.append("---\n\n");
+        body.append("*Automatically created by Site Suggestion Platform from ");
+        body.append("[Suggestion #").append(suggestion.getId()).append("]*\n\n");
+
+        // Link back to the suggestion in the platform
+        body.append("**Suggestion link:** `/suggestions/").append(suggestion.getId()).append("`\n\n");
+
+        if (suggestion.getUpVotes() > 0 || suggestion.getDownVotes() > 0) {
+            body.append("**Community votes:** ").append(suggestion.getUpVotes())
+                    .append(" up / ").append(suggestion.getDownVotes()).append(" down\n");
+        }
+
+        return body.toString();
     }
 
     @Transactional
