@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.*;
@@ -273,6 +274,176 @@ public class ClaudeService {
     public String cloneMainRepository(String repoUrl) throws Exception {
         String targetDir = workspaceDir + "/main-repo";
         return gitClone(repoUrl, targetDir);
+    }
+
+    /**
+     * Pull the latest changes in main-repo/. If the repo doesn't exist yet, clone it.
+     * Returns true if the pull brought in new changes (HEAD moved).
+     */
+    public boolean pullMainRepository(String repoUrl) throws Exception {
+        String targetDir = workspaceDir + "/main-repo";
+        File dir = new File(targetDir);
+        File gitDir = new File(targetDir, ".git");
+
+        if (!dir.exists() || !gitDir.exists()) {
+            cloneMainRepository(repoUrl);
+            return true;
+        }
+
+        // Get HEAD before pull
+        String headBefore = getHeadCommit(targetDir);
+
+        ProcessBuilder pb = new ProcessBuilder("git", "pull");
+        pb.directory(dir);
+        pb.redirectErrorStream(true);
+        pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+
+        String sshKeyPath = resolveGitSshKeyPath();
+        if (sshKeyPath != null) {
+            String sshCommand = "ssh -i " + sshKeyPath + " -o StrictHostKeyChecking=no";
+            pb.environment().put("GIT_SSH_COMMAND", sshCommand);
+        }
+
+        Process process = pb.start();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                log.info("Git pull main-repo: {}", line);
+            }
+        }
+
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            log.warn("Git pull failed (exit {}), falling back to fresh clone", exitCode);
+            cloneMainRepository(repoUrl);
+            return true;
+        }
+
+        // Get HEAD after pull
+        String headAfter = getHeadCommit(targetDir);
+        boolean changed = !headAfter.equals(headBefore);
+        if (changed) {
+            log.info("main-repo updated: {} -> {}", headBefore, headAfter);
+        } else {
+            log.info("main-repo already up to date at {}", headAfter);
+        }
+        return changed;
+    }
+
+    /**
+     * Merge the main-repo default branch into a suggestion repo's working branch.
+     * Returns true if the merge brought in new changes, false if already up to date.
+     * Throws on merge conflict or error.
+     */
+    public boolean mergeSuggestionRepoWithMain(String suggestionRepoDir) throws Exception {
+        File dir = new File(suggestionRepoDir);
+        if (!dir.exists() || !new File(suggestionRepoDir, ".git").exists()) {
+            log.warn("Suggestion repo does not exist: {}", suggestionRepoDir);
+            return false;
+        }
+
+        String headBefore = getHeadCommit(suggestionRepoDir);
+
+        // Fetch the latest from origin
+        ProcessBuilder fetchPb = new ProcessBuilder("git", "fetch", "origin");
+        fetchPb.directory(dir);
+        fetchPb.redirectErrorStream(true);
+        fetchPb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+        String sshKeyPath = resolveGitSshKeyPath();
+        if (sshKeyPath != null) {
+            fetchPb.environment().put("GIT_SSH_COMMAND",
+                    "ssh -i " + sshKeyPath + " -o StrictHostKeyChecking=no");
+        }
+        Process fetchProcess = fetchPb.start();
+        consumeStream(fetchProcess.getInputStream());
+        fetchProcess.waitFor();
+
+        // Detect default branch name (main or master)
+        String defaultBranch = detectDefaultBranch(suggestionRepoDir);
+
+        // Merge origin/<default-branch> into current branch
+        ProcessBuilder mergePb = new ProcessBuilder("git", "merge", "origin/" + defaultBranch);
+        mergePb.directory(dir);
+        mergePb.redirectErrorStream(true);
+        mergePb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+        Process mergeProcess = mergePb.start();
+
+        StringBuilder mergeOutput = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(mergeProcess.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                mergeOutput.append(line).append("\n");
+                log.info("Git merge suggestion-repo: {}", line);
+            }
+        }
+
+        int exitCode = mergeProcess.waitFor();
+        if (exitCode != 0) {
+            // Abort the failed merge so the repo is left clean
+            ProcessBuilder abortPb = new ProcessBuilder("git", "merge", "--abort");
+            abortPb.directory(dir);
+            abortPb.redirectErrorStream(true);
+            Process abortProcess = abortPb.start();
+            consumeStream(abortProcess.getInputStream());
+            abortProcess.waitFor();
+            throw new RuntimeException("Merge conflict in " + suggestionRepoDir +
+                    ": " + mergeOutput.toString().trim());
+        }
+
+        String headAfter = getHeadCommit(suggestionRepoDir);
+        boolean changed = !headAfter.equals(headBefore);
+        if (changed) {
+            log.info("Suggestion repo {} merged main: {} -> {}", suggestionRepoDir, headBefore, headAfter);
+        }
+        return changed;
+    }
+
+    /**
+     * Find all suggestion repo directories that currently exist on disk.
+     */
+    public List<String> findSuggestionRepoDirs() {
+        File workspace = new File(workspaceDir);
+        List<String> dirs = new java.util.ArrayList<>();
+        if (!workspace.exists()) return dirs;
+
+        File[] files = workspace.listFiles();
+        if (files == null) return dirs;
+
+        for (File f : files) {
+            if (f.isDirectory() && f.getName().startsWith("suggestion-") && f.getName().endsWith("-repo")) {
+                dirs.add(f.getAbsolutePath());
+            }
+        }
+        return dirs;
+    }
+
+    private String getHeadCommit(String repoDir) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder("git", "rev-parse", "HEAD");
+        pb.directory(new File(repoDir));
+        pb.redirectErrorStream(true);
+        Process process = pb.start();
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+        process.waitFor();
+        return output;
+    }
+
+    private String detectDefaultBranch(String repoDir) throws Exception {
+        // Check if origin/main exists
+        ProcessBuilder pb = new ProcessBuilder("git", "rev-parse", "--verify", "origin/main");
+        pb.directory(new File(repoDir));
+        pb.redirectErrorStream(true);
+        Process process = pb.start();
+        consumeStream(process.getInputStream());
+        int exitCode = process.waitFor();
+        return exitCode == 0 ? "main" : "master";
+    }
+
+    private void consumeStream(InputStream is) throws IOException {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+            while (reader.readLine() != null) { /* drain */ }
+        }
     }
 
     /**

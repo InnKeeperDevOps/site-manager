@@ -14,6 +14,8 @@ import com.sitemanager.repository.SuggestionRepository;
 import com.sitemanager.websocket.SuggestionWebSocketHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.event.EventListener;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -84,17 +86,18 @@ public class SuggestionService {
         String repoUrl = settingsService.getSettings().getTargetRepoUrl();
 
         suggestion.setStatus(SuggestionStatus.DISCUSSING);
-        suggestion.setCurrentPhase("Cloning repository for AI session...");
+        suggestion.setCurrentPhase("Pulling latest repository for AI session...");
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
 
-        // Clone main-repo/ for Claude to use during the evaluation session
+        // Pull latest main-repo/ so Claude always evaluates against the newest code
         if (repoUrl != null && !repoUrl.isBlank()) {
             try {
-                String mainRepoDir = claudeService.cloneMainRepository(repoUrl);
-                log.info("Main repo cloned to {} for suggestion {}", mainRepoDir, suggestion.getId());
+                boolean changed = claudeService.pullMainRepository(repoUrl);
+                log.info("Main repo {} for suggestion {}", changed ? "updated" : "already up to date",
+                        suggestion.getId());
             } catch (Exception e) {
-                log.warn("Failed to clone main-repo for evaluation session: {}", e.getMessage());
+                log.warn("Failed to pull main-repo for evaluation session: {}", e.getMessage());
             }
         }
 
@@ -517,5 +520,140 @@ public class SuggestionService {
             }
         }
         return s.length();
+    }
+
+    /**
+     * When main-repo is re-cloned (settings changed), merge main into all active
+     * suggestion repo branches and ask Claude to re-evaluate any that changed.
+     */
+    @Async
+    @EventListener
+    public void onMainRepoUpdated(MainRepoUpdatedEvent event) {
+        log.info("Main repo updated, merging into active suggestion repos...");
+
+        List<String> suggestionRepoDirs = claudeService.findSuggestionRepoDirs();
+        if (suggestionRepoDirs.isEmpty()) {
+            log.info("No suggestion repos to merge");
+            return;
+        }
+
+        // Find all active suggestions that have a working directory
+        List<SuggestionStatus> activeStatuses = List.of(
+                SuggestionStatus.DISCUSSING,
+                SuggestionStatus.PLANNED,
+                SuggestionStatus.APPROVED,
+                SuggestionStatus.IN_PROGRESS,
+                SuggestionStatus.TESTING
+        );
+
+        for (String repoDir : suggestionRepoDirs) {
+            try {
+                boolean changed = claudeService.mergeSuggestionRepoWithMain(repoDir);
+                if (changed) {
+                    // Find the suggestion that owns this repo and trigger re-evaluation
+                    triggerReEvaluationForRepo(repoDir, activeStatuses);
+                }
+            } catch (Exception e) {
+                log.error("Failed to merge main into {}: {}", repoDir, e.getMessage());
+                // Notify the suggestion owner about the merge conflict
+                notifyMergeConflict(repoDir, e.getMessage(), activeStatuses);
+            }
+        }
+    }
+
+    private void triggerReEvaluationForRepo(String repoDir, List<SuggestionStatus> activeStatuses) {
+        // Extract suggestion ID from directory name (e.g., "suggestion-42-repo")
+        String dirName = new java.io.File(repoDir).getName();
+        String idStr = dirName.replace("suggestion-", "").replace("-repo", "");
+        try {
+            Long suggestionId = Long.parseLong(idStr);
+            Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+            if (suggestion == null || !activeStatuses.contains(suggestion.getStatus())) {
+                return;
+            }
+
+            log.info("Main branch merged into suggestion {} repo — asking Claude to check for impact",
+                    suggestionId);
+
+            addMessage(suggestionId, SenderType.SYSTEM, "System",
+                    "The main repository has been updated. Checking if these changes affect this suggestion...");
+
+            suggestion.setCurrentPhase("Checking impact of main repo changes...");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+
+            String reEvalPrompt = buildReEvaluationPrompt(suggestion);
+            String context = buildConversationContext(suggestionId);
+
+            claudeService.continueConversation(
+                    suggestion.getClaudeSessionId(),
+                    reEvalPrompt,
+                    context,
+                    progress -> {
+                        webSocketHandler.sendToSuggestion(suggestionId,
+                                "{\"type\":\"progress\",\"content\":\"" +
+                                        escapeJson(progress) + "\"}");
+                    }
+            ).thenAccept(response -> {
+                handleAiResponse(suggestionId, response);
+            });
+
+        } catch (NumberFormatException e) {
+            log.warn("Could not parse suggestion ID from directory: {}", dirName);
+        }
+    }
+
+    private void notifyMergeConflict(String repoDir, String errorMessage,
+                                      List<SuggestionStatus> activeStatuses) {
+        String dirName = new java.io.File(repoDir).getName();
+        String idStr = dirName.replace("suggestion-", "").replace("-repo", "");
+        try {
+            Long suggestionId = Long.parseLong(idStr);
+            Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+            if (suggestion == null || !activeStatuses.contains(suggestion.getStatus())) {
+                return;
+            }
+
+            addMessage(suggestionId, SenderType.SYSTEM, "System",
+                    "The main repository was updated but merging into this suggestion's branch " +
+                    "caused a conflict. The suggestion may need to be re-evaluated. " +
+                    "Conflict details: " + errorMessage);
+
+            suggestion.setStatus(SuggestionStatus.DISCUSSING);
+            suggestion.setCurrentPhase("Merge conflict with updated main branch — needs attention");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+        } catch (NumberFormatException e) {
+            log.warn("Could not parse suggestion ID from directory: {}", dirName);
+        }
+    }
+
+    private String buildReEvaluationPrompt(Suggestion suggestion) {
+        return "The main repository branch has just been updated with new changes that have been " +
+                "merged into this suggestion's working branch.\n\n" +
+                "Original suggestion:\n" +
+                "Title: " + suggestion.getTitle() + "\n" +
+                "Description: " + suggestion.getDescription() + "\n" +
+                (suggestion.getPlanSummary() != null ?
+                        "Current plan: " + suggestion.getPlanSummary() + "\n" : "") +
+                "\nPlease review the merged changes and determine:\n" +
+                "1. Do the new changes from main affect this suggestion's implementation or plan?\n" +
+                "2. Does the plan need to be updated due to conflicts, overlapping changes, or new code?\n" +
+                "3. Are there any new questions for the user based on the updated codebase?\n\n" +
+                "Respond in JSON format:\n" +
+                "If the suggestion is NOT affected (plan is still valid):\n" +
+                "{\"status\": \"PLAN_READY\", " +
+                "\"message\": \"The recent main branch changes do not affect this suggestion. " +
+                "The existing plan remains valid.\", " +
+                "\"plan\": \"<the existing plan, unchanged>\"}\n\n" +
+                "If the suggestion IS affected and you need clarification:\n" +
+                "{\"status\": \"NEEDS_CLARIFICATION\", " +
+                "\"message\": \"The main branch has changed in ways that affect this suggestion.\", " +
+                "\"questions\": [\"specific question about how to proceed given the changes\"]}\n\n" +
+                "If the suggestion IS affected but you can update the plan:\n" +
+                "{\"status\": \"PLAN_READY\", " +
+                "\"message\": \"The plan has been updated to account for recent main branch changes.\", " +
+                "\"plan\": \"<updated implementation plan>\"}\n\n" +
+                "IMPORTANT: When status is NEEDS_CLARIFICATION, you MUST include a \"questions\" array.";
     }
 }
