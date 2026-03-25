@@ -147,9 +147,9 @@ public class ClaudeService {
 
         if (isResume) {
             pb.command(claudeCliPath, "--resume", cliSessionId,
-                    "-p", prompt, "--output-format", "json");
+                    "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions");
         } else {
-            pb.command(claudeCliPath, "-p", prompt, "--output-format", "json");
+            pb.command(claudeCliPath, "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions");
         }
 
         if (workingDir != null) {
