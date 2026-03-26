@@ -312,26 +312,32 @@ public class ClaudeService {
 
     public CompletableFuture<String> reviewExpertFeedback(String sessionId, String expertDisplayName,
                                                             String expertAnalysis, String proposedChanges,
-                                                            String currentPlan, String workingDir,
+                                                            String currentPlan, String reviewerRole,
+                                                            String reviewerPrompt, String workingDir,
                                                             Consumer<String> progressCallback) {
         String prompt = String.format(
-                "You are a senior reviewer. A %s has reviewed an implementation plan and provided feedback.\n\n" +
+                "%s\n\n" +
+                "A %s has reviewed an implementation plan and proposed changes. " +
+                "As the %s, evaluate whether these changes are warranted.\n\n" +
                 "Current plan:\n%s\n\n" +
                 "The %s's analysis:\n%s\n\n" +
                 "Their proposed changes:\n%s\n\n" +
-                "Evaluate whether these proposed changes improve the plan. Consider:\n" +
-                "- Do the changes address real issues or add unnecessary complexity?\n" +
-                "- Will the changes improve the outcome for the user?\n" +
-                "- Are the changes compatible with the overall approach?\n\n" +
+                "EVALUATION CRITERIA:\n" +
+                "- Do the proposed changes address a CRITICAL or MAJOR issue? Only approve changes that fix real problems.\n" +
+                "- Would the changes add unnecessary complexity or scope creep?\n" +
+                "- Are the changes compatible with the overall approach and goals?\n" +
+                "- From your perspective as %s, do these changes improve the plan for the user?\n\n" +
                 "Respond in this JSON format:\n" +
                 "{\"valid\": true/false, \"notes\": \"your assessment of why the changes are or aren't valuable\", " +
                 "\"apply\": true/false}\n\n" +
-                "Set apply=true ONLY if the changes genuinely improve the plan.",
-                expertDisplayName, currentPlan, expertDisplayName, expertAnalysis, proposedChanges
+                "Set apply=true ONLY if the changes fix a critical or major issue. " +
+                "Reject changes that are cosmetic, over-engineered, or add scope without clear value.",
+                reviewerPrompt, expertDisplayName, reviewerRole,
+                currentPlan, expertDisplayName, expertAnalysis, proposedChanges, reviewerRole
         );
 
         return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback,
-                "review-feedback:" + expertDisplayName, resolveExpertModel(), resolveExpertMaxTurns());
+                "review-feedback:" + reviewerRole + "<-" + expertDisplayName, resolveExpertModel(), resolveExpertMaxTurns());
     }
 
     private CompletableFuture<String> sendToClaudeAsync(String prompt, String sessionId,

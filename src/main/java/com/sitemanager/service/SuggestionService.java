@@ -668,8 +668,12 @@ public class SuggestionService {
             if ("CHANGES_PROPOSED".equals(status)) {
                 String proposedChanges = root.has("proposedChanges") ? root.get("proposedChanges").asText() : "";
 
-                // Send to reviewer Claude to validate
-                suggestion.setCurrentPhase("Reviewing " + expert.getDisplayName() + "'s recommendations...");
+                // Pick the right reviewer: Product Manager for UX/product experts,
+                // Software Architect for technical experts
+                ExpertRole reviewer = pickChangeReviewer(expert);
+
+                suggestion.setCurrentPhase(reviewer.getDisplayName() + " is evaluating " +
+                        expert.getDisplayName() + "'s recommendations...");
                 suggestionRepository.save(suggestion);
                 broadcastUpdate(suggestion);
 
@@ -682,6 +686,8 @@ public class SuggestionService {
                         analysis,
                         proposedChanges,
                         currentPlan,
+                        reviewer.getDisplayName(),
+                        reviewer.getReviewPrompt(),
                         claudeService.getMainRepoDir(),
                         progress -> {}
                 ).thenAccept(reviewerResponse -> {
@@ -865,6 +871,18 @@ public class SuggestionService {
                 "{\"type\":\"expert_note\"" +
                 ",\"expertName\":\"" + escapeJson(expertName) + "\"" +
                 ",\"note\":\"" + escapeJson(note) + "\"}");
+    }
+
+    /**
+     * Pick the appropriate expert to review proposed changes.
+     * Product Manager reviews UX/product/frontend changes.
+     * Software Architect reviews all other technical changes.
+     */
+    private ExpertRole pickChangeReviewer(ExpertRole proposingExpert) {
+        return switch (proposingExpert) {
+            case FRONTEND_ENGINEER, UX_EXPERT, QA_ENGINEER -> ExpertRole.PRODUCT_MANAGER;
+            default -> ExpertRole.SOFTWARE_ARCHITECT;
+        };
     }
 
     private boolean isSubstantiveAnalysis(String analysis) {
