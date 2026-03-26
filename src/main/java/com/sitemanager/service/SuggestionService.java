@@ -427,12 +427,20 @@ public class SuggestionService {
                 claudeService.createBranch(workDir, branchName);
 
                 suggestion.setWorkingDirectory(workDir);
-                suggestion.setCurrentPhase("Executing implementation plan...");
                 suggestionRepository.save(suggestion);
-                broadcastUpdate(suggestion);
 
                 addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
                         "Repository cloned. Starting implementation...");
+
+                // Set initial phase to first task if available
+                List<PlanTask> tasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestion.getId());
+                if (!tasks.isEmpty()) {
+                    suggestion.setCurrentPhase("Task 1/" + tasks.size() + ": " + tasks.get(0).getTitle());
+                } else {
+                    suggestion.setCurrentPhase("Executing implementation plan...");
+                }
+                suggestionRepository.save(suggestion);
+                broadcastUpdate(suggestion);
 
                 String executionSessionId = claudeService.generateSessionId();
                 String tasksJson = buildTasksJsonForExecution(suggestion.getId());
@@ -727,6 +735,29 @@ public class SuggestionService {
                 }
             } else if (newStatus == TaskStatus.COMPLETED || newStatus == TaskStatus.FAILED) {
                 task.setCompletedAt(Instant.now());
+
+                // Update phase to show progress
+                Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+                if (suggestion != null) {
+                    List<PlanTask> allTasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
+                    long completed = allTasks.stream().filter(t -> t.getStatus() == TaskStatus.COMPLETED).count();
+                    // +1 because current task save hasn't been flushed yet
+                    if (newStatus == TaskStatus.COMPLETED) completed++;
+                    long total = allTasks.size();
+                    if (completed >= total) {
+                        suggestion.setCurrentPhase("All " + total + " tasks completed — finalizing...");
+                    } else {
+                        // Find the next pending task
+                        String nextTask = allTasks.stream()
+                                .filter(t -> t.getStatus() == TaskStatus.PENDING && t.getTaskOrder() > taskOrder)
+                                .findFirst()
+                                .map(t -> "Task " + t.getTaskOrder() + "/" + total + ": " + t.getTitle())
+                                .orElse("Completed " + completed + "/" + total + " tasks");
+                        suggestion.setCurrentPhase(nextTask);
+                    }
+                    suggestionRepository.save(suggestion);
+                    broadcastUpdate(suggestion);
+                }
             }
 
             planTaskRepository.save(task);

@@ -162,7 +162,7 @@ const app = {
                         </div>
                         <span class="status-badge status-${s.status}">${s.status.replace('_', ' ')}</span>
                     </div>
-                    ${s.currentPhase ? `<div style="font-size:0.8rem;color:var(--text-muted);margin-top:0.5rem">${this.esc(s.currentPhase)}</div>` : ''}
+                    ${s.currentPhase ? `<div style="font-size:0.8rem;color:${s.status === 'IN_PROGRESS' ? 'var(--primary)' : 'var(--text-muted)'};margin-top:0.5rem">${s.status === 'IN_PROGRESS' ? '<span class="spinner" style="display:inline-block;width:12px;height:12px;margin-right:4px;vertical-align:middle"></span>' : ''}${this.esc(s.currentPhase)}</div>` : ''}
                 </div>
             `).join('');
         } catch (err) {
