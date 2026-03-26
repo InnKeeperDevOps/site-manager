@@ -396,6 +396,7 @@ textarea { resize: vertical; min-height: 80px; }
 }
 .task-icon.pending { background: #e2e8f0; color: #94a3b8; }
 .task-icon.in_progress { background: #dbeafe; color: #2563eb; animation: pulse 1.5s infinite; }
+.task-icon.reviewing { background: #fef3c7; color: #d97706; animation: pulse 1.5s infinite; }
 .task-icon.completed { background: #dcfce7; color: #16a34a; }
 .task-icon.failed { background: #fee2e2; color: #dc2626; }
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }

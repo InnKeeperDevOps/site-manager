@@ -125,16 +125,25 @@ public class ClaudeService {
                 "Instructions:\n" +
                 "1. Execute each task in order by its task number\n" +
                 "2. Write unit tests for all new code\n" +
-                "3. Run existing tests to ensure nothing is broken\n" +
-                "4. IMPORTANT: Before starting each task, output a JSON status line:\n" +
-                "{\"taskOrder\": number, \"status\": \"IN_PROGRESS\", \"message\": \"starting description\"}\n" +
-                "5. After completing each task, output a JSON status line:\n" +
-                "{\"taskOrder\": number, \"status\": \"COMPLETED\", \"message\": \"what was done\"}\n" +
-                "6. If a task fails, output:\n" +
-                "{\"taskOrder\": number, \"status\": \"FAILED\", \"message\": \"what went wrong\"}\n" +
-                "7. When ALL tasks are done, output a final summary:\n" +
+                "3. Run existing tests to ensure nothing is broken\n\n" +
+                "For EACH task, follow this workflow:\n\n" +
+                "Step A — Start the task:\n" +
+                "{\"taskOrder\": number, \"status\": \"IN_PROGRESS\", \"message\": \"starting description\"}\n\n" +
+                "Step B — Implement the task (write code, make changes)\n\n" +
+                "Step C — Review the task. After implementing, review your own code changes for this task:\n" +
+                "  - Verify the code changes actually fulfill the task requirements\n" +
+                "  - Check for bugs, missing edge cases, or incomplete implementation\n" +
+                "  - Run any relevant tests to confirm correctness\n" +
+                "Output a review status:\n" +
+                "{\"taskOrder\": number, \"status\": \"REVIEWING\", \"message\": \"reviewing: what you checked\"}\n\n" +
+                "Step D — If the review passes, mark the task completed:\n" +
+                "{\"taskOrder\": number, \"status\": \"COMPLETED\", \"message\": \"what was done and verified\"}\n" +
+                "If the review finds issues, fix them and re-review before marking completed.\n\n" +
+                "Step E — If a task cannot be completed, mark it failed:\n" +
+                "{\"taskOrder\": number, \"status\": \"FAILED\", \"message\": \"what went wrong\"}\n\n" +
+                "After ALL tasks pass review, output a final summary:\n" +
                 "{\"status\": \"COMPLETED\", \"message\": \"summary\", \"testsRun\": number, \"testsPassed\": number}\n" +
-                "8. If the overall execution fails:\n" +
+                "If the overall execution fails:\n" +
                 "{\"status\": \"FAILED\", \"message\": \"what went wrong\"}",
                 workingDir, plan, tasksJson != null ? tasksJson : "No structured tasks — follow the plan above."
         );

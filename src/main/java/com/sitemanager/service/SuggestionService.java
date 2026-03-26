@@ -147,11 +147,15 @@ public class SuggestionService {
                 "3. Whether any in-progress work needs to be fixed or finished\n\n" +
                 "Then continue executing the remaining steps of the plan. " +
                 "Write unit tests for all new code and run existing tests to ensure nothing is broken.\n\n" +
-                "IMPORTANT: Before starting each task, output a JSON status line:\n" +
-                "{\"taskOrder\": number, \"status\": \"IN_PROGRESS\", \"message\": \"starting description\"}\n" +
-                "After completing each task, output:\n" +
-                "{\"taskOrder\": number, \"status\": \"COMPLETED\", \"message\": \"what was done\"}\n" +
-                "When ALL tasks are done, output a final summary:\n" +
+                "For EACH task, follow this workflow:\n" +
+                "1. Start: {\"taskOrder\": N, \"status\": \"IN_PROGRESS\", \"message\": \"starting description\"}\n" +
+                "2. Implement the task\n" +
+                "3. Review your code changes — verify they fulfill the task, check for bugs, run tests:\n" +
+                "   {\"taskOrder\": N, \"status\": \"REVIEWING\", \"message\": \"reviewing: what you checked\"}\n" +
+                "4. If review passes, mark completed:\n" +
+                "   {\"taskOrder\": N, \"status\": \"COMPLETED\", \"message\": \"what was done and verified\"}\n" +
+                "   If review finds issues, fix them and re-review before marking completed.\n\n" +
+                "When ALL tasks pass review, output a final summary:\n" +
                 "{\"status\": \"COMPLETED\", \"message\": \"summary\", \"testsRun\": number, \"testsPassed\": number}";
 
         String executionSessionId = claudeService.generateSessionId();
@@ -728,8 +732,16 @@ public class SuggestionService {
                 Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
                 if (suggestion != null) {
                     List<PlanTask> allTasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
-                    long completed = allTasks.stream().filter(t -> t.getStatus() == TaskStatus.COMPLETED).count();
                     suggestion.setCurrentPhase("Task " + taskOrder + "/" + allTasks.size() + ": " + task.getTitle());
+                    suggestionRepository.save(suggestion);
+                    broadcastUpdate(suggestion);
+                }
+            } else if (newStatus == TaskStatus.REVIEWING) {
+                // Update phase to show review in progress
+                Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+                if (suggestion != null) {
+                    List<PlanTask> allTasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
+                    suggestion.setCurrentPhase("Reviewing task " + taskOrder + "/" + allTasks.size() + ": " + task.getTitle());
                     suggestionRepository.save(suggestion);
                     broadcastUpdate(suggestion);
                 }

@@ -303,7 +303,7 @@ const app = {
         document.getElementById('taskProgressFill').style.width = pct + '%';
 
         // Start/stop elapsed time timer for in-progress tasks
-        const hasActiveTask = tasks.some(t => t.status === 'IN_PROGRESS' && t.startedAt);
+        const hasActiveTask = tasks.some(t => (t.status === 'IN_PROGRESS' || t.status === 'REVIEWING') && t.startedAt);
         if (hasActiveTask && !this.state.taskTimer) {
             this.state.taskTimer = setInterval(() => this.renderTasks(), 10000);
         } else if (!hasActiveTask && this.state.taskTimer) {
@@ -312,10 +312,11 @@ const app = {
         }
 
         listEl.innerHTML = tasks.map(t => {
-            const icons = { PENDING: '○', IN_PROGRESS: '◉', COMPLETED: '✓', FAILED: '✗' };
+            const icons = { PENDING: '○', IN_PROGRESS: '◉', REVIEWING: '⟳', COMPLETED: '✓', FAILED: '✗' };
             const icon = icons[t.status] || '○';
             const statusClass = t.status.toLowerCase();
             const titleClass = t.status === 'COMPLETED' ? 'task-title completed' : 'task-title';
+            const statusLabel = t.status === 'REVIEWING' ? ' — reviewing' : (t.status === 'IN_PROGRESS' ? ' — in progress' : '');
 
             let meta = '';
             if (t.estimatedMinutes) meta += `~${t.estimatedMinutes} min`;
@@ -331,7 +332,7 @@ const app = {
             return `<div class="task-item" data-task-order="${t.taskOrder}">
                 <div class="task-icon ${statusClass}">${icon}</div>
                 <div class="task-body">
-                    <div class="${titleClass}">${t.taskOrder}. ${this.esc(t.title)}</div>
+                    <div class="${titleClass}">${t.taskOrder}. ${this.esc(t.title)}${statusLabel ? `<span style="font-weight:400;font-size:0.8rem;color:${t.status === 'REVIEWING' ? '#d97706' : '#2563eb'}">${statusLabel}</span>` : ''}</div>
                     ${t.description ? `<div class="task-desc">${this.esc(t.description)}</div>` : ''}
                     ${meta ? `<div class="task-meta">${meta}</div>` : ''}
                 </div>
