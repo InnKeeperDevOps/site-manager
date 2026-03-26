@@ -2,6 +2,8 @@ package com.sitemanager.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sitemanager.model.SiteSettings;
 import com.sitemanager.repository.SiteSettingsRepository;
 import org.slf4j.Logger;
@@ -29,7 +31,9 @@ public class ClaudeService {
     private static final int MAX_LOG_PROMPT_LENGTH = 500;
     private static final int MAX_LOG_RESPONSE_LENGTH = 1000;
     private final ExecutorService executor = Executors.newCachedThreadPool();
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper = new ObjectMapper()
+            .registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
     private final Map<String, String> sessionMap = new ConcurrentHashMap<>();
     private final AtomicLong requestCounter = new AtomicLong(0);
 
@@ -937,7 +941,10 @@ public class ClaudeService {
             throw new RuntimeException("Cannot extract owner/repo from URL: " + repoUrl);
         }
 
-        String defaultBranch = "main"; // GitHub default
+        // Fetch the repository's actual default branch from the GitHub API
+        HttpClient client = HttpClient.newHttpClient();
+        String defaultBranch = fetchDefaultBranch(client, ownerRepo, githubToken);
+        log.info("Using default branch '{}' as PR base for {}", defaultBranch, ownerRepo);
 
         String jsonBody = objectMapper.writeValueAsString(Map.of(
                 "title", title,
@@ -946,7 +953,6 @@ public class ClaudeService {
                 "base", defaultBranch
         ));
 
-        HttpClient client = HttpClient.newHttpClient();
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create("https://api.github.com/repos/" + ownerRepo + "/pulls"))
                 .header("Authorization", "Bearer " + githubToken)
@@ -957,24 +963,6 @@ public class ClaudeService {
 
         HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
 
-        if (response.statusCode() == 422) {
-            // May fail if base branch is "master" instead of "main", retry
-            String retryBody = objectMapper.writeValueAsString(Map.of(
-                    "title", title,
-                    "body", body,
-                    "head", branchName,
-                    "base", "master"
-            ));
-            request = HttpRequest.newBuilder()
-                    .uri(URI.create("https://api.github.com/repos/" + ownerRepo + "/pulls"))
-                    .header("Authorization", "Bearer " + githubToken)
-                    .header("Accept", "application/vnd.github+json")
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(retryBody))
-                    .build();
-            response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        }
-
         if (response.statusCode() != 201) {
             throw new RuntimeException("GitHub API error (" + response.statusCode() + "): " + response.body());
         }
@@ -984,6 +972,35 @@ public class ClaudeService {
         int number = root.get("number").asInt();
 
         return Map.of("html_url", htmlUrl, "number", number);
+    }
+
+    /**
+     * Fetch the default branch name for a GitHub repository via the REST API.
+     * Falls back to "main" if the API call fails.
+     */
+    private String fetchDefaultBranch(HttpClient client, String ownerRepo, String githubToken) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("https://api.github.com/repos/" + ownerRepo))
+                    .header("Authorization", "Bearer " + githubToken)
+                    .header("Accept", "application/vnd.github+json")
+                    .GET()
+                    .build();
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                JsonNode repo = objectMapper.readTree(response.body());
+                JsonNode branch = repo.get("default_branch");
+                if (branch != null && !branch.isNull()) {
+                    return branch.asText();
+                }
+            }
+            log.warn("Could not fetch default branch for {} (status={}), falling back to 'main'",
+                    ownerRepo, response.statusCode());
+        } catch (Exception e) {
+            log.warn("Failed to fetch default branch for {}: {}, falling back to 'main'",
+                    ownerRepo, e.getMessage());
+        }
+        return "main";
     }
 
     /**
