@@ -966,6 +966,9 @@ public class SuggestionService {
         addMessage(suggestionId, SenderType.AI, "Claude", result);
 
         if (result.contains("COMPLETED")) {
+            // Mark all remaining non-completed tasks as COMPLETED
+            markRemainingTasksCompleted(suggestionId);
+
             suggestion.setStatus(SuggestionStatus.COMPLETED);
             suggestion.setCurrentPhase("Work completed — submitting changes...");
             suggestionRepository.save(suggestion);
@@ -1263,6 +1266,23 @@ public class SuggestionService {
             broadcastTaskUpdate(suggestionId, task);
         } catch (Exception e) {
             // Not a task status line — just normal progress text, ignore
+        }
+    }
+
+    private void markRemainingTasksCompleted(Long suggestionId) {
+        List<PlanTask> tasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
+        for (PlanTask task : tasks) {
+            if (task.getStatus() != TaskStatus.COMPLETED && task.getStatus() != TaskStatus.FAILED) {
+                task.setStatus(TaskStatus.COMPLETED);
+                if (task.getCompletedAt() == null) {
+                    task.setCompletedAt(Instant.now());
+                }
+                if (task.getStartedAt() == null) {
+                    task.setStartedAt(task.getCompletedAt());
+                }
+                planTaskRepository.save(task);
+                broadcastTaskUpdate(suggestionId, task);
+            }
         }
     }
 

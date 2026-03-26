@@ -365,6 +365,7 @@ const app = {
     updateTask(taskData) {
         const tasks = this.state.tasks;
         const idx = tasks.findIndex(t => t.taskOrder === taskData.taskOrder);
+        const prevStatus = idx >= 0 ? tasks[idx].status : null;
         if (idx >= 0) {
             tasks[idx] = { ...tasks[idx], ...taskData };
         } else {
@@ -372,6 +373,23 @@ const app = {
             tasks.sort((a, b) => a.taskOrder - b.taskOrder);
         }
         this.renderTasks();
+
+        // Animate the changed task if status transitioned
+        if (taskData.status && taskData.status !== prevStatus) {
+            const taskEl = document.querySelector(`.task-item[data-task-order="${taskData.taskOrder}"]`);
+            if (taskEl) {
+                let animClass = '';
+                if (taskData.status === 'COMPLETED') animClass = 'just-completed';
+                else if (taskData.status === 'FAILED') animClass = 'just-failed';
+                else if (taskData.status === 'IN_PROGRESS') animClass = 'just-started';
+                if (animClass) {
+                    taskEl.classList.add(animClass);
+                    setTimeout(() => taskEl.classList.remove(animClass), 1500);
+                }
+                // Scroll the task into view
+                taskEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+        }
     },
 
     // --- Expert Review UI ---

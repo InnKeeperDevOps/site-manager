@@ -400,6 +400,25 @@ textarea { resize: vertical; min-height: 80px; }
 .task-icon.completed { background: #dcfce7; color: #16a34a; }
 .task-icon.failed { background: #fee2e2; color: #dc2626; }
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+@keyframes taskComplete {
+    0% { background: #dcfce7; }
+    50% { background: #bbf7d0; }
+    100% { background: transparent; }
+}
+@keyframes taskFail {
+    0% { background: #fee2e2; }
+    50% { background: #fecaca; }
+    100% { background: transparent; }
+}
+@keyframes taskStart {
+    0% { background: #dbeafe; }
+    50% { background: #bfdbfe; }
+    100% { background: transparent; }
+}
+.task-item { transition: background 0.5s ease; }
+.task-item.just-completed { animation: taskComplete 1.5s ease; }
+.task-item.just-failed { animation: taskFail 1.5s ease; }
+.task-item.just-started { animation: taskStart 1.5s ease; }
 .task-body { flex: 1; min-width: 0; }
 .task-title { font-size: 0.9rem; font-weight: 500; }
 .task-title.completed { text-decoration: line-through; color: #94a3b8; }
