@@ -36,3 +36,6 @@ app:
   # Max turns for expert reviews (limits tool-use loops). Default 3.
   claude-max-turns-expert: ${CLAUDE_MAX_TURNS_EXPERT:3}
   git-ssh-key-path: ${GIT_SSH_KEY_PATH:}
+  # Enable verbose CLI logging: logs full command, real-time stdout, and response at INFO level.
+  # Also passes --verbose to the Claude CLI subprocess for turn-by-turn output.
+  claude-verbose: ${CLAUDE_VERBOSE:false}

@@ -51,6 +51,9 @@ public class ClaudeService {
     @Value("${app.claude-timeout-minutes:30}")
     private int claudeTimeoutMinutes;
 
+    @Value("${app.claude-verbose:false}")
+    private boolean claudeVerbose;
+
     @Value("${app.claude-model:}")
     private String claudeModelDefault;
 
@@ -497,6 +500,9 @@ public class ClaudeService {
             command.add("--max-turns");
             command.add(String.valueOf(maxTurns));
         }
+        if (claudeVerbose) {
+            command.add("--verbose");
+        }
         command.add("--dangerously-skip-permissions");
 
         ProcessBuilder pb = new ProcessBuilder(command);
@@ -516,12 +522,18 @@ public class ClaudeService {
         pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
 
         // Log the request
-        log.info("{} session={} resume={} model={} maxTurns={} workDir={} promptLength={}",
+        log.info("{} session={} resume={} model={} maxTurns={} verbose={} workDir={} promptLength={}",
                 logPrefix, sessionId, isResume,
                 (model != null && !model.isBlank()) ? model : "default",
                 maxTurns > 0 ? maxTurns : "unlimited",
+                claudeVerbose,
                 workingDir, prompt.length());
-        log.debug("{} prompt: {}", logPrefix, truncate(prompt, MAX_LOG_PROMPT_LENGTH));
+        if (claudeVerbose) {
+            log.info("{} command: {}", logPrefix, String.join(" ", command));
+            log.info("{} prompt: {}", logPrefix, truncate(prompt, MAX_LOG_PROMPT_LENGTH));
+        } else {
+            log.debug("{} prompt: {}", logPrefix, truncate(prompt, MAX_LOG_PROMPT_LENGTH));
+        }
 
         Process process = pb.start();
 
@@ -531,7 +543,10 @@ public class ClaudeService {
             String line;
             while ((line = reader.readLine()) != null) {
                 output.append(line).append("\n");
-                if (progressCallback != null) {
+                if (claudeVerbose) {
+                    log.info("{} [stdout] {}", logPrefix, line);
+                }
+                if (progressCallback != null && !isCliJsonEnvelope(line)) {
                     progressCallback.accept(line);
                 }
             }
@@ -606,7 +621,11 @@ public class ClaudeService {
         }
 
         // Log response summary
-        log.debug("{} response: {}", logPrefix, truncate(resultText, MAX_LOG_RESPONSE_LENGTH));
+        if (claudeVerbose) {
+            log.info("{} response: {}", logPrefix, truncate(resultText, MAX_LOG_RESPONSE_LENGTH));
+        } else {
+            log.debug("{} response: {}", logPrefix, truncate(resultText, MAX_LOG_RESPONSE_LENGTH));
+        }
 
         return resultText;
     }
@@ -615,6 +634,18 @@ public class ClaudeService {
         if (text == null) return "null";
         if (text.length() <= maxLength) return text;
         return text.substring(0, maxLength) + "...[truncated, total=" + text.length() + "]";
+    }
+
+    /**
+     * Detect lines that are part of the Claude CLI JSON result envelope
+     * (e.g. {"type":"result","subtype":"success",...}) so they are not
+     * forwarded as raw progress to the UI.
+     */
+    private static boolean isCliJsonEnvelope(String line) {
+        if (line == null) return false;
+        String trimmed = line.trim();
+        return trimmed.startsWith("{") && trimmed.contains("\"type\"") &&
+                (trimmed.contains("\"result\"") || trimmed.contains("\"system\""));
     }
 
     private boolean isDeadSessionError(String output) {
