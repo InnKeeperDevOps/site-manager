@@ -19,7 +19,8 @@ const app = {
             currentStep: -1,
             totalSteps: 0,
             experts: [],
-            active: false
+            active: false,
+            notes: []
         },
         expertClarification: {
             questions: [],
@@ -390,27 +391,68 @@ const app = {
         document.getElementById('expertProgress').textContent =
             `${completed}/${er.totalSteps} reviewed${roundLabel}`;
 
+        const notes = er.notes || [];
         listEl.innerHTML = er.experts.map((e, i) => {
             const icons = { pending: '○', in_progress: '◉', completed: '✓' };
             const icon = icons[e.status] || '○';
             const statusClass = 'expert-' + e.status;
             const label = e.status === 'in_progress' ? ' — reviewing' : '';
+            const expertNote = notes.find(n => n.expertName === e.name);
+            const noteSnippet = expertNote ? expertNote.note.substring(0, 120) + (expertNote.note.length > 120 ? '...' : '') : '';
             return `<div class="expert-item ${statusClass}">
                 <div class="expert-icon">${icon}</div>
-                <div class="expert-name">${this.esc(e.name)}${label ? `<span style="font-weight:400;font-size:0.8rem;color:#7c3aed">${label}</span>` : ''}</div>
+                <div class="expert-name">${this.esc(e.name)}${label ? `<span style="font-weight:400;font-size:0.8rem;color:#7c3aed">${label}</span>` : ''}${noteSnippet ? `<div style="font-weight:400;font-size:0.78rem;color:#6b7280;margin-top:2px;">${this.esc(noteSnippet)}</div>` : ''}</div>
             </div>`;
         }).join('');
+
+        this.renderExpertNotes();
     },
 
     updateExpertReview(data) {
+        const prevNotes = this.state.expertReview.notes || [];
+        // Reset notes when a new round starts
+        const isNewRound = data.round && data.round !== this.state.expertReview.round && data.currentStep === 0;
         this.state.expertReview = {
             currentStep: data.currentStep,
             totalSteps: data.totalSteps,
             experts: data.experts,
             round: data.round || 1,
-            active: true
+            active: true,
+            notes: isNewRound ? [] : prevNotes
         };
         this.renderExpertReview();
+    },
+
+    addExpertNote(expertName, note) {
+        if (!this.state.expertReview.notes) {
+            this.state.expertReview.notes = [];
+        }
+        this.state.expertReview.notes.push({ expertName, note });
+        this.renderExpertNotes();
+    },
+
+    renderExpertNotes() {
+        let notesEl = document.getElementById('expertNotes');
+        if (!notesEl) {
+            const container = document.getElementById('detailExpertReview');
+            if (!container) return;
+            notesEl = document.createElement('div');
+            notesEl.id = 'expertNotes';
+            notesEl.style.cssText = 'margin-top:0.75rem;max-height:200px;overflow-y:auto;font-size:0.85rem;';
+            container.appendChild(notesEl);
+        }
+        const notes = this.state.expertReview.notes || [];
+        if (notes.length === 0) {
+            notesEl.style.display = 'none';
+            return;
+        }
+        notesEl.style.display = '';
+        notesEl.innerHTML = notes.map(n =>
+            `<div style="margin-bottom:0.5rem;padding:0.4rem 0.6rem;background:#f8f7ff;border-radius:6px;border-left:3px solid #7c3aed;">
+                <strong style="color:#7c3aed;font-size:0.8rem;">${this.esc(n.expertName)}</strong>
+                <div style="color:#374151;margin-top:2px;">${this.esc(n.note).substring(0, 300)}${n.note.length > 300 ? '...' : ''}</div>
+            </div>`
+        ).join('');
     },
 
     // --- Expert Clarification Wizard ---
@@ -738,6 +780,15 @@ const app = {
                 document.getElementById('detailUpVotes').textContent = data.upVotes;
                 document.getElementById('detailDownVotes').textContent = data.downVotes;
 
+                // Update plan display if changed
+                const planEl2 = document.getElementById('detailPlan');
+                const planText2 = document.getElementById('detailPlanText');
+                const displayPlan = data.planDisplaySummary || data.planSummary;
+                if (displayPlan) {
+                    planEl2.style.display = '';
+                    planText2.textContent = displayPlan;
+                }
+
                 // Update admin actions visibility
                 const isAdmin = this.state.role === 'ROOT_ADMIN' || this.state.role === 'ADMIN';
                 const canApprove = ['PLANNED', 'DISCUSSING'].includes(data.status);
@@ -788,6 +839,12 @@ const app = {
             }
             case 'expert_review_status': {
                 this.updateExpertReview(data);
+                break;
+            }
+            case 'expert_note': {
+                if (data.expertName && data.note) {
+                    this.addExpertNote(data.expertName, data.note);
+                }
                 break;
             }
             case 'expert_clarification_questions': {

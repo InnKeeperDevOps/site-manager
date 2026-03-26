@@ -112,7 +112,9 @@ public class SuggestionService {
             log.info("Suggestion {} has no valid working directory, re-executing from scratch",
                     suggestion.getId());
             suggestion.setStatus(SuggestionStatus.APPROVED);
+            suggestion.setCurrentPhase("Restarting from the beginning...");
             suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
             addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
                     "System restarted. Starting the work over from the beginning...");
             executeApprovedSuggestion(suggestion);
@@ -698,6 +700,7 @@ public class SuggestionService {
         }
         suggestion.setExpertReviewStep(current + 1);
         suggestionRepository.save(suggestion);
+        broadcastExpertReviewStatus(suggestion.getId());
     }
 
     private void appendExpertNote(Suggestion suggestion, ExpertRole expert, String note) {
@@ -709,6 +712,14 @@ public class SuggestionService {
             suggestion.setExpertReviewNotes(existing + "\n\n" + entry);
         }
         suggestionRepository.save(suggestion);
+        broadcastExpertNote(suggestion.getId(), expert.getDisplayName(), note);
+    }
+
+    private void broadcastExpertNote(Long suggestionId, String expertName, String note) {
+        webSocketHandler.sendToSuggestion(suggestionId,
+                "{\"type\":\"expert_note\"" +
+                ",\"expertName\":\"" + escapeJson(expertName) + "\"" +
+                ",\"note\":\"" + escapeJson(note) + "\"}");
     }
 
     private boolean isSubstantiveAnalysis(String analysis) {
@@ -732,6 +743,10 @@ public class SuggestionService {
             return;
         }
         expertRetryCount.put(retryKey, retries + 1);
+
+        suggestion.setCurrentPhase(expert.getDisplayName() + " is providing more detail...");
+        suggestionRepository.save(suggestion);
+        broadcastUpdate(suggestion);
 
         String plan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription();
         String tasksJson = buildTasksJsonForExecution(suggestionId);
@@ -781,6 +796,7 @@ public class SuggestionService {
             planTaskRepository.save(task);
         }
         log.info("Updated {} plan tasks for suggestion {} from expert revision", order - 1, suggestionId);
+        broadcastTasks(suggestionId);
     }
 
     private void broadcastExpertReviewStatus(Long suggestionId) {
@@ -1332,7 +1348,11 @@ public class SuggestionService {
                 ",\"currentPhase\":\"" + escapeJson(
                         suggestion.getCurrentPhase() != null ? suggestion.getCurrentPhase() : "") + "\"" +
                 ",\"upVotes\":" + suggestion.getUpVotes() +
-                ",\"downVotes\":" + suggestion.getDownVotes() + "}");
+                ",\"downVotes\":" + suggestion.getDownVotes() +
+                ",\"planDisplaySummary\":\"" + escapeJson(
+                        suggestion.getPlanDisplaySummary() != null ? suggestion.getPlanDisplaySummary() : "") + "\"" +
+                ",\"planSummary\":\"" + escapeJson(
+                        suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : "") + "\"}");
     }
 
     private String escapeJson(String s) {
