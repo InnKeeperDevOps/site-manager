@@ -17,8 +17,16 @@ spring:
 server:
   port: 8080
 
+logging:
+  level:
+    com.sitemanager.service.ClaudeService: INFO
+    com.sitemanager.service.SuggestionService: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+
 app:
   workspace-dir: /workspace
   claude-cli-path: claude
   suggestion-timeout-minutes: 1440
+  claude-timeout-minutes: 30
   git-ssh-key-path: ${GIT_SSH_KEY_PATH:}

@@ -108,6 +108,52 @@ public enum ExpertRole {
                 SOFTWARE_ENGINEER, FRONTEND_ENGINEER, PRODUCT_MANAGER, QA_ENGINEER };
     }
 
+    /**
+     * Expert review batches for parallel execution. Experts within the same batch
+     * run concurrently since they review independent aspects of the plan.
+     * Batches run sequentially so later batches can see earlier notes.
+     */
+    public static ExpertRole[][] reviewBatches() {
+        return new ExpertRole[][] {
+            // Batch 1: Architecture & security foundations
+            { SOFTWARE_ARCHITECT, SECURITY_ENGINEER, INFRASTRUCTURE_ENGINEER },
+            // Batch 2: Data, performance & ops
+            { DATA_ANALYST, PERFORMANCE_ENGINEER, DEVOPS_ENGINEER },
+            // Batch 3: Implementation, UI & product
+            { SOFTWARE_ENGINEER, FRONTEND_ENGINEER, PRODUCT_MANAGER },
+            // Batch 4: Final QA
+            { QA_ENGINEER }
+        };
+    }
+
+    /**
+     * Get the batch index and position within that batch for a given step.
+     * Returns null if step is out of range.
+     */
+    public static int[] batchForStep(int step) {
+        ExpertRole[][] batches = reviewBatches();
+        int cumulative = 0;
+        for (int b = 0; b < batches.length; b++) {
+            if (step < cumulative + batches[b].length) {
+                return new int[] { b, step - cumulative };
+            }
+            cumulative += batches[b].length;
+        }
+        return null;
+    }
+
+    /**
+     * Get the starting step index for a given batch.
+     */
+    public static int batchStartStep(int batchIndex) {
+        ExpertRole[][] batches = reviewBatches();
+        int step = 0;
+        for (int b = 0; b < batchIndex && b < batches.length; b++) {
+            step += batches[b].length;
+        }
+        return step;
+    }
+
     public static ExpertRole fromStep(int step) {
         ExpertRole[] order = reviewOrder();
         if (step < 0 || step >= order.length) return null;

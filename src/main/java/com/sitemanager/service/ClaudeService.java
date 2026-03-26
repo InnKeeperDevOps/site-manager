@@ -17,15 +17,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 @Service
 public class ClaudeService {
 
     private static final Logger log = LoggerFactory.getLogger(ClaudeService.class);
+    private static final int MAX_LOG_PROMPT_LENGTH = 500;
+    private static final int MAX_LOG_RESPONSE_LENGTH = 1000;
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Map<String, String> sessionMap = new ConcurrentHashMap<>();
+    private final AtomicLong requestCounter = new AtomicLong(0);
 
     @Value("${app.claude-cli-path:claude}")
     private String claudeCliPath;
@@ -35,6 +39,9 @@ public class ClaudeService {
 
     @Value("${app.git-ssh-key-path:}")
     private String gitSshKeyPath;
+
+    @Value("${app.claude-timeout-minutes:30}")
+    private int claudeTimeoutMinutes;
 
     public String generateSessionId() {
         return UUID.randomUUID().toString();
@@ -120,14 +127,14 @@ public class ClaudeService {
                 suggestionDescription
         );
 
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "evaluate");
     }
 
     public CompletableFuture<String> continueConversation(String sessionId, String userMessage,
                                                            String conversationContext,
                                                            String workingDir,
                                                            Consumer<String> progressCallback) {
-        return sendToClaudeAsync(userMessage, sessionId, workingDir, conversationContext, progressCallback);
+        return sendToClaudeAsync(userMessage, sessionId, workingDir, conversationContext, progressCallback, "continue");
     }
 
     public CompletableFuture<String> executePlan(String sessionId, String plan, String tasksJson,
@@ -169,7 +176,7 @@ public class ClaudeService {
                 workingDir, plan, tasksJson != null ? tasksJson : "No structured tasks — follow the plan above."
         );
 
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "execute");
     }
 
     public CompletableFuture<String> expertReview(String sessionId, String expertDisplayName,
@@ -227,7 +234,7 @@ public class ClaudeService {
                         "Previous expert reviews:\n" + previousNotes + "\n\n" : ""
         );
 
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "expert-review:" + expertDisplayName);
     }
 
     public CompletableFuture<String> reviewExpertFeedback(String sessionId, String expertDisplayName,
@@ -250,17 +257,18 @@ public class ClaudeService {
                 expertDisplayName, currentPlan, expertDisplayName, expertAnalysis, proposedChanges
         );
 
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "review-feedback:" + expertDisplayName);
     }
 
     private CompletableFuture<String> sendToClaudeAsync(String prompt, String sessionId,
                                                          String workingDir, String conversationContext,
-                                                         Consumer<String> progressCallback) {
+                                                         Consumer<String> progressCallback,
+                                                         String operationType) {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                return sendToClaude(prompt, sessionId, workingDir, conversationContext, progressCallback);
+                return sendToClaude(prompt, sessionId, workingDir, conversationContext, progressCallback, operationType);
             } catch (Exception e) {
-                log.error("Claude CLI error for session {}: {}", sessionId, e.getMessage(), e);
+                log.error("[CLAUDE-{}] session={} ERROR: {}", operationType, sessionId, e.getMessage(), e);
                 return "{\"status\": \"ERROR\", \"message\": \"" +
                         e.getMessage().replace("\"", "\\\"") + "\"}";
             }
@@ -269,7 +277,12 @@ public class ClaudeService {
 
     private String sendToClaude(String prompt, String sessionId, String workingDir,
                                  String conversationContext,
-                                 Consumer<String> progressCallback) throws Exception {
+                                 Consumer<String> progressCallback,
+                                 String operationType) throws Exception {
+        long requestId = requestCounter.incrementAndGet();
+        long startTime = System.currentTimeMillis();
+        String logPrefix = String.format("[CLAUDE-REQ-%d][%s]", requestId, operationType);
+
         ProcessBuilder pb = new ProcessBuilder();
 
         String cliSessionId = sessionMap.get(sessionId);
@@ -295,6 +308,12 @@ public class ClaudeService {
 
         pb.redirectErrorStream(true);
         pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+
+        // Log the request
+        log.info("{} session={} resume={} workDir={} promptLength={}",
+                logPrefix, sessionId, isResume, workingDir, prompt.length());
+        log.debug("{} prompt: {}", logPrefix, truncate(prompt, MAX_LOG_PROMPT_LENGTH));
+
         Process process = pb.start();
 
         StringBuilder output = new StringBuilder();
@@ -309,8 +328,22 @@ public class ClaudeService {
             }
         }
 
-        int exitCode = process.waitFor();
+        boolean completed = process.waitFor(claudeTimeoutMinutes, TimeUnit.MINUTES);
+        if (!completed) {
+            process.destroyForcibly();
+            long elapsed = System.currentTimeMillis() - startTime;
+            log.error("{} TIMEOUT after {}ms (limit={}min) — process killed",
+                    logPrefix, elapsed, claudeTimeoutMinutes);
+            throw new RuntimeException("Claude CLI timed out after " + claudeTimeoutMinutes + " minutes");
+        }
+
+        int exitCode = process.exitValue();
+        long elapsed = System.currentTimeMillis() - startTime;
         String rawOutput = output.toString().trim();
+
+        // Log raw output size and timing
+        log.info("{} completed in {}ms exitCode={} responseLength={}",
+                logPrefix, elapsed, exitCode, rawOutput.length());
 
         // Try to parse as JSON to extract session_id and result
         String resultText = rawOutput;
@@ -335,32 +368,44 @@ public class ClaudeService {
                 if (root.has("is_error") && root.get("is_error").asBoolean()) {
                     String errorMsg = root.has("result") ? root.get("result").asText() : rawOutput;
                     if (isResume && isDeadSessionError(errorMsg)) {
+                        log.warn("{} dead session detected, rebuilding context", logPrefix);
                         return handleDeadSession(prompt, sessionId, workingDir,
-                                conversationContext, progressCallback);
+                                conversationContext, progressCallback, operationType);
                     }
-                    log.warn("Claude CLI returned error for session {}: {}", sessionId, errorMsg);
+                    log.warn("{} error response: {}", logPrefix, truncate(errorMsg, MAX_LOG_RESPONSE_LENGTH));
                 }
             }
         } catch (Exception e) {
-            log.debug("Could not parse Claude CLI output as JSON: {}", e.getMessage());
+            log.debug("{} could not parse output as JSON: {}", logPrefix, e.getMessage());
         }
 
         // Fallback: check raw output for dead session error
         if (isResume && isDeadSessionError(rawOutput)) {
+            log.warn("{} dead session detected (fallback check), rebuilding context", logPrefix);
             return handleDeadSession(prompt, sessionId, workingDir,
-                    conversationContext, progressCallback);
+                    conversationContext, progressCallback, operationType);
         }
 
         // Store the CLI session ID for future --resume calls
         if (parsedCliSessionId != null && !parsedCliSessionId.isBlank()) {
             sessionMap.put(sessionId, parsedCliSessionId);
+            log.debug("{} stored CLI session: {}", logPrefix, parsedCliSessionId);
         }
 
         if (exitCode != 0) {
-            log.warn("Claude CLI exited with code {} for session {}", exitCode, sessionId);
+            log.warn("{} non-zero exit code: {}", logPrefix, exitCode);
         }
 
+        // Log response summary
+        log.debug("{} response: {}", logPrefix, truncate(resultText, MAX_LOG_RESPONSE_LENGTH));
+
         return resultText;
+    }
+
+    private static String truncate(String text, int maxLength) {
+        if (text == null) return "null";
+        if (text.length() <= maxLength) return text;
+        return text.substring(0, maxLength) + "...[truncated, total=" + text.length() + "]";
     }
 
     private boolean isDeadSessionError(String output) {
@@ -372,8 +417,10 @@ public class ClaudeService {
 
     private String handleDeadSession(String prompt, String sessionId, String workingDir,
                                       String conversationContext,
-                                      Consumer<String> progressCallback) throws Exception {
-        log.warn("Session {} is dead, starting fresh session with conversation context", sessionId);
+                                      Consumer<String> progressCallback,
+                                      String operationType) throws Exception {
+        log.warn("[CLAUDE-{}] session={} is dead, starting fresh session with conversation context",
+                operationType, sessionId);
         sessionMap.remove(sessionId);
 
         String rebuiltPrompt;
@@ -389,7 +436,7 @@ public class ClaudeService {
         }
 
         // Retry with a fresh session (no resume, no context to avoid infinite loop)
-        return sendToClaude(rebuiltPrompt, sessionId, workingDir, null, progressCallback);
+        return sendToClaude(rebuiltPrompt, sessionId, workingDir, null, progressCallback, operationType + "-retry");
     }
 
     /**
