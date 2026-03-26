@@ -136,7 +136,7 @@
             </div>
 
             <div id="detailPlan" class="card" style="display:none;margin-top:1rem;background:#f0fdf4">
-                <strong>Implementation Plan:</strong>
+                <strong>Plan:</strong>
                 <pre id="detailPlanText" style="white-space:pre-wrap;margin-top:0.5rem;font-size:0.85rem"></pre>
             </div>
 
@@ -152,7 +152,7 @@
             </div>
 
             <div id="detailPr" class="card" style="display:none;margin-top:1rem;background:#f0f4ff">
-                <strong>Pull Request:</strong>
+                <strong>Changes Ready for Review:</strong>
                 <a id="detailPrLink" href="#" target="_blank" rel="noopener"
                    style="margin-left:0.5rem;color:var(--primary);font-weight:600"></a>
             </div>
@@ -217,17 +217,17 @@
                     <input type="text" id="settingSiteName">
                 </div>
                 <div class="form-group">
-                    <label>Target Repository URL</label>
-                    <input type="text" id="settingRepoUrl" placeholder="https://github.com/user/repo.git">
+                    <label>Project Repository</label>
+                    <input type="text" id="settingRepoUrl" placeholder="Paste the link to your project">
                 </div>
                 <div class="form-group">
-                    <label>Suggestion Timeout (minutes)</label>
+                    <label>Time Limit Per Suggestion (minutes)</label>
                     <input type="text" id="settingTimeout">
                 </div>
                 <div class="form-group">
-                    <label>GitHub Token (for PR creation)</label>
+                    <label>Access Token</label>
                     <input type="password" id="settingGithubToken"
-                           placeholder="ghp_... (leave blank to skip PR creation)">
+                           placeholder="Paste your access token (optional)">
                 </div>
                 <div class="toggle-row">
                     <span class="toggle-label">Allow Anonymous Suggestions</span>

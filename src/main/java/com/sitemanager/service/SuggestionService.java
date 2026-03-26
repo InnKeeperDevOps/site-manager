@@ -81,7 +81,7 @@ public class SuggestionService {
                     // Re-trigger the full execution flow.
                     log.info("Resuming approved suggestion {} — starting execution", suggestion.getId());
                     addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                            "Application restarted. Resuming execution of approved suggestion...");
+                            "System restarted. Picking up where we left off...");
                     executeApprovedSuggestion(suggestion);
                 } else {
                     // IN_PROGRESS or TESTING — Claude was mid-execution. Resume it.
@@ -90,7 +90,7 @@ public class SuggestionService {
             } catch (Exception e) {
                 log.error("Failed to resume suggestion {} on startup: {}", suggestion.getId(), e.getMessage(), e);
                 addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                        "Failed to resume after application restart: " + e.getMessage());
+                        "Something went wrong while resuming work. You can retry.");
                 suggestion.setCurrentPhase("Resume failed — can retry");
                 suggestionRepository.save(suggestion);
                 broadcastUpdate(suggestion);
@@ -108,7 +108,7 @@ public class SuggestionService {
             suggestion.setStatus(SuggestionStatus.APPROVED);
             suggestionRepository.save(suggestion);
             addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                    "Application restarted. Working directory not found — re-executing plan from scratch...");
+                    "System restarted. Starting the work over from the beginning...");
             executeApprovedSuggestion(suggestion);
             return;
         }
@@ -116,9 +116,9 @@ public class SuggestionService {
         log.info("Resuming in-progress suggestion {} in {}", suggestion.getId(), workDir);
 
         addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                "Application restarted. Resuming implementation — checking what remains from the plan...");
+                "System restarted. Checking what's been done and resuming the remaining work...");
 
-        suggestion.setCurrentPhase("Resuming after restart — checking progress...");
+        suggestion.setCurrentPhase("Resuming — checking progress...");
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
 
@@ -212,7 +212,7 @@ public class SuggestionService {
         String repoUrl = settingsService.getSettings().getTargetRepoUrl();
 
         suggestion.setStatus(SuggestionStatus.DISCUSSING);
-        suggestion.setCurrentPhase("Pulling latest repository for AI session...");
+        suggestion.setCurrentPhase("Getting the latest version of the project...");
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
 
@@ -227,7 +227,7 @@ public class SuggestionService {
             }
         }
 
-        suggestion.setCurrentPhase("AI is evaluating the suggestion...");
+        suggestion.setCurrentPhase("Evaluating your suggestion...");
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
 
@@ -262,7 +262,7 @@ public class SuggestionService {
         if (response.contains("PLAN_READY")) {
             addMessage(suggestionId, SenderType.AI, "Claude", displayMessage);
             suggestion.setStatus(SuggestionStatus.PLANNED);
-            suggestion.setCurrentPhase("Plan ready - awaiting admin approval");
+            suggestion.setCurrentPhase("Plan ready — waiting for approval");
             suggestion.setPlanSummary(extractPlan(response));
             suggestion.setPendingClarificationQuestions(null);
             // Parse and save structured tasks
@@ -271,7 +271,7 @@ public class SuggestionService {
             // Do NOT post clarification questions to the user discussion;
             // they are delivered via WebSocket as structured prompts instead
             suggestion.setStatus(SuggestionStatus.DISCUSSING);
-            suggestion.setCurrentPhase("Awaiting user clarification");
+            suggestion.setCurrentPhase("Waiting for your answers");
 
             List<String> questions = extractQuestions(response);
             if (questions != null && !questions.isEmpty()) {
@@ -285,7 +285,7 @@ public class SuggestionService {
         } else {
             addMessage(suggestionId, SenderType.AI, "Claude", displayMessage);
             suggestion.setStatus(SuggestionStatus.DISCUSSING);
-            suggestion.setCurrentPhase("In discussion with AI");
+            suggestion.setCurrentPhase("In discussion");
             suggestion.setPendingClarificationQuestions(null);
         }
 
@@ -323,7 +323,12 @@ public class SuggestionService {
         }
         claudePrompt.append("Based on these answers and the original suggestion, please evaluate again:\n");
         claudePrompt.append("1. If you still need more information, respond with NEEDS_CLARIFICATION status and a new set of questions.\n");
-        claudePrompt.append("2. If you now have enough information, create the implementation plan and respond with PLAN_READY status.\n\n");
+        claudePrompt.append("2. If you now have enough information, create a plan broken into tasks and respond with PLAN_READY status.\n\n");
+        claudePrompt.append("COMMUNICATION RULES:\n");
+        claudePrompt.append("- All messages, questions, and plan descriptions MUST be written in plain, non-technical language.\n");
+        claudePrompt.append("- NEVER mention programming languages, frameworks, libraries, databases, APIs, file names, class names, or any technical implementation details.\n");
+        claudePrompt.append("- Describe changes in terms of what the user will experience — features, behaviors, and outcomes.\n");
+        claudePrompt.append("- Questions should be about desired behavior and outcomes, not technical choices.\n\n");
         claudePrompt.append("Respond in this JSON format:\n");
         claudePrompt.append("If clarification needed:\n");
         claudePrompt.append("{\"status\": \"NEEDS_CLARIFICATION\", ");
@@ -332,11 +337,18 @@ public class SuggestionService {
         claudePrompt.append("If ready to plan:\n");
         claudePrompt.append("{\"status\": \"PLAN_READY\", ");
         claudePrompt.append("\"message\": \"your response to the user\", ");
-        claudePrompt.append("\"plan\": \"implementation plan\"}\n\n");
-        claudePrompt.append("IMPORTANT: When status is NEEDS_CLARIFICATION, you MUST include a \"questions\" array with each clarifying question as a separate string element.");
+        claudePrompt.append("\"plan\": \"brief overall summary of what will be done\", ");
+        claudePrompt.append("\"tasks\": [\n");
+        claudePrompt.append("  {\"title\": \"short task name\", \"description\": \"what this task involves\", \"estimatedMinutes\": number},\n");
+        claudePrompt.append("  ...\n");
+        claudePrompt.append("]}\n\n");
+        claudePrompt.append("IMPORTANT: When status is NEEDS_CLARIFICATION, you MUST include a \"questions\" array with each clarifying question as a separate string element.\n");
+        claudePrompt.append("When status is PLAN_READY, you MUST include a \"tasks\" array that breaks the plan into ordered steps. ");
+        claudePrompt.append("Each task should be a concrete, actionable unit of work with a realistic time estimate in minutes. ");
+        claudePrompt.append("Order tasks by implementation sequence. Typically 3-8 tasks is appropriate.");
 
         // Continue the Claude conversation
-        suggestion.setCurrentPhase("AI is reviewing your clarifications...");
+        suggestion.setCurrentPhase("Reviewing your answers...");
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
 
@@ -367,7 +379,7 @@ public class SuggestionService {
         addMessage(suggestionId, SenderType.USER, senderName, message);
 
         // Continue the Claude conversation
-        suggestion.setCurrentPhase("AI is processing your response...");
+        suggestion.setCurrentPhase("Processing your response...");
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
 
@@ -393,10 +405,10 @@ public class SuggestionService {
                 .orElseThrow(() -> new IllegalArgumentException("Suggestion not found"));
 
         suggestion.setStatus(SuggestionStatus.APPROVED);
-        suggestion.setCurrentPhase("Approved - preparing to execute");
+        suggestion.setCurrentPhase("Approved — getting ready to start");
         suggestionRepository.save(suggestion);
 
-        addMessage(suggestionId, SenderType.SYSTEM, "System", "Suggestion has been **approved** by an administrator.");
+        addMessage(suggestionId, SenderType.SYSTEM, "System", "This suggestion has been **approved** and work will begin shortly.");
         broadcastUpdate(suggestion);
 
         // Begin execution
@@ -409,15 +421,15 @@ public class SuggestionService {
         String repoUrl = settingsService.getSettings().getTargetRepoUrl();
         if (repoUrl == null || repoUrl.isBlank()) {
             addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                    "Cannot execute: No target repository URL configured.");
-            suggestion.setCurrentPhase("Blocked - no repository configured");
+                    "Cannot start work yet — the project hasn't been set up. An admin needs to configure the project in Settings.");
+            suggestion.setCurrentPhase("Blocked — project not configured");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
             return;
         }
 
         suggestion.setStatus(SuggestionStatus.IN_PROGRESS);
-        suggestion.setCurrentPhase("Cloning repository into suggestion-" + suggestion.getId() + "-repo...");
+        suggestion.setCurrentPhase("Setting up a workspace for this suggestion...");
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
 
@@ -434,14 +446,14 @@ public class SuggestionService {
                 suggestionRepository.save(suggestion);
 
                 addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                        "Repository cloned. Starting implementation...");
+                        "Workspace ready. Starting work on your suggestion...");
 
                 // Set initial phase to first task if available
                 List<PlanTask> tasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestion.getId());
                 if (!tasks.isEmpty()) {
                     suggestion.setCurrentPhase("Task 1/" + tasks.size() + ": " + tasks.get(0).getTitle());
                 } else {
-                    suggestion.setCurrentPhase("Executing implementation plan...");
+                    suggestion.setCurrentPhase("Working on your suggestion...");
                 }
                 suggestionRepository.save(suggestion);
                 broadcastUpdate(suggestion);
@@ -463,8 +475,8 @@ public class SuggestionService {
             } catch (Exception e) {
                 log.error("Failed to execute suggestion {}: {}", suggestion.getId(), e.getMessage(), e);
                 addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                        "Execution failed: " + e.getMessage());
-                suggestion.setCurrentPhase("Execution failed");
+                        "Something went wrong while working on this suggestion. It can be retried.");
+                suggestion.setCurrentPhase("Failed — can retry");
                 suggestion.setStatus(SuggestionStatus.PLANNED);
                 suggestionRepository.save(suggestion);
                 broadcastUpdate(suggestion);
@@ -481,7 +493,7 @@ public class SuggestionService {
 
         if (result.contains("COMPLETED")) {
             suggestion.setStatus(SuggestionStatus.COMPLETED);
-            suggestion.setCurrentPhase("Implementation completed — creating PR...");
+            suggestion.setCurrentPhase("Work completed — submitting changes...");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
 
@@ -490,10 +502,10 @@ public class SuggestionService {
             return;
         } else if (result.contains("FAILED")) {
             suggestion.setStatus(SuggestionStatus.PLANNED);
-            suggestion.setCurrentPhase("Execution failed - can retry");
+            suggestion.setCurrentPhase("Something went wrong — can retry");
         } else {
             suggestion.setStatus(SuggestionStatus.TESTING);
-            suggestion.setCurrentPhase("Testing changes...");
+            suggestion.setCurrentPhase("Verifying the changes...");
         }
 
         suggestionRepository.save(suggestion);
@@ -523,19 +535,19 @@ public class SuggestionService {
 
         // Step 2: Push branch
         try {
-            suggestion.setCurrentPhase("Pushing branch to remote...");
+            suggestion.setCurrentPhase("Submitting changes...");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
 
             claudeService.pushBranch(workDir, branchName);
 
             addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                    "Branch `" + branchName + "` pushed to remote.");
+                    "Changes have been submitted for review.");
         } catch (Exception e) {
             log.error("Failed to push branch for suggestion {}: {}", suggestion.getId(), e.getMessage(), e);
             addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                    "Failed to push branch: " + e.getMessage());
-            suggestion.setCurrentPhase("Implementation completed (push failed)");
+                    "Completed the work, but couldn't submit the changes. An admin can retry this.");
+            suggestion.setCurrentPhase("Done, but submission failed");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
             return;
@@ -545,16 +557,15 @@ public class SuggestionService {
         if (githubToken == null || githubToken.isBlank()) {
             log.warn("No GitHub token configured, skipping PR creation for suggestion {}", suggestion.getId());
             addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                    "Branch pushed but no GitHub token configured — PR creation skipped. " +
-                    "Configure a token in Settings to enable automatic PR creation.");
-            suggestion.setCurrentPhase("Implementation completed (branch pushed)");
+                    "Changes submitted. Automatic review request wasn't created — an admin can set this up in Settings.");
+            suggestion.setCurrentPhase("Done — changes submitted");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
             return;
         }
 
         try {
-            suggestion.setCurrentPhase("Creating pull request...");
+            suggestion.setCurrentPhase("Creating a review request...");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
 
@@ -569,11 +580,11 @@ public class SuggestionService {
 
             suggestion.setPrUrl(prUrl);
             suggestion.setPrNumber(prNumber);
-            suggestion.setCurrentPhase("Implementation completed — PR created");
+            suggestion.setCurrentPhase("Done — ready for review");
             suggestionRepository.save(suggestion);
 
             addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                    "Pull request created: " + prUrl);
+                    "Changes are ready for review: " + prUrl);
 
             broadcastUpdate(suggestion);
             // Send PR URL via WebSocket so frontend can display it immediately
@@ -584,8 +595,8 @@ public class SuggestionService {
         } catch (Exception e) {
             log.error("Failed to create PR for suggestion {}: {}", suggestion.getId(), e.getMessage(), e);
             addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                    "Branch pushed but PR creation failed: " + e.getMessage());
-            suggestion.setCurrentPhase("Implementation completed (PR creation failed)");
+                    "Changes were submitted, but the review request couldn't be created automatically.");
+            suggestion.setCurrentPhase("Done — review request failed");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
         }
@@ -757,7 +768,7 @@ public class SuggestionService {
                     if (newStatus == TaskStatus.COMPLETED) completed++;
                     long total = allTasks.size();
                     if (completed >= total) {
-                        suggestion.setCurrentPhase("All " + total + " tasks completed — finalizing...");
+                        suggestion.setCurrentPhase("All " + total + " tasks done — wrapping up...");
                     } else {
                         // Find the next pending task
                         String nextTask = allTasks.stream()
@@ -1045,9 +1056,9 @@ public class SuggestionService {
                     suggestionId);
 
             addMessage(suggestionId, SenderType.SYSTEM, "System",
-                    "The main repository has been updated. Checking if these changes affect this suggestion...");
+                    "The project has been updated. Checking if these changes affect this suggestion...");
 
-            suggestion.setCurrentPhase("Checking impact of main repo changes...");
+            suggestion.setCurrentPhase("Checking for changes that affect this suggestion...");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
 
@@ -1085,12 +1096,11 @@ public class SuggestionService {
             }
 
             addMessage(suggestionId, SenderType.SYSTEM, "System",
-                    "The main repository was updated but merging into this suggestion's branch " +
-                    "caused a conflict. The suggestion may need to be re-evaluated. " +
-                    "Conflict details: " + errorMessage);
+                    "The project was updated with changes that conflict with this suggestion's work. " +
+                    "This suggestion may need to be re-evaluated.");
 
             suggestion.setStatus(SuggestionStatus.DISCUSSING);
-            suggestion.setCurrentPhase("Merge conflict with updated main branch — needs attention");
+            suggestion.setCurrentPhase("Conflicting changes — needs attention");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
         } catch (NumberFormatException e) {
@@ -1099,31 +1109,35 @@ public class SuggestionService {
     }
 
     private String buildReEvaluationPrompt(Suggestion suggestion) {
-        return "The main repository branch has just been updated with new changes that have been " +
-                "merged into this suggestion's working branch.\n\n" +
+        return "The project has just been updated with new changes that have been " +
+                "incorporated into this suggestion's workspace.\n\n" +
                 "Original suggestion:\n" +
                 "Title: " + suggestion.getTitle() + "\n" +
                 "Description: " + suggestion.getDescription() + "\n" +
                 (suggestion.getPlanSummary() != null ?
                         "Current plan: " + suggestion.getPlanSummary() + "\n" : "") +
-                "\nPlease review the merged changes and determine:\n" +
-                "1. Do the new changes from main affect this suggestion's implementation or plan?\n" +
-                "2. Does the plan need to be updated due to conflicts, overlapping changes, or new code?\n" +
-                "3. Are there any new questions for the user based on the updated codebase?\n\n" +
+                "\nPlease review the recent changes and determine:\n" +
+                "1. Do the new changes affect this suggestion's plan?\n" +
+                "2. Does the plan need to be adjusted?\n" +
+                "3. Are there any new questions for the user?\n\n" +
+                "COMMUNICATION RULES:\n" +
+                "- All messages and questions MUST be written in plain, non-technical language.\n" +
+                "- NEVER mention programming languages, frameworks, file names, or technical details.\n" +
+                "- Describe things from the user's perspective.\n\n" +
                 "Respond in JSON format:\n" +
                 "If the suggestion is NOT affected (plan is still valid):\n" +
                 "{\"status\": \"PLAN_READY\", " +
-                "\"message\": \"The recent main branch changes do not affect this suggestion. " +
-                "The existing plan remains valid.\", " +
+                "\"message\": \"The recent project updates don't affect this suggestion. " +
+                "The existing plan is still good.\", " +
                 "\"plan\": \"<the existing plan, unchanged>\"}\n\n" +
                 "If the suggestion IS affected and you need clarification:\n" +
                 "{\"status\": \"NEEDS_CLARIFICATION\", " +
-                "\"message\": \"The main branch has changed in ways that affect this suggestion.\", " +
+                "\"message\": \"The project has changed in ways that affect this suggestion.\", " +
                 "\"questions\": [\"specific question about how to proceed given the changes\"]}\n\n" +
                 "If the suggestion IS affected but you can update the plan:\n" +
                 "{\"status\": \"PLAN_READY\", " +
-                "\"message\": \"The plan has been updated to account for recent main branch changes.\", " +
-                "\"plan\": \"<updated implementation plan>\"}\n\n" +
+                "\"message\": \"The plan has been updated to account for the recent project changes.\", " +
+                "\"plan\": \"<updated plan>\"}\n\n" +
                 "IMPORTANT: When status is NEEDS_CLARIFICATION, you MUST include a \"questions\" array.";
     }
 }

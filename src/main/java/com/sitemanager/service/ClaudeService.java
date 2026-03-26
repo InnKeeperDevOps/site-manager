@@ -83,6 +83,14 @@ public class ClaudeService {
                 "1. Is this suggestion detailed enough to implement? Does it clearly describe what changes are needed?\n" +
                 "2. If NOT detailed enough, ask specific clarifying questions to the user.\n" +
                 "3. If it IS detailed enough, look at the repository and create a concrete implementation plan.\n\n" +
+                "COMMUNICATION RULES:\n" +
+                "- All messages, questions, and plan descriptions shown to users MUST be written in plain, non-technical language.\n" +
+                "- NEVER mention programming languages, frameworks, libraries, databases, APIs, file names, class names, or any technical implementation details.\n" +
+                "- Describe changes in terms of what the user will experience — features, behaviors, and outcomes.\n" +
+                "- Questions should be about what the user wants, not how it will be built.\n" +
+                "- Task titles and descriptions should describe what will change from the user's perspective.\n" +
+                "  Good: \"Update the settings page to include a new option\"\n" +
+                "  Bad: \"Add a new field to SiteSettings.java and create a REST endpoint\"\n\n" +
                 "Respond in this JSON format:\n" +
                 "If clarification needed:\n" +
                 "{\"status\": \"NEEDS_CLARIFICATION\", " +
@@ -122,6 +130,12 @@ public class ClaudeService {
                 "Execute the following implementation plan in the repository at %s.\n\n" +
                 "Plan:\n%s\n\n" +
                 "Tasks (execute in order):\n%s\n\n" +
+                "COMMUNICATION RULES:\n" +
+                "- All message fields in your JSON output MUST be written in plain, non-technical language.\n" +
+                "- NEVER mention programming languages, frameworks, libraries, file names, class names, or technical details in messages.\n" +
+                "- Describe progress in terms of what is changing from the user's perspective.\n" +
+                "  Good: \"Added the new option to the settings page\"\n" +
+                "  Bad: \"Created SiteSettings.java field and REST endpoint\"\n\n" +
                 "Instructions:\n" +
                 "1. Execute each task in order by its task number\n" +
                 "2. Write unit tests for all new code\n" +
