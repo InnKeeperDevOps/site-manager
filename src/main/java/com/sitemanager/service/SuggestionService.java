@@ -452,7 +452,7 @@ public class SuggestionService {
             broadcastUpdate(suggestion);
 
             // Push branch and create PR in background
-            new Thread(() -> createPrForSuggestion(suggestion)).start();
+            createPrAsync(suggestion.getId());
             return;
         } else if (result.contains("FAILED")) {
             suggestion.setStatus(SuggestionStatus.PLANNED);
@@ -464,6 +464,16 @@ public class SuggestionService {
 
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
+    }
+
+    @Async
+    public void createPrAsync(Long suggestionId) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) {
+            log.error("Cannot create PR: suggestion {} not found", suggestionId);
+            return;
+        }
+        createPrForSuggestion(suggestion);
     }
 
     private void createPrForSuggestion(Suggestion suggestion) {
