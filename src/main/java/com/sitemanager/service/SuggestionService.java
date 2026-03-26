@@ -35,6 +35,7 @@ import java.util.Optional;
 public class SuggestionService {
 
     private static final Logger log = LoggerFactory.getLogger(SuggestionService.class);
+    private static final int MAX_EXPERT_REVIEW_ROUNDS = 3;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final SuggestionRepository suggestionRepository;
@@ -270,6 +271,7 @@ public class SuggestionService {
             // Start expert review pipeline instead of going directly to PLANNED
             suggestion.setStatus(SuggestionStatus.EXPERT_REVIEW);
             suggestion.setExpertReviewStep(0);
+            suggestion.setExpertReviewRound(1);
             suggestion.setExpertReviewNotes(null);
             suggestion.setCurrentPhase("Plan created — starting expert reviews...");
             suggestionRepository.save(suggestion);
@@ -557,7 +559,6 @@ public class SuggestionService {
                         suggestion.setPlanSummary(root.get("revisedPlan").asText());
                     }
                     if (root.has("revisedTasks") && root.get("revisedTasks").isArray()) {
-                        // Update tasks from the expert's revision
                         savePlanTasksFromNode(suggestionId, root.get("revisedTasks"));
                     }
                 }
@@ -570,17 +571,47 @@ public class SuggestionService {
                     "\nReviewer: " + reviewerNotes);
             addMessage(suggestionId, SenderType.AI, expert.getDisplayName(),
                     expertMessage + "\n\n*Changes have been applied to the plan.*");
+
+            // Plan changed — restart reviews from the beginning so all experts re-review
+            int currentRound = suggestion.getExpertReviewRound() != null ? suggestion.getExpertReviewRound() : 1;
+            if (currentRound >= MAX_EXPERT_REVIEW_ROUNDS) {
+                // Hit the limit — accept the plan as-is and move on
+                log.info("Suggestion {} reached max expert review rounds ({}), finalizing plan",
+                        suggestionId, MAX_EXPERT_REVIEW_ROUNDS);
+                addMessage(suggestionId, SenderType.SYSTEM, "System",
+                        "Expert reviews have completed after multiple rounds of refinement.");
+                suggestion.setStatus(SuggestionStatus.PLANNED);
+                suggestion.setExpertReviewStep(null);
+                suggestion.setExpertReviewRound(null);
+                suggestion.setCurrentPhase("Plan ready — waiting for approval");
+                suggestionRepository.save(suggestion);
+                broadcastUpdate(suggestion);
+                broadcastTasks(suggestionId);
+                broadcastExpertReviewStatus(suggestionId);
+                return;
+            }
+
+            suggestion.setExpertReviewStep(0);
+            suggestion.setExpertReviewRound(currentRound + 1);
+            suggestion.setExpertReviewNotes(null);
+            suggestionRepository.save(suggestion);
+
+            addMessage(suggestionId, SenderType.SYSTEM, "System",
+                    "The plan was updated — restarting expert reviews (round " + (currentRound + 1) + ").");
+            broadcastTasks(suggestionId);
+            broadcastExpertReviewStatus(suggestionId);
+            runNextExpertReview(suggestionId);
         } else {
             appendExpertNote(suggestion, expert,
                     "Proposed changes — not applied. " + expertAnalysis +
                     "\nReviewer: " + reviewerNotes);
             addMessage(suggestionId, SenderType.AI, expert.getDisplayName(),
                     expertMessage + "\n\n*Recommendations were noted but the plan remains unchanged.*");
-        }
 
-        advanceExpertStep(suggestion);
-        broadcastTasks(suggestionId);
-        runNextExpertReview(suggestionId);
+            advanceExpertStep(suggestion);
+            broadcastTasks(suggestionId);
+            runNextExpertReview(suggestionId);
+        }
     }
 
     @Transactional
@@ -686,8 +717,11 @@ public class SuggestionService {
         ExpertRole[] experts = ExpertRole.reviewOrder();
 
         StringBuilder json = new StringBuilder();
+        int currentRound = suggestion.getExpertReviewRound() != null ? suggestion.getExpertReviewRound() : 1;
         json.append("{\"type\":\"expert_review_status\",\"currentStep\":").append(currentStep);
         json.append(",\"totalSteps\":").append(experts.length);
+        json.append(",\"round\":").append(currentRound);
+        json.append(",\"maxRounds\":").append(MAX_EXPERT_REVIEW_ROUNDS);
         json.append(",\"experts\":[");
         for (int i = 0; i < experts.length; i++) {
             if (i > 0) json.append(",");

@@ -386,8 +386,9 @@ const app = {
         container.style.display = '';
 
         const completed = er.experts.filter(e => e.status === 'completed').length;
+        const roundLabel = er.round > 1 ? ` (round ${er.round})` : '';
         document.getElementById('expertProgress').textContent =
-            `${completed}/${er.totalSteps} reviewed`;
+            `${completed}/${er.totalSteps} reviewed${roundLabel}`;
 
         listEl.innerHTML = er.experts.map((e, i) => {
             const icons = { pending: '○', in_progress: '◉', completed: '✓' };
@@ -406,6 +407,7 @@ const app = {
             currentStep: data.currentStep,
             totalSteps: data.totalSteps,
             experts: data.experts,
+            round: data.round || 1,
             active: true
         };
         this.renderExpertReview();

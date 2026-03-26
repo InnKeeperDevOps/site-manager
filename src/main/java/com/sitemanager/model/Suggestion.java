@@ -61,6 +61,9 @@ public class Suggestion {
     @Column
     private Integer expertReviewStep;
 
+    @Column
+    private Integer expertReviewRound;
+
     @Column(columnDefinition = "TEXT")
     private String expertReviewNotes;
 
@@ -128,6 +131,8 @@ public class Suggestion {
     public void setChangelogEntry(String changelogEntry) { this.changelogEntry = changelogEntry; }
     public Integer getExpertReviewStep() { return expertReviewStep; }
     public void setExpertReviewStep(Integer expertReviewStep) { this.expertReviewStep = expertReviewStep; }
+    public Integer getExpertReviewRound() { return expertReviewRound; }
+    public void setExpertReviewRound(Integer expertReviewRound) { this.expertReviewRound = expertReviewRound; }
     public String getExpertReviewNotes() { return expertReviewNotes; }
     public void setExpertReviewNotes(String expertReviewNotes) { this.expertReviewNotes = expertReviewNotes; }
 }

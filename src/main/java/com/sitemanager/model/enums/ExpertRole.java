@@ -35,7 +35,25 @@ public enum ExpertRole {
             "- Will the end result be intuitive and user-friendly?\n" +
             "- Are there gaps between what was asked for and what will be delivered?\n" +
             "- Should anything be added or removed to better serve the user's needs?\n" +
-            "- Is the scope appropriate — not too much, not too little?");
+            "- Is the scope appropriate — not too much, not too little?"),
+
+    FRONTEND_ENGINEER("Frontend Engineer",
+            "You are a senior Frontend Engineer. Review this plan from a user interface and interaction perspective.\n" +
+            "Consider:\n" +
+            "- Will the user interface changes be visually consistent and polished?\n" +
+            "- Is the interaction flow smooth and intuitive?\n" +
+            "- Are loading states, error states, and empty states handled?\n" +
+            "- Will the changes work well on different screen sizes?\n" +
+            "- Are there accessibility concerns to address?"),
+
+    QA_ENGINEER("QA Engineer",
+            "You are a senior QA Engineer. Review this plan from a quality assurance and testing perspective.\n" +
+            "Consider:\n" +
+            "- Are all user-facing scenarios covered by the plan?\n" +
+            "- What could go wrong — what are the riskiest parts?\n" +
+            "- Are there boundary conditions or unusual inputs that could cause problems?\n" +
+            "- Is the testing strategy thorough enough to catch regressions?\n" +
+            "- Are there scenarios where features interact in unexpected ways?");
 
     private final String displayName;
     private final String reviewPrompt;
@@ -49,7 +67,8 @@ public enum ExpertRole {
     public String getReviewPrompt() { return reviewPrompt; }
 
     public static ExpertRole[] reviewOrder() {
-        return new ExpertRole[] { SOFTWARE_ARCHITECT, DATA_ANALYST, SOFTWARE_ENGINEER, PRODUCT_MANAGER };
+        return new ExpertRole[] { SOFTWARE_ARCHITECT, DATA_ANALYST, SOFTWARE_ENGINEER,
+                PRODUCT_MANAGER, FRONTEND_ENGINEER, QA_ENGINEER };
     }
 
     public static ExpertRole fromStep(int step) {
