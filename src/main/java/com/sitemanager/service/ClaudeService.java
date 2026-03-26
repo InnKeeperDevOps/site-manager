@@ -43,6 +43,15 @@ public class ClaudeService {
     @Value("${app.claude-timeout-minutes:30}")
     private int claudeTimeoutMinutes;
 
+    @Value("${app.claude-model:}")
+    private String claudeModel;
+
+    @Value("${app.claude-model-expert:}")
+    private String claudeModelExpert;
+
+    @Value("${app.claude-max-turns-expert:3}")
+    private int claudeMaxTurnsExpert;
+
     public String generateSessionId() {
         return UUID.randomUUID().toString();
     }
@@ -127,14 +136,14 @@ public class ClaudeService {
                 suggestionDescription
         );
 
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "evaluate");
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "evaluate", claudeModel, 0);
     }
 
     public CompletableFuture<String> continueConversation(String sessionId, String userMessage,
                                                            String conversationContext,
                                                            String workingDir,
                                                            Consumer<String> progressCallback) {
-        return sendToClaudeAsync(userMessage, sessionId, workingDir, conversationContext, progressCallback, "continue");
+        return sendToClaudeAsync(userMessage, sessionId, workingDir, conversationContext, progressCallback, "continue", claudeModel, 0);
     }
 
     public CompletableFuture<String> executePlan(String sessionId, String plan, String tasksJson,
@@ -176,7 +185,7 @@ public class ClaudeService {
                 workingDir, plan, tasksJson != null ? tasksJson : "No structured tasks — follow the plan above."
         );
 
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "execute");
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "execute", claudeModel, 0);
     }
 
     public CompletableFuture<String> expertReview(String sessionId, String expertDisplayName,
@@ -234,7 +243,9 @@ public class ClaudeService {
                         "Previous expert reviews:\n" + previousNotes + "\n\n" : ""
         );
 
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "expert-review:" + expertDisplayName);
+        String model = (claudeModelExpert != null && !claudeModelExpert.isBlank()) ? claudeModelExpert : claudeModel;
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback,
+                "expert-review:" + expertDisplayName, model, claudeMaxTurnsExpert);
     }
 
     public CompletableFuture<String> reviewExpertFeedback(String sessionId, String expertDisplayName,
@@ -257,16 +268,18 @@ public class ClaudeService {
                 expertDisplayName, currentPlan, expertDisplayName, expertAnalysis, proposedChanges
         );
 
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "review-feedback:" + expertDisplayName);
+        String model = (claudeModelExpert != null && !claudeModelExpert.isBlank()) ? claudeModelExpert : claudeModel;
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback,
+                "review-feedback:" + expertDisplayName, model, claudeMaxTurnsExpert);
     }
 
     private CompletableFuture<String> sendToClaudeAsync(String prompt, String sessionId,
                                                          String workingDir, String conversationContext,
                                                          Consumer<String> progressCallback,
-                                                         String operationType) {
+                                                         String operationType, String model, int maxTurns) {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                return sendToClaude(prompt, sessionId, workingDir, conversationContext, progressCallback, operationType);
+                return sendToClaude(prompt, sessionId, workingDir, conversationContext, progressCallback, operationType, model, maxTurns);
             } catch (Exception e) {
                 log.error("[CLAUDE-{}] session={} ERROR: {}", operationType, sessionId, e.getMessage(), e);
                 return "{\"status\": \"ERROR\", \"message\": \"" +
@@ -278,22 +291,36 @@ public class ClaudeService {
     private String sendToClaude(String prompt, String sessionId, String workingDir,
                                  String conversationContext,
                                  Consumer<String> progressCallback,
-                                 String operationType) throws Exception {
+                                 String operationType, String model, int maxTurns) throws Exception {
         long requestId = requestCounter.incrementAndGet();
         long startTime = System.currentTimeMillis();
         String logPrefix = String.format("[CLAUDE-REQ-%d][%s]", requestId, operationType);
 
-        ProcessBuilder pb = new ProcessBuilder();
-
         String cliSessionId = sessionMap.get(sessionId);
         boolean isResume = cliSessionId != null;
 
+        // Build command with optional model and max-turns flags
+        List<String> command = new java.util.ArrayList<>();
+        command.add(claudeCliPath);
         if (isResume) {
-            pb.command(claudeCliPath, "--resume", cliSessionId,
-                    "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions");
-        } else {
-            pb.command(claudeCliPath, "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions");
+            command.add("--resume");
+            command.add(cliSessionId);
         }
+        command.add("-p");
+        command.add(prompt);
+        command.add("--output-format");
+        command.add("json");
+        if (model != null && !model.isBlank()) {
+            command.add("--model");
+            command.add(model);
+        }
+        if (maxTurns > 0) {
+            command.add("--max-turns");
+            command.add(String.valueOf(maxTurns));
+        }
+        command.add("--dangerously-skip-permissions");
+
+        ProcessBuilder pb = new ProcessBuilder(command);
 
         if (workingDir != null) {
             pb.directory(new File(workingDir));
@@ -310,8 +337,11 @@ public class ClaudeService {
         pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
 
         // Log the request
-        log.info("{} session={} resume={} workDir={} promptLength={}",
-                logPrefix, sessionId, isResume, workingDir, prompt.length());
+        log.info("{} session={} resume={} model={} maxTurns={} workDir={} promptLength={}",
+                logPrefix, sessionId, isResume,
+                (model != null && !model.isBlank()) ? model : "default",
+                maxTurns > 0 ? maxTurns : "unlimited",
+                workingDir, prompt.length());
         log.debug("{} prompt: {}", logPrefix, truncate(prompt, MAX_LOG_PROMPT_LENGTH));
 
         Process process = pb.start();
@@ -370,7 +400,7 @@ public class ClaudeService {
                     if (isResume && isDeadSessionError(errorMsg)) {
                         log.warn("{} dead session detected, rebuilding context", logPrefix);
                         return handleDeadSession(prompt, sessionId, workingDir,
-                                conversationContext, progressCallback, operationType);
+                                conversationContext, progressCallback, operationType, model, maxTurns);
                     }
                     log.warn("{} error response: {}", logPrefix, truncate(errorMsg, MAX_LOG_RESPONSE_LENGTH));
                 }
@@ -383,7 +413,7 @@ public class ClaudeService {
         if (isResume && isDeadSessionError(rawOutput)) {
             log.warn("{} dead session detected (fallback check), rebuilding context", logPrefix);
             return handleDeadSession(prompt, sessionId, workingDir,
-                    conversationContext, progressCallback, operationType);
+                    conversationContext, progressCallback, operationType, model, maxTurns);
         }
 
         // Store the CLI session ID for future --resume calls
@@ -418,7 +448,7 @@ public class ClaudeService {
     private String handleDeadSession(String prompt, String sessionId, String workingDir,
                                       String conversationContext,
                                       Consumer<String> progressCallback,
-                                      String operationType) throws Exception {
+                                      String operationType, String model, int maxTurns) throws Exception {
         log.warn("[CLAUDE-{}] session={} is dead, starting fresh session with conversation context",
                 operationType, sessionId);
         sessionMap.remove(sessionId);
@@ -436,7 +466,7 @@ public class ClaudeService {
         }
 
         // Retry with a fresh session (no resume, no context to avoid infinite loop)
-        return sendToClaude(rebuiltPrompt, sessionId, workingDir, null, progressCallback, operationType + "-retry");
+        return sendToClaude(rebuiltPrompt, sessionId, workingDir, null, progressCallback, operationType + "-retry", model, maxTurns);
     }
 
     /**
