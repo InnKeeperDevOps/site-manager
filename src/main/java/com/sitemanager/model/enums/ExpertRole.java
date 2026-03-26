@@ -53,7 +53,43 @@ public enum ExpertRole {
             "- What could go wrong — what are the riskiest parts?\n" +
             "- Are there boundary conditions or unusual inputs that could cause problems?\n" +
             "- Is the testing strategy thorough enough to catch regressions?\n" +
-            "- Are there scenarios where features interact in unexpected ways?");
+            "- Are there scenarios where features interact in unexpected ways?"),
+
+    SECURITY_ENGINEER("Security Engineer",
+            "You are a senior Security Engineer. Review this plan from a security perspective.\n" +
+            "Consider:\n" +
+            "- Are there authentication or authorization gaps?\n" +
+            "- Could any user input be exploited — injection, scripting, or tampering?\n" +
+            "- Is sensitive data properly protected at rest and in transit?\n" +
+            "- Are there access control issues — can users see or do things they shouldn't?\n" +
+            "- Are there any common vulnerability patterns that should be mitigated?"),
+
+    DEVOPS_ENGINEER("DevOps Engineer",
+            "You are a senior DevOps Engineer. Review this plan from a deployment and operations perspective.\n" +
+            "Consider:\n" +
+            "- Will the changes deploy smoothly without breaking existing functionality?\n" +
+            "- Are there configuration or environment changes needed?\n" +
+            "- Could the changes cause downtime or require a migration?\n" +
+            "- Is there adequate logging and monitoring for the new features?\n" +
+            "- Are there build, packaging, or dependency concerns?"),
+
+    PERFORMANCE_ENGINEER("Performance Engineer",
+            "You are a senior Performance Engineer. Review this plan from a performance and efficiency perspective.\n" +
+            "Consider:\n" +
+            "- Are there potential bottlenecks or slow operations?\n" +
+            "- Will the changes handle high usage without degrading?\n" +
+            "- Is caching or optimization needed for any data access patterns?\n" +
+            "- Could any operations block the system or cause delays for users?\n" +
+            "- Are there resource usage concerns — memory, connections, or storage?"),
+
+    INFRASTRUCTURE_ENGINEER("Infrastructure Engineer",
+            "You are a senior Infrastructure Engineer. Review this plan from an infrastructure and reliability perspective.\n" +
+            "Consider:\n" +
+            "- Will the changes work across different environments and configurations?\n" +
+            "- Are there network, storage, or service dependency concerns?\n" +
+            "- Is the system resilient to failures — what happens if a component goes down?\n" +
+            "- Are there capacity or resource provisioning needs?\n" +
+            "- Is the plan compatible with the existing hosting and runtime setup?");
 
     private final String displayName;
     private final String reviewPrompt;
@@ -68,7 +104,8 @@ public enum ExpertRole {
 
     public static ExpertRole[] reviewOrder() {
         return new ExpertRole[] { SOFTWARE_ARCHITECT, DATA_ANALYST, SOFTWARE_ENGINEER,
-                PRODUCT_MANAGER, FRONTEND_ENGINEER, QA_ENGINEER };
+                PRODUCT_MANAGER, FRONTEND_ENGINEER, QA_ENGINEER,
+                SECURITY_ENGINEER, DEVOPS_ENGINEER, PERFORMANCE_ENGINEER, INFRASTRUCTURE_ENGINEER };
     }
 
     public static ExpertRole fromStep(int step) {
