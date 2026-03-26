@@ -9,6 +9,9 @@ import com.sitemanager.model.Suggestion;
 import com.sitemanager.model.SuggestionMessage;
 import com.sitemanager.model.enums.SenderType;
 import com.sitemanager.model.enums.SuggestionStatus;
+import com.sitemanager.model.PlanTask;
+import com.sitemanager.model.enums.TaskStatus;
+import com.sitemanager.repository.PlanTaskRepository;
 import com.sitemanager.repository.SuggestionMessageRepository;
 import com.sitemanager.repository.SuggestionRepository;
 import com.sitemanager.websocket.SuggestionWebSocketHandler;
@@ -35,17 +38,20 @@ public class SuggestionService {
 
     private final SuggestionRepository suggestionRepository;
     private final SuggestionMessageRepository messageRepository;
+    private final PlanTaskRepository planTaskRepository;
     private final ClaudeService claudeService;
     private final SiteSettingsService settingsService;
     private final SuggestionWebSocketHandler webSocketHandler;
 
     public SuggestionService(SuggestionRepository suggestionRepository,
                              SuggestionMessageRepository messageRepository,
+                             PlanTaskRepository planTaskRepository,
                              ClaudeService claudeService,
                              SiteSettingsService settingsService,
                              SuggestionWebSocketHandler webSocketHandler) {
         this.suggestionRepository = suggestionRepository;
         this.messageRepository = messageRepository;
+        this.planTaskRepository = planTaskRepository;
         this.claudeService = claudeService;
         this.settingsService = settingsService;
         this.webSocketHandler = webSocketHandler;
@@ -117,20 +123,27 @@ public class SuggestionService {
         broadcastUpdate(suggestion);
 
         String plan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription();
+        String tasksJson = buildTasksJsonForExecution(suggestion.getId());
+        String taskStatusSummary = buildTaskStatusSummary(suggestion.getId());
         String context = buildConversationContext(suggestion.getId());
 
         String resumePrompt = "The application was restarted while you were executing an implementation plan. " +
                 "You need to resume where you left off.\n\n" +
                 "The implementation plan is:\n" + plan + "\n\n" +
+                (tasksJson != null ? "Tasks:\n" + tasksJson + "\n\n" : "") +
+                (taskStatusSummary != null ? "Task status before restart:\n" + taskStatusSummary + "\n\n" : "") +
                 "Please examine the current state of the code in this repository to determine:\n" +
                 "1. Which parts of the plan have already been completed\n" +
                 "2. Which parts still need to be done\n" +
                 "3. Whether any in-progress work needs to be fixed or finished\n\n" +
                 "Then continue executing the remaining steps of the plan. " +
                 "Write unit tests for all new code and run existing tests to ensure nothing is broken.\n\n" +
-                "Respond in JSON format for each phase:\n" +
-                "{\"phase\": \"description\", \"status\": \"IN_PROGRESS\" or \"COMPLETED\" or \"FAILED\", " +
-                "\"message\": \"details\", \"testsRun\": number, \"testsPassed\": number}";
+                "IMPORTANT: Before starting each task, output a JSON status line:\n" +
+                "{\"taskOrder\": number, \"status\": \"IN_PROGRESS\", \"message\": \"starting description\"}\n" +
+                "After completing each task, output:\n" +
+                "{\"taskOrder\": number, \"status\": \"COMPLETED\", \"message\": \"what was done\"}\n" +
+                "When ALL tasks are done, output a final summary:\n" +
+                "{\"status\": \"COMPLETED\", \"message\": \"summary\", \"testsRun\": number, \"testsPassed\": number}";
 
         String executionSessionId = claudeService.generateSessionId();
 
@@ -141,9 +154,7 @@ public class SuggestionService {
                     context,
                     workDir,
                     progress -> {
-                        webSocketHandler.sendToSuggestion(suggestion.getId(),
-                                "{\"type\":\"execution_progress\",\"content\":\"" +
-                                        escapeJson(progress) + "\"}");
+                        handleExecutionProgress(suggestion.getId(), progress);
                     }
             ).thenAccept(result -> {
                 handleExecutionResult(suggestion.getId(), result);
@@ -241,6 +252,8 @@ public class SuggestionService {
             suggestion.setCurrentPhase("Plan ready - awaiting admin approval");
             suggestion.setPlanSummary(extractPlan(response));
             suggestion.setPendingClarificationQuestions(null);
+            // Parse and save structured tasks
+            savePlanTasks(suggestionId, response);
         } else if (response.contains("NEEDS_CLARIFICATION")) {
             // Do NOT post clarification questions to the user discussion;
             // they are delivered via WebSocket as structured prompts instead
@@ -413,14 +426,14 @@ public class SuggestionService {
                         "Repository cloned. Starting implementation...");
 
                 String executionSessionId = claudeService.generateSessionId();
+                String tasksJson = buildTasksJsonForExecution(suggestion.getId());
                 claudeService.executePlan(
                         executionSessionId,
                         suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription(),
+                        tasksJson,
                         workDir,
                         progress -> {
-                            webSocketHandler.sendToSuggestion(suggestion.getId(),
-                                    "{\"type\":\"execution_progress\",\"content\":\"" +
-                                            escapeJson(progress) + "\"}");
+                            handleExecutionProgress(suggestion.getId(), progress);
                         }
                 ).thenAccept(result -> {
                     handleExecutionResult(suggestion.getId(), result);
@@ -594,6 +607,145 @@ public class SuggestionService {
         }
 
         return body.toString();
+    }
+
+    // --- Plan Task management ---
+
+    private void savePlanTasks(Long suggestionId, String response) {
+        try {
+            // Delete any existing tasks for this suggestion (re-plan scenario)
+            planTaskRepository.deleteBySuggestionId(suggestionId);
+
+            String json = extractJsonBlock(response);
+            if (json == null) return;
+
+            JsonNode root = objectMapper.readTree(json);
+            JsonNode tasksNode = root.get("tasks");
+            if (tasksNode == null || !tasksNode.isArray()) return;
+
+            int order = 1;
+            for (JsonNode taskNode : tasksNode) {
+                PlanTask task = new PlanTask();
+                task.setSuggestionId(suggestionId);
+                task.setTaskOrder(order++);
+                task.setTitle(taskNode.has("title") ? taskNode.get("title").asText() : "Task " + (order - 1));
+                task.setDescription(taskNode.has("description") ? taskNode.get("description").asText() : null);
+                task.setEstimatedMinutes(taskNode.has("estimatedMinutes") ? taskNode.get("estimatedMinutes").asInt() : null);
+                task.setStatus(TaskStatus.PENDING);
+                planTaskRepository.save(task);
+            }
+
+            log.info("Saved {} plan tasks for suggestion {}", order - 1, suggestionId);
+            broadcastTasks(suggestionId);
+        } catch (Exception e) {
+            log.warn("Failed to parse plan tasks from response: {}", e.getMessage());
+        }
+    }
+
+    public List<PlanTask> getPlanTasks(Long suggestionId) {
+        return planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
+    }
+
+    private String buildTaskStatusSummary(Long suggestionId) {
+        List<PlanTask> tasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
+        if (tasks.isEmpty()) return null;
+
+        StringBuilder sb = new StringBuilder();
+        for (PlanTask task : tasks) {
+            sb.append("Task ").append(task.getTaskOrder()).append(": ")
+              .append(task.getTitle()).append(" — ").append(task.getStatus()).append("\n");
+        }
+        return sb.toString();
+    }
+
+    private String buildTasksJsonForExecution(Long suggestionId) {
+        List<PlanTask> tasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
+        if (tasks.isEmpty()) return null;
+
+        StringBuilder sb = new StringBuilder();
+        for (PlanTask task : tasks) {
+            sb.append("Task ").append(task.getTaskOrder()).append(": ")
+              .append(task.getTitle());
+            if (task.getDescription() != null) {
+                sb.append(" — ").append(task.getDescription());
+            }
+            if (task.getEstimatedMinutes() != null) {
+                sb.append(" (~").append(task.getEstimatedMinutes()).append(" min)");
+            }
+            sb.append("\n");
+        }
+        return sb.toString();
+    }
+
+    private void handleExecutionProgress(Long suggestionId, String progress) {
+        // Forward raw progress to WebSocket
+        webSocketHandler.sendToSuggestion(suggestionId,
+                "{\"type\":\"execution_progress\",\"content\":\"" +
+                        escapeJson(progress) + "\"}");
+
+        // Try to parse task status updates from Claude's output
+        try {
+            String json = extractJsonBlock(progress);
+            if (json == null) return;
+
+            JsonNode node = objectMapper.readTree(json);
+            if (!node.has("taskOrder")) return;
+
+            int taskOrder = node.get("taskOrder").asInt();
+            String status = node.has("status") ? node.get("status").asText() : null;
+            String message = node.has("message") ? node.get("message").asText() : null;
+
+            if (status == null) return;
+
+            Optional<PlanTask> optTask = planTaskRepository.findBySuggestionIdAndTaskOrder(suggestionId, taskOrder);
+            if (optTask.isEmpty()) return;
+
+            PlanTask task = optTask.get();
+            TaskStatus newStatus = TaskStatus.valueOf(status);
+            task.setStatus(newStatus);
+
+            if (newStatus == TaskStatus.IN_PROGRESS && task.getStartedAt() == null) {
+                task.setStartedAt(Instant.now());
+
+                // Update suggestion's currentPhase to show which task is running
+                Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+                if (suggestion != null) {
+                    List<PlanTask> allTasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
+                    long completed = allTasks.stream().filter(t -> t.getStatus() == TaskStatus.COMPLETED).count();
+                    suggestion.setCurrentPhase("Task " + taskOrder + "/" + allTasks.size() + ": " + task.getTitle());
+                    suggestionRepository.save(suggestion);
+                    broadcastUpdate(suggestion);
+                }
+            } else if (newStatus == TaskStatus.COMPLETED || newStatus == TaskStatus.FAILED) {
+                task.setCompletedAt(Instant.now());
+            }
+
+            planTaskRepository.save(task);
+            broadcastTaskUpdate(suggestionId, task);
+        } catch (Exception e) {
+            // Not a task status line — just normal progress text, ignore
+        }
+    }
+
+    private void broadcastTasks(Long suggestionId) {
+        List<PlanTask> tasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
+        try {
+            String tasksJson = objectMapper.writeValueAsString(tasks);
+            webSocketHandler.sendToSuggestion(suggestionId,
+                    "{\"type\":\"tasks_update\",\"tasks\":" + tasksJson + "}");
+        } catch (Exception e) {
+            log.warn("Failed to broadcast tasks: {}", e.getMessage());
+        }
+    }
+
+    private void broadcastTaskUpdate(Long suggestionId, PlanTask task) {
+        try {
+            String taskJson = objectMapper.writeValueAsString(task);
+            webSocketHandler.sendToSuggestion(suggestionId,
+                    "{\"type\":\"task_update\",\"task\":" + taskJson + "}");
+        } catch (Exception e) {
+            log.warn("Failed to broadcast task update: {}", e.getMessage());
+        }
     }
 
     @Transactional

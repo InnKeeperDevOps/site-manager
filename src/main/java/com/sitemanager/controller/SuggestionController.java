@@ -4,6 +4,7 @@ import com.sitemanager.dto.ClarificationRequest;
 import com.sitemanager.dto.MessageRequest;
 import com.sitemanager.dto.SuggestionRequest;
 import com.sitemanager.dto.VoteRequest;
+import com.sitemanager.model.PlanTask;
 import com.sitemanager.model.Suggestion;
 import com.sitemanager.model.SuggestionMessage;
 import com.sitemanager.service.SiteSettingsService;
@@ -94,6 +95,11 @@ public class SuggestionController {
 
         suggestionService.handleClarificationAnswers(id, senderName, request.getAnswers());
         return ResponseEntity.ok(Map.of("message", "Clarification answers submitted"));
+    }
+
+    @GetMapping("/{id}/tasks")
+    public ResponseEntity<List<PlanTask>> getTasks(@PathVariable Long id) {
+        return ResponseEntity.ok(suggestionService.getPlanTasks(id));
     }
 
     @GetMapping("/{id}/clarification-questions")

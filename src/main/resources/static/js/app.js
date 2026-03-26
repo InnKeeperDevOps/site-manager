@@ -12,7 +12,8 @@ const app = {
             answers: [],
             currentIndex: 0,
             active: false
-        }
+        },
+        tasks: []
     },
 
     async init() {
@@ -172,6 +173,8 @@ const app = {
         this.state.currentSuggestion = id;
         const suggestion = await this.api('/suggestions/' + id);
         const messages = await this.api('/suggestions/' + id + '/messages');
+        const tasks = await this.api('/suggestions/' + id + '/tasks');
+        this.state.tasks = tasks || [];
 
         document.getElementById('detailTitle').textContent = suggestion.title;
         document.getElementById('detailDescription').textContent = suggestion.description;
@@ -207,6 +210,9 @@ const app = {
         } else {
             planEl.style.display = 'none';
         }
+
+        // Tasks
+        this.renderTasks();
 
         // PR link
         const prEl = document.getElementById('detailPr');
@@ -277,6 +283,62 @@ const app = {
                 <div class="message-content">${this.formatContent(m.content)}</div>
             </div>
         `;
+    },
+
+    renderTasks() {
+        const container = document.getElementById('detailTasks');
+        const listEl = document.getElementById('taskList');
+        const tasks = this.state.tasks;
+        if (!tasks || tasks.length === 0) {
+            container.style.display = 'none';
+            return;
+        }
+        container.style.display = '';
+
+        const completed = tasks.filter(t => t.status === 'COMPLETED').length;
+        const total = tasks.length;
+        const pct = Math.round((completed / total) * 100);
+        document.getElementById('taskProgress').textContent = `${completed}/${total} completed`;
+        document.getElementById('taskProgressFill').style.width = pct + '%';
+
+        listEl.innerHTML = tasks.map(t => {
+            const icons = { PENDING: '○', IN_PROGRESS: '◉', COMPLETED: '✓', FAILED: '✗' };
+            const icon = icons[t.status] || '○';
+            const statusClass = t.status.toLowerCase();
+            const titleClass = t.status === 'COMPLETED' ? 'task-title completed' : 'task-title';
+
+            let meta = '';
+            if (t.estimatedMinutes) meta += `~${t.estimatedMinutes} min`;
+            if (t.startedAt && !t.completedAt) {
+                const elapsed = Math.round((Date.now() - new Date(t.startedAt).getTime()) / 60000);
+                meta += (meta ? ' · ' : '') + `${elapsed} min elapsed`;
+            }
+            if (t.startedAt && t.completedAt) {
+                const dur = Math.round((new Date(t.completedAt).getTime() - new Date(t.startedAt).getTime()) / 60000);
+                meta += (meta ? ' · ' : '') + `took ${dur} min`;
+            }
+
+            return `<div class="task-item" data-task-order="${t.taskOrder}">
+                <div class="task-icon ${statusClass}">${icon}</div>
+                <div class="task-body">
+                    <div class="${titleClass}">${t.taskOrder}. ${this.esc(t.title)}</div>
+                    ${t.description ? `<div class="task-desc">${this.esc(t.description)}</div>` : ''}
+                    ${meta ? `<div class="task-meta">${meta}</div>` : ''}
+                </div>
+            </div>`;
+        }).join('');
+    },
+
+    updateTask(taskData) {
+        const tasks = this.state.tasks;
+        const idx = tasks.findIndex(t => t.taskOrder === taskData.taskOrder);
+        if (idx >= 0) {
+            tasks[idx] = { ...tasks[idx], ...taskData };
+        } else {
+            tasks.push(taskData);
+            tasks.sort((a, b) => a.taskOrder - b.taskOrder);
+        }
+        this.renderTasks();
     },
 
     async reply() {
@@ -537,6 +599,19 @@ const app = {
                     prEl.style.display = '';
                     prLink.href = data.prUrl;
                     prLink.textContent = data.prUrl;
+                }
+                break;
+            }
+            case 'task_update': {
+                if (data.task) {
+                    this.updateTask(data.task);
+                }
+                break;
+            }
+            case 'tasks_update': {
+                if (data.tasks) {
+                    this.state.tasks = data.tasks;
+                    this.renderTasks();
                 }
                 break;
             }

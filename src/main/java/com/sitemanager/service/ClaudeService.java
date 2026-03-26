@@ -91,8 +91,15 @@ public class ClaudeService {
                 "If ready to plan:\n" +
                 "{\"status\": \"PLAN_READY\", " +
                 "\"message\": \"your response to the user\", " +
-                "\"plan\": \"implementation plan\"}\n\n" +
-                "IMPORTANT: When status is NEEDS_CLARIFICATION, you MUST include a \"questions\" array with each clarifying question as a separate string element. Each question should be self-contained and specific.",
+                "\"plan\": \"brief overall summary of the implementation\", " +
+                "\"tasks\": [\n" +
+                "  {\"title\": \"short task name\", \"description\": \"what this task involves\", \"estimatedMinutes\": number},\n" +
+                "  ...\n" +
+                "]}\n\n" +
+                "IMPORTANT: When status is NEEDS_CLARIFICATION, you MUST include a \"questions\" array with each clarifying question as a separate string element. Each question should be self-contained and specific.\n" +
+                "When status is PLAN_READY, you MUST include a \"tasks\" array that breaks the plan into ordered implementation steps. " +
+                "Each task should be a concrete, actionable unit of work with a realistic time estimate in minutes. " +
+                "Order tasks by implementation sequence. Typically 3-8 tasks is appropriate.",
                 repoUrl != null ? repoUrl : "not configured",
                 suggestionTitle,
                 suggestionDescription
@@ -108,20 +115,28 @@ public class ClaudeService {
         return sendToClaudeAsync(userMessage, sessionId, workingDir, conversationContext, progressCallback);
     }
 
-    public CompletableFuture<String> executePlan(String sessionId, String plan, String workingDir,
+    public CompletableFuture<String> executePlan(String sessionId, String plan, String tasksJson,
+                                                  String workingDir,
                                                   Consumer<String> progressCallback) {
         String prompt = String.format(
                 "Execute the following implementation plan in the repository at %s.\n\n" +
                 "Plan:\n%s\n\n" +
+                "Tasks (execute in order):\n%s\n\n" +
                 "Instructions:\n" +
-                "1. Implement each step of the plan\n" +
+                "1. Execute each task in order by its task number\n" +
                 "2. Write unit tests for all new code\n" +
                 "3. Run existing tests to ensure nothing is broken\n" +
-                "4. Provide progress updates as you work\n" +
-                "5. Respond in JSON format for each phase:\n" +
-                "{\"phase\": \"description\", \"status\": \"IN_PROGRESS\" or \"COMPLETED\" or \"FAILED\", " +
-                "\"message\": \"details\", \"testsRun\": number, \"testsPassed\": number}",
-                workingDir, plan
+                "4. IMPORTANT: Before starting each task, output a JSON status line:\n" +
+                "{\"taskOrder\": number, \"status\": \"IN_PROGRESS\", \"message\": \"starting description\"}\n" +
+                "5. After completing each task, output a JSON status line:\n" +
+                "{\"taskOrder\": number, \"status\": \"COMPLETED\", \"message\": \"what was done\"}\n" +
+                "6. If a task fails, output:\n" +
+                "{\"taskOrder\": number, \"status\": \"FAILED\", \"message\": \"what went wrong\"}\n" +
+                "7. When ALL tasks are done, output a final summary:\n" +
+                "{\"status\": \"COMPLETED\", \"message\": \"summary\", \"testsRun\": number, \"testsPassed\": number}\n" +
+                "8. If the overall execution fails:\n" +
+                "{\"status\": \"FAILED\", \"message\": \"what went wrong\"}",
+                workingDir, plan, tasksJson != null ? tasksJson : "No structured tasks — follow the plan above."
         );
 
         return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
