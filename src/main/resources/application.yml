@@ -17,8 +17,22 @@ spring:
 server:
   port: 8080
 
+logging:
+  level:
+    com.sitemanager.service.ClaudeService: INFO
+    com.sitemanager.service.SuggestionService: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+
 app:
   workspace-dir: /workspace
   claude-cli-path: claude
   suggestion-timeout-minutes: 1440
+  claude-timeout-minutes: 30
+  # Model for main operations (evaluate, execute). Empty = CLI default.
+  claude-model: ${CLAUDE_MODEL:}
+  # Faster/cheaper model for expert reviews and feedback validation. Empty = uses claude-model.
+  claude-model-expert: ${CLAUDE_MODEL_EXPERT:}
+  # Max turns for expert reviews (limits tool-use loops). Default 3.
+  claude-max-turns-expert: ${CLAUDE_MAX_TURNS_EXPERT:3}
   git-ssh-key-path: ${GIT_SSH_KEY_PATH:}

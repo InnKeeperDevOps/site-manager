@@ -89,7 +89,18 @@ public enum ExpertRole {
             "- Are there network, storage, or service dependency concerns?\n" +
             "- Is the system resilient to failures — what happens if a component goes down?\n" +
             "- Are there capacity or resource provisioning needs?\n" +
-            "- Is the plan compatible with the existing hosting and runtime setup?");
+            "- Is the plan compatible with the existing hosting and runtime setup?"),
+
+    UX_EXPERT("UX Expert",
+            "You are a senior UX Expert. Review this plan from a user experience and usability perspective.\n" +
+            "Consider:\n" +
+            "- Is the user journey clear, intuitive, and frictionless?\n" +
+            "- Are there cognitive load issues — is the user being asked to think too much?\n" +
+            "- Do the interactions follow established UX patterns and conventions users expect?\n" +
+            "- Is feedback provided at every step — do users know what happened and what to do next?\n" +
+            "- Are edge cases handled gracefully from the user's perspective — errors, empty states, slow loading?\n" +
+            "- Is the information hierarchy clear — can users quickly find what matters most?\n" +
+            "- Are there accessibility concerns — color contrast, keyboard navigation, screen reader support?");
 
     private final String displayName;
     private final String reviewPrompt;
@@ -105,7 +116,53 @@ public enum ExpertRole {
     public static ExpertRole[] reviewOrder() {
         return new ExpertRole[] { SOFTWARE_ARCHITECT, SECURITY_ENGINEER, INFRASTRUCTURE_ENGINEER,
                 DATA_ANALYST, PERFORMANCE_ENGINEER, DEVOPS_ENGINEER,
-                SOFTWARE_ENGINEER, FRONTEND_ENGINEER, PRODUCT_MANAGER, QA_ENGINEER };
+                SOFTWARE_ENGINEER, FRONTEND_ENGINEER, UX_EXPERT, PRODUCT_MANAGER, QA_ENGINEER };
+    }
+
+    /**
+     * Expert review batches for parallel execution. Experts within the same batch
+     * run concurrently since they review independent aspects of the plan.
+     * Batches run sequentially so later batches can see earlier notes.
+     */
+    public static ExpertRole[][] reviewBatches() {
+        return new ExpertRole[][] {
+            // Batch 1: Architecture & security foundations
+            { SOFTWARE_ARCHITECT, SECURITY_ENGINEER, INFRASTRUCTURE_ENGINEER },
+            // Batch 2: Data, performance & ops
+            { DATA_ANALYST, PERFORMANCE_ENGINEER, DEVOPS_ENGINEER },
+            // Batch 3: Implementation, UI & UX
+            { SOFTWARE_ENGINEER, FRONTEND_ENGINEER, UX_EXPERT },
+            // Batch 4: Product & QA
+            { PRODUCT_MANAGER, QA_ENGINEER }
+        };
+    }
+
+    /**
+     * Get the batch index and position within that batch for a given step.
+     * Returns null if step is out of range.
+     */
+    public static int[] batchForStep(int step) {
+        ExpertRole[][] batches = reviewBatches();
+        int cumulative = 0;
+        for (int b = 0; b < batches.length; b++) {
+            if (step < cumulative + batches[b].length) {
+                return new int[] { b, step - cumulative };
+            }
+            cumulative += batches[b].length;
+        }
+        return null;
+    }
+
+    /**
+     * Get the starting step index for a given batch.
+     */
+    public static int batchStartStep(int batchIndex) {
+        ExpertRole[][] batches = reviewBatches();
+        int step = 0;
+        for (int b = 0; b < batchIndex && b < batches.length; b++) {
+            step += batches[b].length;
+        }
+        return step;
     }
 
     public static ExpertRole fromStep(int step) {

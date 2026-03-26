@@ -237,6 +237,21 @@
                     <input type="password" id="settingGithubToken"
                            placeholder="Paste your access token (optional)">
                 </div>
+                <div class="form-group">
+                    <label>AI Model</label>
+                    <input type="text" id="settingClaudeModel"
+                           placeholder="e.g. claude-sonnet-4-6 (blank = CLI default)">
+                </div>
+                <div class="form-group">
+                    <label>AI Model for Expert Reviews</label>
+                    <input type="text" id="settingClaudeModelExpert"
+                           placeholder="e.g. claude-haiku-4-5-20251001 (blank = same as above)">
+                </div>
+                <div class="form-group">
+                    <label>Max Turns for Expert Reviews</label>
+                    <input type="number" id="settingClaudeMaxTurnsExpert"
+                           placeholder="3" min="1" max="20">
+                </div>
                 <div class="toggle-row">
                     <span class="toggle-label">Allow Anonymous Suggestions</span>
                     <label class="toggle">

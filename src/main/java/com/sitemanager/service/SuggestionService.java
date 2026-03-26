@@ -28,6 +28,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.io.File;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.List;
 import java.util.Optional;
@@ -263,6 +265,14 @@ public class SuggestionService {
 
         suggestion.setLastActivityAt(Instant.now());
 
+        // Log the AI evaluation result
+        String responseStatus = response.contains("PLAN_READY") ? "PLAN_READY" :
+                response.contains("NEEDS_CLARIFICATION") ? "NEEDS_CLARIFICATION" : "UNKNOWN";
+        log.info("[AI-FLOW] suggestion={} evaluation result: status={} responseLength={}",
+                suggestionId, responseStatus, response.length());
+        log.debug("[AI-FLOW] suggestion={} evaluation response: {}", suggestionId,
+                response.length() > 1000 ? response.substring(0, 1000) + "..." : response);
+
         // Extract the human-readable message from JSON, never show raw JSON in discussion
         String displayMessage = extractMessage(response);
 
@@ -447,7 +457,110 @@ public class SuggestionService {
             return;
         }
 
-        ExpertRole expert = experts[step];
+        // Determine which batch this step belongs to and run the whole batch in parallel
+        int[] batchInfo = ExpertRole.batchForStep(step);
+        if (batchInfo == null) {
+            // Fallback: run single expert
+            runSingleExpertReview(suggestionId, suggestion, experts[step]);
+            return;
+        }
+
+        int batchIndex = batchInfo[0];
+        int positionInBatch = batchInfo[1];
+
+        // If we're at the start of a batch, launch all experts in this batch concurrently
+        if (positionInBatch == 0) {
+            runExpertBatch(suggestionId, batchIndex);
+        } else {
+            // We're mid-batch (resumed after clarification) — run remaining experts sequentially
+            runSingleExpertReview(suggestionId, suggestion, experts[step]);
+        }
+    }
+
+    /**
+     * Run all experts in a batch concurrently. Results are collected and processed
+     * sequentially after all complete. If any expert needs clarification, the pipeline
+     * pauses at that expert.
+     */
+    private void runExpertBatch(Long suggestionId, int batchIndex) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) return;
+
+        ExpertRole[][] batches = ExpertRole.reviewBatches();
+        if (batchIndex >= batches.length) return;
+
+        ExpertRole[] batch = batches[batchIndex];
+        long batchStart = System.currentTimeMillis();
+        log.info("[EXPERT-BATCH] Starting batch {} ({} experts: {}) for suggestion {}",
+                batchIndex + 1, batch.length,
+                String.join(", ", java.util.Arrays.stream(batch).map(ExpertRole::getDisplayName).toArray(String[]::new)),
+                suggestionId);
+
+        // Show all batch experts as in-progress
+        String expertNames = String.join(", ",
+                java.util.Arrays.stream(batch).map(ExpertRole::getDisplayName).toArray(String[]::new));
+        suggestion.setCurrentPhase(expertNames + " are reviewing the plan...");
+        suggestionRepository.save(suggestion);
+        broadcastUpdate(suggestion);
+        broadcastExpertReviewStatus(suggestionId);
+
+        String plan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription();
+        String tasksJson = buildTasksJsonForExecution(suggestionId);
+        String previousNotes = suggestion.getExpertReviewNotes();
+
+        // Launch all experts in this batch concurrently
+        List<CompletableFuture<ExpertBatchResult>> futures = new ArrayList<>();
+        for (ExpertRole expert : batch) {
+            String reviewSessionId = claudeService.generateSessionId();
+            CompletableFuture<ExpertBatchResult> future = claudeService.expertReview(
+                    reviewSessionId,
+                    expert.getDisplayName(),
+                    expert.getReviewPrompt(),
+                    suggestion.getTitle(),
+                    suggestion.getDescription(),
+                    plan,
+                    tasksJson,
+                    previousNotes,
+                    claudeService.getMainRepoDir(),
+                    progress -> {
+                        webSocketHandler.sendToSuggestion(suggestionId,
+                                "{\"type\":\"progress\",\"content\":\"" +
+                                        escapeJson(progress) + "\"}");
+                    }
+            ).thenApply(response -> new ExpertBatchResult(expert, reviewSessionId, response));
+            futures.add(future);
+        }
+
+        // When all experts in the batch complete, process results sequentially
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .thenRun(() -> {
+                    long batchElapsed = System.currentTimeMillis() - batchStart;
+                    log.info("[EXPERT-BATCH] Batch {} completed in {}ms for suggestion {}",
+                            batchIndex + 1, batchElapsed, suggestionId);
+
+                    for (CompletableFuture<ExpertBatchResult> future : futures) {
+                        try {
+                            ExpertBatchResult result = future.join();
+                            handleExpertReviewResponse(suggestionId, result.response,
+                                    result.expert, result.sessionId);
+
+                            // Check if the expert paused the pipeline (clarification)
+                            Suggestion refreshed = suggestionRepository.findById(suggestionId).orElse(null);
+                            if (refreshed == null) return;
+                            if (refreshed.getPendingClarificationQuestions() != null) {
+                                log.info("[EXPERT-BATCH] Batch {} paused: {} needs clarification for suggestion {}",
+                                        batchIndex + 1, result.expert.getDisplayName(), suggestionId);
+                                return;
+                            }
+                        } catch (Exception e) {
+                            log.error("[EXPERT-BATCH] Error processing result for suggestion {}: {}",
+                                    suggestionId, e.getMessage(), e);
+                        }
+                    }
+                });
+    }
+
+    private void runSingleExpertReview(Long suggestionId, Suggestion suggestion, ExpertRole expert) {
         suggestion.setCurrentPhase(expert.getDisplayName() + " is reviewing the plan...");
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
@@ -478,6 +591,19 @@ public class SuggestionService {
         });
     }
 
+    /** Holds the result of a single expert review within a batch. */
+    private static class ExpertBatchResult {
+        final ExpertRole expert;
+        final String sessionId;
+        final String response;
+
+        ExpertBatchResult(ExpertRole expert, String sessionId, String response) {
+            this.expert = expert;
+            this.sessionId = sessionId;
+            this.response = response;
+        }
+    }
+
     @Transactional
     public void handleExpertReviewResponse(Long suggestionId, String response,
                                             ExpertRole expert, String reviewSessionId) {
@@ -485,6 +611,9 @@ public class SuggestionService {
         if (suggestion == null) return;
 
         suggestion.setLastActivityAt(Instant.now());
+
+        log.info("[AI-FLOW] suggestion={} expert={} review response received, responseLength={}",
+                suggestionId, expert.getDisplayName(), response.length());
 
         try {
             String json = extractJsonBlock(response);
@@ -499,6 +628,9 @@ public class SuggestionService {
             String status = root.has("status") ? root.get("status").asText() : "APPROVED";
             String analysis = root.has("analysis") ? root.get("analysis").asText() : "";
             String message = root.has("message") ? root.get("message").asText() : "";
+
+            log.info("[AI-FLOW] suggestion={} expert={} verdict={} analysisLength={}",
+                    suggestionId, expert.getDisplayName(), status, analysis.length());
 
             // Ensure every expert provides substantive feedback
             if (!isSubstantiveAnalysis(analysis) && !"NEEDS_CLARIFICATION".equals(status)) {
@@ -536,8 +668,12 @@ public class SuggestionService {
             if ("CHANGES_PROPOSED".equals(status)) {
                 String proposedChanges = root.has("proposedChanges") ? root.get("proposedChanges").asText() : "";
 
-                // Send to reviewer Claude to validate
-                suggestion.setCurrentPhase("Reviewing " + expert.getDisplayName() + "'s recommendations...");
+                // Pick the right reviewer: Product Manager for UX/product experts,
+                // Software Architect for technical experts
+                ExpertRole reviewer = pickChangeReviewer(expert);
+
+                suggestion.setCurrentPhase(reviewer.getDisplayName() + " is evaluating " +
+                        expert.getDisplayName() + "'s recommendations...");
                 suggestionRepository.save(suggestion);
                 broadcastUpdate(suggestion);
 
@@ -550,6 +686,8 @@ public class SuggestionService {
                         analysis,
                         proposedChanges,
                         currentPlan,
+                        reviewer.getDisplayName(),
+                        reviewer.getReviewPrompt(),
                         claudeService.getMainRepoDir(),
                         progress -> {}
                 ).thenAccept(reviewerResponse -> {
@@ -735,6 +873,18 @@ public class SuggestionService {
                 ",\"note\":\"" + escapeJson(note) + "\"}");
     }
 
+    /**
+     * Pick the appropriate expert to review proposed changes.
+     * Product Manager reviews UX/product/frontend changes.
+     * Software Architect reviews all other technical changes.
+     */
+    private ExpertRole pickChangeReviewer(ExpertRole proposingExpert) {
+        return switch (proposingExpert) {
+            case FRONTEND_ENGINEER, UX_EXPERT, QA_ENGINEER -> ExpertRole.PRODUCT_MANAGER;
+            default -> ExpertRole.SOFTWARE_ARCHITECT;
+        };
+    }
+
     private boolean isSubstantiveAnalysis(String analysis) {
         if (analysis == null || analysis.isBlank()) return false;
         return analysis.trim().length() >= MIN_EXPERT_ANALYSIS_LENGTH;
@@ -905,6 +1055,8 @@ public class SuggestionService {
     }
 
     private void executeApprovedSuggestion(Suggestion suggestion) {
+        log.info("[AI-FLOW] suggestion={} starting execution", suggestion.getId());
+        long executionStart = System.currentTimeMillis();
         String repoUrl = settingsService.getSettings().getTargetRepoUrl();
         if (repoUrl == null || repoUrl.isBlank()) {
             addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
@@ -975,6 +1127,11 @@ public class SuggestionService {
     public void handleExecutionResult(Long suggestionId, String result) {
         Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
         if (suggestion == null) return;
+
+        String execStatus = result.contains("COMPLETED") ? "COMPLETED" :
+                result.contains("FAILED") ? "FAILED" : "TESTING";
+        log.info("[AI-FLOW] suggestion={} execution result: status={} resultLength={}",
+                suggestionId, execStatus, result.length());
 
         addMessage(suggestionId, SenderType.AI, "Claude", result);
 

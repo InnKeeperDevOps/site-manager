@@ -2,6 +2,8 @@ package com.sitemanager.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sitemanager.model.SiteSettings;
+import com.sitemanager.repository.SiteSettingsRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -17,15 +19,21 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 @Service
 public class ClaudeService {
 
     private static final Logger log = LoggerFactory.getLogger(ClaudeService.class);
+    private static final int MAX_LOG_PROMPT_LENGTH = 500;
+    private static final int MAX_LOG_RESPONSE_LENGTH = 1000;
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Map<String, String> sessionMap = new ConcurrentHashMap<>();
+    private final AtomicLong requestCounter = new AtomicLong(0);
+
+    private final SiteSettingsRepository settingsRepository;
 
     @Value("${app.claude-cli-path:claude}")
     private String claudeCliPath;
@@ -35,6 +43,69 @@ public class ClaudeService {
 
     @Value("${app.git-ssh-key-path:}")
     private String gitSshKeyPath;
+
+    @Value("${app.claude-timeout-minutes:30}")
+    private int claudeTimeoutMinutes;
+
+    @Value("${app.claude-model:}")
+    private String claudeModelDefault;
+
+    @Value("${app.claude-model-expert:}")
+    private String claudeModelExpertDefault;
+
+    @Value("${app.claude-max-turns-expert:3}")
+    private int claudeMaxTurnsExpertDefault;
+
+    public ClaudeService(SiteSettingsRepository settingsRepository) {
+        this.settingsRepository = settingsRepository;
+    }
+
+    private SiteSettings getSettings() {
+        return settingsRepository.findAll().stream().findFirst().orElse(new SiteSettings());
+    }
+
+    /**
+     * Resolve the model to use for main operations.
+     * Settings DB takes priority, then application.yml / env var, then CLI default.
+     */
+    private String resolveModel() {
+        try {
+            String fromSettings = getSettings().getClaudeModel();
+            if (fromSettings != null && !fromSettings.isBlank()) return fromSettings;
+        } catch (Exception e) {
+            log.debug("Could not read model from settings: {}", e.getMessage());
+        }
+        return claudeModelDefault;
+    }
+
+    /**
+     * Resolve the model to use for expert reviews.
+     * Settings DB takes priority, then application.yml / env var, then falls back to main model.
+     */
+    private String resolveExpertModel() {
+        try {
+            String fromSettings = getSettings().getClaudeModelExpert();
+            if (fromSettings != null && !fromSettings.isBlank()) return fromSettings;
+        } catch (Exception e) {
+            log.debug("Could not read expert model from settings: {}", e.getMessage());
+        }
+        if (claudeModelExpertDefault != null && !claudeModelExpertDefault.isBlank()) return claudeModelExpertDefault;
+        return resolveModel();
+    }
+
+    /**
+     * Resolve max turns for expert reviews.
+     * Settings DB takes priority, then application.yml / env var default.
+     */
+    private int resolveExpertMaxTurns() {
+        try {
+            Integer fromSettings = getSettings().getClaudeMaxTurnsExpert();
+            if (fromSettings != null && fromSettings > 0) return fromSettings;
+        } catch (Exception e) {
+            log.debug("Could not read expert max turns from settings: {}", e.getMessage());
+        }
+        return claudeMaxTurnsExpertDefault;
+    }
 
     public String generateSessionId() {
         return UUID.randomUUID().toString();
@@ -120,14 +191,14 @@ public class ClaudeService {
                 suggestionDescription
         );
 
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "evaluate", resolveModel(), 0);
     }
 
     public CompletableFuture<String> continueConversation(String sessionId, String userMessage,
                                                            String conversationContext,
                                                            String workingDir,
                                                            Consumer<String> progressCallback) {
-        return sendToClaudeAsync(userMessage, sessionId, workingDir, conversationContext, progressCallback);
+        return sendToClaudeAsync(userMessage, sessionId, workingDir, conversationContext, progressCallback, "continue", resolveModel(), 0);
     }
 
     public CompletableFuture<String> executePlan(String sessionId, String plan, String tasksJson,
@@ -169,7 +240,7 @@ public class ClaudeService {
                 workingDir, plan, tasksJson != null ? tasksJson : "No structured tasks — follow the plan above."
         );
 
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "execute", resolveModel(), 0);
     }
 
     public CompletableFuture<String> expertReview(String sessionId, String expertDisplayName,
@@ -185,6 +256,15 @@ public class ClaudeService {
                 "Current Plan:\n%s\n\n" +
                 "%s" +
                 "%s" +
+                "REVIEW SEVERITY RULES:\n" +
+                "- ONLY flag CRITICAL, MAJOR, or MEDIUM issues. Do NOT nitpick.\n" +
+                "  CRITICAL: Would cause data loss, security vulnerabilities, system crashes, or broken core functionality.\n" +
+                "  MAJOR: Significant bugs, missing key requirements, architectural problems that would require rework.\n" +
+                "  MEDIUM: Notable gaps in error handling, performance concerns under real usage, or missing edge cases that users will likely hit.\n" +
+                "- Do NOT propose changes for: style preferences, minor naming conventions, theoretical concerns that are unlikely in practice, " +
+                "or optimizations that don't matter at current scale.\n" +
+                "- If the plan is reasonable and has no critical/major/medium issues, APPROVE it. Most plans should be approved.\n" +
+                "- Bias toward action — a shipped improvement beats a perfect plan.\n\n" +
                 "DUAL-LEVEL DETAIL RULES:\n" +
                 "- The plan you are reviewing contains LOW-LEVEL technical details (file names, classes, methods, etc.). " +
                 "Use these details for your analysis — review them thoroughly from your expertise area.\n" +
@@ -192,24 +272,23 @@ public class ClaudeService {
                 "- Your 'message' field (shown to the user) MUST be written in plain, non-technical language — " +
                 "describe features, behaviors, and outcomes only. NEVER mention file names, classes, APIs, or technical details in the message.\n" +
                 "- Questions to users should be about desired behavior and outcomes, not technical choices.\n\n" +
-                "MANDATORY PARTICIPATION RULES:\n" +
-                "- You MUST provide a detailed, substantive analysis from your area of expertise. Every expert must contribute meaningful feedback each round.\n" +
-                "- Your analysis MUST be at least 2-3 sentences covering specific observations, concerns, or confirmations relevant to your domain.\n" +
-                "- Even when approving, you MUST explain WHAT specifically you evaluated, WHY it meets your standards, and any minor observations or recommendations.\n" +
-                "- Do NOT give generic or rubber-stamp approvals like 'looks good' or 'no issues found'. Be specific about what you reviewed.\n" +
-                "- Your message to the user MUST also be substantive — summarize your key findings and perspective in plain language.\n\n" +
+                "PARTICIPATION RULES:\n" +
+                "- Provide a concise, focused analysis from your area of expertise.\n" +
+                "- Your analysis should be 2-3 sentences covering the most important observations from your domain.\n" +
+                "- When approving, briefly state what you evaluated and why it's acceptable.\n" +
+                "- Do NOT give generic approvals like 'looks good'. Be specific but brief.\n\n" +
                 "Respond in this JSON format:\n" +
                 "If the plan looks good from your perspective:\n" +
-                "{\"status\": \"APPROVED\", \"analysis\": \"your detailed technical analysis — MUST cover specific aspects you evaluated from your expertise area, referencing specific files/classes/methods where relevant, what you found acceptable and why, and any minor recommendations\", \"message\": \"substantive NON-TECHNICAL summary of your review findings for the user\"}\n\n" +
-                "If you recommend changes:\n" +
-                "{\"status\": \"CHANGES_PROPOSED\", \"analysis\": \"your detailed technical analysis\", " +
+                "{\"status\": \"APPROVED\", \"analysis\": \"your focused technical analysis — what you evaluated and why it passes\", \"message\": \"concise NON-TECHNICAL summary for the user\"}\n\n" +
+                "If you find CRITICAL or MAJOR issues that must be fixed:\n" +
+                "{\"status\": \"CHANGES_PROPOSED\", \"analysis\": \"your technical analysis of the issues found\", " +
                 "\"proposedChanges\": \"technical description of what should change\", " +
                 "\"revisedPlan\": \"updated low-level technical plan\", " +
                 "\"revisedPlanDisplaySummary\": \"updated high-level non-technical summary for the user\", " +
                 "\"revisedTasks\": [{\"title\": \"low-level technical task name\", \"description\": \"detailed technical description\", " +
                 "\"displayTitle\": \"high-level user-facing task name\", \"displayDescription\": \"plain language description\", " +
                 "\"estimatedMinutes\": number}, ...], " +
-                "\"message\": \"substantive NON-TECHNICAL summary for the user\"}\n\n" +
+                "\"message\": \"concise NON-TECHNICAL summary for the user\"}\n\n" +
                 "If you need the user to answer questions before you can complete your review:\n" +
                 "{\"status\": \"NEEDS_CLARIFICATION\", \"analysis\": \"what you've found so far\", " +
                 "\"questions\": [\"high-level non-technical question 1\", \"high-level non-technical question 2\"], " +
@@ -217,7 +296,7 @@ public class ClaudeService {
                 "IMPORTANT: When proposing changes, you MUST include revisedTasks with the COMPLETE task list (not just changed tasks). " +
                 "Each task MUST have both low-level (title/description) and high-level (displayTitle/displayDescription) fields. " +
                 "When asking questions, keep them high-level and non-technical. " +
-                "Remember: your participation is REQUIRED — provide real, thoughtful feedback from your area of expertise.",
+                "Only propose CHANGES_PROPOSED for critical or major issues — approve with notes for medium issues.",
                 expertPrompt,
                 suggestionTitle,
                 suggestionDescription,
@@ -227,40 +306,49 @@ public class ClaudeService {
                         "Previous expert reviews:\n" + previousNotes + "\n\n" : ""
         );
 
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback,
+                "expert-review:" + expertDisplayName, resolveExpertModel(), resolveExpertMaxTurns());
     }
 
     public CompletableFuture<String> reviewExpertFeedback(String sessionId, String expertDisplayName,
                                                             String expertAnalysis, String proposedChanges,
-                                                            String currentPlan, String workingDir,
+                                                            String currentPlan, String reviewerRole,
+                                                            String reviewerPrompt, String workingDir,
                                                             Consumer<String> progressCallback) {
         String prompt = String.format(
-                "You are a senior reviewer. A %s has reviewed an implementation plan and provided feedback.\n\n" +
+                "%s\n\n" +
+                "A %s has reviewed an implementation plan and proposed changes. " +
+                "As the %s, evaluate whether these changes are warranted.\n\n" +
                 "Current plan:\n%s\n\n" +
                 "The %s's analysis:\n%s\n\n" +
                 "Their proposed changes:\n%s\n\n" +
-                "Evaluate whether these proposed changes improve the plan. Consider:\n" +
-                "- Do the changes address real issues or add unnecessary complexity?\n" +
-                "- Will the changes improve the outcome for the user?\n" +
-                "- Are the changes compatible with the overall approach?\n\n" +
+                "EVALUATION CRITERIA:\n" +
+                "- Do the proposed changes address a CRITICAL or MAJOR issue? Only approve changes that fix real problems.\n" +
+                "- Would the changes add unnecessary complexity or scope creep?\n" +
+                "- Are the changes compatible with the overall approach and goals?\n" +
+                "- From your perspective as %s, do these changes improve the plan for the user?\n\n" +
                 "Respond in this JSON format:\n" +
                 "{\"valid\": true/false, \"notes\": \"your assessment of why the changes are or aren't valuable\", " +
                 "\"apply\": true/false}\n\n" +
-                "Set apply=true ONLY if the changes genuinely improve the plan.",
-                expertDisplayName, currentPlan, expertDisplayName, expertAnalysis, proposedChanges
+                "Set apply=true ONLY if the changes fix a critical or major issue. " +
+                "Reject changes that are cosmetic, over-engineered, or add scope without clear value.",
+                reviewerPrompt, expertDisplayName, reviewerRole,
+                currentPlan, expertDisplayName, expertAnalysis, proposedChanges, reviewerRole
         );
 
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback,
+                "review-feedback:" + reviewerRole + "<-" + expertDisplayName, resolveExpertModel(), resolveExpertMaxTurns());
     }
 
     private CompletableFuture<String> sendToClaudeAsync(String prompt, String sessionId,
                                                          String workingDir, String conversationContext,
-                                                         Consumer<String> progressCallback) {
+                                                         Consumer<String> progressCallback,
+                                                         String operationType, String model, int maxTurns) {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                return sendToClaude(prompt, sessionId, workingDir, conversationContext, progressCallback);
+                return sendToClaude(prompt, sessionId, workingDir, conversationContext, progressCallback, operationType, model, maxTurns);
             } catch (Exception e) {
-                log.error("Claude CLI error for session {}: {}", sessionId, e.getMessage(), e);
+                log.error("[CLAUDE-{}] session={} ERROR: {}", operationType, sessionId, e.getMessage(), e);
                 return "{\"status\": \"ERROR\", \"message\": \"" +
                         e.getMessage().replace("\"", "\\\"") + "\"}";
             }
@@ -269,18 +357,39 @@ public class ClaudeService {
 
     private String sendToClaude(String prompt, String sessionId, String workingDir,
                                  String conversationContext,
-                                 Consumer<String> progressCallback) throws Exception {
-        ProcessBuilder pb = new ProcessBuilder();
+                                 Consumer<String> progressCallback,
+                                 String operationType, String model, int maxTurns) throws Exception {
+        long requestId = requestCounter.incrementAndGet();
+        long startTime = System.currentTimeMillis();
+        String logPrefix = String.format("[CLAUDE-REQ-%d][%s]", requestId, operationType);
 
-        String cliSessionId = sessionMap.get(sessionId);
+        // Expert reviews and feedback always get a fresh session (no resume)
+        boolean isExpertOp = operationType.startsWith("expert-review:") || operationType.startsWith("review-feedback:");
+        String cliSessionId = isExpertOp ? null : sessionMap.get(sessionId);
         boolean isResume = cliSessionId != null;
 
+        // Build command with optional model and max-turns flags
+        List<String> command = new java.util.ArrayList<>();
+        command.add(claudeCliPath);
         if (isResume) {
-            pb.command(claudeCliPath, "--resume", cliSessionId,
-                    "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions");
-        } else {
-            pb.command(claudeCliPath, "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions");
+            command.add("--resume");
+            command.add(cliSessionId);
         }
+        command.add("-p");
+        command.add(prompt);
+        command.add("--output-format");
+        command.add("json");
+        if (model != null && !model.isBlank()) {
+            command.add("--model");
+            command.add(model);
+        }
+        if (maxTurns > 0) {
+            command.add("--max-turns");
+            command.add(String.valueOf(maxTurns));
+        }
+        command.add("--dangerously-skip-permissions");
+
+        ProcessBuilder pb = new ProcessBuilder(command);
 
         if (workingDir != null) {
             pb.directory(new File(workingDir));
@@ -295,6 +404,15 @@ public class ClaudeService {
 
         pb.redirectErrorStream(true);
         pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+
+        // Log the request
+        log.info("{} session={} resume={} model={} maxTurns={} workDir={} promptLength={}",
+                logPrefix, sessionId, isResume,
+                (model != null && !model.isBlank()) ? model : "default",
+                maxTurns > 0 ? maxTurns : "unlimited",
+                workingDir, prompt.length());
+        log.debug("{} prompt: {}", logPrefix, truncate(prompt, MAX_LOG_PROMPT_LENGTH));
+
         Process process = pb.start();
 
         StringBuilder output = new StringBuilder();
@@ -309,8 +427,22 @@ public class ClaudeService {
             }
         }
 
-        int exitCode = process.waitFor();
+        boolean completed = process.waitFor(claudeTimeoutMinutes, TimeUnit.MINUTES);
+        if (!completed) {
+            process.destroyForcibly();
+            long elapsed = System.currentTimeMillis() - startTime;
+            log.error("{} TIMEOUT after {}ms (limit={}min) — process killed",
+                    logPrefix, elapsed, claudeTimeoutMinutes);
+            throw new RuntimeException("Claude CLI timed out after " + claudeTimeoutMinutes + " minutes");
+        }
+
+        int exitCode = process.exitValue();
+        long elapsed = System.currentTimeMillis() - startTime;
         String rawOutput = output.toString().trim();
+
+        // Log raw output size and timing
+        log.info("{} completed in {}ms exitCode={} responseLength={}",
+                logPrefix, elapsed, exitCode, rawOutput.length());
 
         // Try to parse as JSON to extract session_id and result
         String resultText = rawOutput;
@@ -335,32 +467,44 @@ public class ClaudeService {
                 if (root.has("is_error") && root.get("is_error").asBoolean()) {
                     String errorMsg = root.has("result") ? root.get("result").asText() : rawOutput;
                     if (isResume && isDeadSessionError(errorMsg)) {
+                        log.warn("{} dead session detected, rebuilding context", logPrefix);
                         return handleDeadSession(prompt, sessionId, workingDir,
-                                conversationContext, progressCallback);
+                                conversationContext, progressCallback, operationType, model, maxTurns);
                     }
-                    log.warn("Claude CLI returned error for session {}: {}", sessionId, errorMsg);
+                    log.warn("{} error response: {}", logPrefix, truncate(errorMsg, MAX_LOG_RESPONSE_LENGTH));
                 }
             }
         } catch (Exception e) {
-            log.debug("Could not parse Claude CLI output as JSON: {}", e.getMessage());
+            log.debug("{} could not parse output as JSON: {}", logPrefix, e.getMessage());
         }
 
         // Fallback: check raw output for dead session error
         if (isResume && isDeadSessionError(rawOutput)) {
+            log.warn("{} dead session detected (fallback check), rebuilding context", logPrefix);
             return handleDeadSession(prompt, sessionId, workingDir,
-                    conversationContext, progressCallback);
+                    conversationContext, progressCallback, operationType, model, maxTurns);
         }
 
         // Store the CLI session ID for future --resume calls
         if (parsedCliSessionId != null && !parsedCliSessionId.isBlank()) {
             sessionMap.put(sessionId, parsedCliSessionId);
+            log.debug("{} stored CLI session: {}", logPrefix, parsedCliSessionId);
         }
 
         if (exitCode != 0) {
-            log.warn("Claude CLI exited with code {} for session {}", exitCode, sessionId);
+            log.warn("{} non-zero exit code: {}", logPrefix, exitCode);
         }
 
+        // Log response summary
+        log.debug("{} response: {}", logPrefix, truncate(resultText, MAX_LOG_RESPONSE_LENGTH));
+
         return resultText;
+    }
+
+    private static String truncate(String text, int maxLength) {
+        if (text == null) return "null";
+        if (text.length() <= maxLength) return text;
+        return text.substring(0, maxLength) + "...[truncated, total=" + text.length() + "]";
     }
 
     private boolean isDeadSessionError(String output) {
@@ -372,8 +516,10 @@ public class ClaudeService {
 
     private String handleDeadSession(String prompt, String sessionId, String workingDir,
                                       String conversationContext,
-                                      Consumer<String> progressCallback) throws Exception {
-        log.warn("Session {} is dead, starting fresh session with conversation context", sessionId);
+                                      Consumer<String> progressCallback,
+                                      String operationType, String model, int maxTurns) throws Exception {
+        log.warn("[CLAUDE-{}] session={} is dead, starting fresh session with conversation context",
+                operationType, sessionId);
         sessionMap.remove(sessionId);
 
         String rebuiltPrompt;
@@ -389,7 +535,7 @@ public class ClaudeService {
         }
 
         // Retry with a fresh session (no resume, no context to avoid infinite loop)
-        return sendToClaude(rebuiltPrompt, sessionId, workingDir, null, progressCallback);
+        return sendToClaude(rebuiltPrompt, sessionId, workingDir, null, progressCallback, operationType + "-retry", model, maxTurns);
     }
 
     /**
