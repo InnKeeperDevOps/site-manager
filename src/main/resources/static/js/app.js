@@ -13,7 +13,8 @@ const app = {
             currentIndex: 0,
             active: false
         },
-        tasks: []
+        tasks: [],
+        taskTimer: null
     },
 
     async init() {
@@ -301,6 +302,15 @@ const app = {
         document.getElementById('taskProgress').textContent = `${completed}/${total} completed`;
         document.getElementById('taskProgressFill').style.width = pct + '%';
 
+        // Start/stop elapsed time timer for in-progress tasks
+        const hasActiveTask = tasks.some(t => t.status === 'IN_PROGRESS' && t.startedAt);
+        if (hasActiveTask && !this.state.taskTimer) {
+            this.state.taskTimer = setInterval(() => this.renderTasks(), 10000);
+        } else if (!hasActiveTask && this.state.taskTimer) {
+            clearInterval(this.state.taskTimer);
+            this.state.taskTimer = null;
+        }
+
         listEl.innerHTML = tasks.map(t => {
             const icons = { PENDING: '○', IN_PROGRESS: '◉', COMPLETED: '✓', FAILED: '✗' };
             const icon = icons[t.status] || '○';
@@ -531,6 +541,10 @@ const app = {
     },
 
     disconnectWs() {
+        if (this.state.taskTimer) {
+            clearInterval(this.state.taskTimer);
+            this.state.taskTimer = null;
+        }
         if (this.state.ws) {
             this.state.ws.onclose = null;
             this.state.ws.close();

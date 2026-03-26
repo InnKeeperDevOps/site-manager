@@ -122,6 +122,15 @@ public class SuggestionService {
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
 
+        // Reset any IN_PROGRESS tasks to PENDING since we can't know if they completed before crash
+        List<PlanTask> inProgressTasks = planTaskRepository.findBySuggestionIdAndStatus(
+                suggestion.getId(), TaskStatus.IN_PROGRESS);
+        for (PlanTask task : inProgressTasks) {
+            task.setStatus(TaskStatus.PENDING);
+            task.setStartedAt(null);
+            planTaskRepository.save(task);
+        }
+
         String plan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription();
         String tasksJson = buildTasksJsonForExecution(suggestion.getId());
         String taskStatusSummary = buildTaskStatusSummary(suggestion.getId());
