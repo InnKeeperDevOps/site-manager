@@ -41,6 +41,7 @@ public class SuggestionService {
 
     private static final Logger log = LoggerFactory.getLogger(SuggestionService.class);
     private static final int MAX_EXPERT_REVIEW_ROUNDS = 5;
+    private static final int MAX_TOTAL_EXPERT_REVIEW_ROUNDS = 10;
     private static final int MIN_EXPERT_ANALYSIS_LENGTH = 50;
     private static final int MAX_EXPERT_RETRIES = 2;
     private final ConcurrentHashMap<String, Integer> expertRetryCount = new ConcurrentHashMap<>();
@@ -260,6 +261,7 @@ public class SuggestionService {
             suggestion.setStatus(SuggestionStatus.EXPERT_REVIEW);
             suggestion.setExpertReviewStep(0);
             suggestion.setExpertReviewRound(1);
+            suggestion.setTotalExpertReviewRounds(1);
             suggestion.setExpertReviewNotes(null);
             suggestion.setExpertReviewPlanChanged(false);
             suggestion.setCurrentPhase("Plan created — starting expert reviews...");
@@ -389,11 +391,14 @@ public class SuggestionService {
             boolean planChanged = Boolean.TRUE.equals(suggestion.getExpertReviewPlanChanged());
             int currentRound = suggestion.getExpertReviewRound() != null ? suggestion.getExpertReviewRound() : 1;
 
-            if (planChanged && currentRound < MAX_EXPERT_REVIEW_ROUNDS) {
+            int totalRounds = suggestion.getTotalExpertReviewRounds() != null ? suggestion.getTotalExpertReviewRounds() : currentRound;
+
+            if (planChanged && currentRound < MAX_EXPERT_REVIEW_ROUNDS && totalRounds < MAX_TOTAL_EXPERT_REVIEW_ROUNDS) {
                 // Plan was modified during this round — restart so all experts
                 // can re-review the updated plan from scratch
                 suggestion.setExpertReviewStep(0);
                 suggestion.setExpertReviewRound(currentRound + 1);
+                suggestion.setTotalExpertReviewRounds(totalRounds + 1);
                 suggestion.setExpertReviewNotes(null);
                 suggestion.setExpertReviewPlanChanged(false);
                 suggestionRepository.save(suggestion);
@@ -406,14 +411,21 @@ public class SuggestionService {
                 return;
             }
 
-            if (planChanged) {
-                // Max rounds reached but experts still proposing changes —
+            if (planChanged && totalRounds >= MAX_TOTAL_EXPERT_REVIEW_ROUNDS) {
+                // Hard cap reached — force-finalize to prevent endless review loops
+                log.warn("Suggestion {} hit hard cap of {} total expert review rounds, force-finalizing",
+                        suggestionId, MAX_TOTAL_EXPERT_REVIEW_ROUNDS);
+                addMessage(suggestionId, SenderType.SYSTEM, "System",
+                        "Expert reviews have completed after " + totalRounds +
+                        " total rounds of refinement. Finalizing the plan as-is.");
+            } else if (planChanged) {
+                // Per-cycle max reached but still under hard cap —
                 // pause and ask the user for high-level guidance
                 log.info("Suggestion {} reached max expert review rounds ({}), asking user for guidance",
                         suggestionId, MAX_EXPERT_REVIEW_ROUNDS);
 
                 List<String> questions = List.of(
-                        "Our reviewers have gone through " + MAX_EXPERT_REVIEW_ROUNDS +
+                        "Our reviewers have gone through " + currentRound +
                                 " rounds of review and are still suggesting changes to the plan. " +
                                 "Could you help us settle on a direction?",
                         "Are there any parts of the plan you feel strongly about keeping as-is?",
@@ -425,12 +437,12 @@ public class SuggestionService {
                 } catch (JsonProcessingException e) {
                     log.error("Failed to serialize max-rounds clarification questions", e);
                 }
-                suggestion.setCurrentPhase("Needs your guidance after " + MAX_EXPERT_REVIEW_ROUNDS + " review rounds");
+                suggestion.setCurrentPhase("Needs your guidance after " + currentRound + " review rounds");
                 suggestionRepository.save(suggestion);
                 broadcastUpdate(suggestion);
 
                 addMessage(suggestionId, SenderType.SYSTEM, "System",
-                        "Expert reviews have gone through " + MAX_EXPERT_REVIEW_ROUNDS +
+                        "Expert reviews have gone through " + currentRound +
                         " rounds and are still refining the plan. We need your input to settle on a direction.");
                 broadcastClarificationQuestions(suggestionId, questions);
                 broadcastExpertReviewStatus(suggestionId);
@@ -445,6 +457,7 @@ public class SuggestionService {
             suggestion.setExpertReviewStep(null);
             suggestion.setExpertReviewRound(null);
             suggestion.setExpertReviewPlanChanged(null);
+            suggestion.setTotalExpertReviewRounds(null);
             suggestion.setCurrentPhase("Plan ready — waiting for approval");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
@@ -791,8 +804,9 @@ public class SuggestionService {
         ExpertRole expert = ExpertRole.fromStep(step);
 
         if (expert == null) {
-            // User answered the max-rounds clarification — restart expert review
-            // with their guidance incorporated into the expert notes
+            // User answered the max-rounds clarification — check hard cap first
+            int totalRounds = suggestion.getTotalExpertReviewRounds() != null ? suggestion.getTotalExpertReviewRounds() : 0;
+
             StringBuilder formattedMsg = new StringBuilder();
             for (ClarificationRequest.ClarificationAnswer qa : answers) {
                 formattedMsg.append("**Q: ").append(qa.getQuestion()).append("**\n");
@@ -800,16 +814,37 @@ public class SuggestionService {
             }
             addMessage(suggestionId, SenderType.USER, senderName, formattedMsg.toString().trim());
 
+            if (totalRounds >= MAX_TOTAL_EXPERT_REVIEW_ROUNDS) {
+                // Hard cap reached — finalize the plan, no more review cycles
+                log.warn("Suggestion {} hit hard cap of {} total review rounds after user guidance, force-finalizing",
+                        suggestionId, MAX_TOTAL_EXPERT_REVIEW_ROUNDS);
+                addMessage(suggestionId, SenderType.SYSTEM, "System",
+                        "Thank you for the guidance. The plan has been through extensive review (" +
+                        totalRounds + " total rounds) and will be finalized as-is.");
+
+                suggestion.setStatus(SuggestionStatus.PLANNED);
+                suggestion.setExpertReviewStep(null);
+                suggestion.setExpertReviewRound(null);
+                suggestion.setExpertReviewPlanChanged(null);
+                suggestion.setTotalExpertReviewRounds(null);
+                suggestion.setCurrentPhase("Plan ready — waiting for approval");
+                suggestionRepository.save(suggestion);
+                broadcastUpdate(suggestion);
+                broadcastExpertReviewStatus(suggestionId);
+                return;
+            }
+
             // Append user guidance to expert notes so reviewers can see it
-            String userGuidance = "User guidance after " + MAX_EXPERT_REVIEW_ROUNDS + " review rounds:\n" +
+            String userGuidance = "User guidance after review rounds:\n" +
                     formattedMsg.toString().trim();
             String existingNotes = suggestion.getExpertReviewNotes();
             suggestion.setExpertReviewNotes(
                     (existingNotes != null ? existingNotes + "\n\n" : "") + userGuidance);
 
-            // Reset review pipeline with fresh rounds
+            // Reset review pipeline with fresh rounds (total keeps accumulating)
             suggestion.setExpertReviewStep(0);
             suggestion.setExpertReviewRound(1);
+            suggestion.setTotalExpertReviewRounds(totalRounds + 1);
             suggestion.setExpertReviewPlanChanged(false);
             suggestion.setCurrentPhase("Restarting expert reviews with your guidance...");
             suggestionRepository.save(suggestion);

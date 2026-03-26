@@ -73,6 +73,9 @@ public class Suggestion {
     @Column
     private Boolean expertReviewPlanChanged;
 
+    @Column
+    private Integer totalExpertReviewRounds;
+
     @Column(nullable = false)
     private Instant createdAt;
 
@@ -145,4 +148,6 @@ public class Suggestion {
     public void setExpertReviewNotes(String expertReviewNotes) { this.expertReviewNotes = expertReviewNotes; }
     public Boolean getExpertReviewPlanChanged() { return expertReviewPlanChanged; }
     public void setExpertReviewPlanChanged(Boolean expertReviewPlanChanged) { this.expertReviewPlanChanged = expertReviewPlanChanged; }
+    public Integer getTotalExpertReviewRounds() { return totalExpertReviewRounds; }
+    public void setTotalExpertReviewRounds(Integer totalExpertReviewRounds) { this.totalExpertReviewRounds = totalExpertReviewRounds; }
 }
