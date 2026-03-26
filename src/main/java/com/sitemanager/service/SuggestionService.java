@@ -130,63 +130,30 @@ public class SuggestionService {
         log.info("Resuming in-progress suggestion {} in {}", suggestion.getId(), workDir);
 
         addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                "System restarted. Checking what's been done and resuming the remaining work...");
+                "System restarted. Resuming work on the next pending task...");
 
         suggestion.setCurrentPhase("Resuming — checking progress...");
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
 
-        // Reset any IN_PROGRESS tasks to PENDING since we can't know if they completed before crash
+        // Reset any IN_PROGRESS or REVIEWING tasks to PENDING since we can't know if they completed before crash
         List<PlanTask> inProgressTasks = planTaskRepository.findBySuggestionIdAndStatus(
                 suggestion.getId(), TaskStatus.IN_PROGRESS);
+        List<PlanTask> reviewingTasks = planTaskRepository.findBySuggestionIdAndStatus(
+                suggestion.getId(), TaskStatus.REVIEWING);
         for (PlanTask task : inProgressTasks) {
             task.setStatus(TaskStatus.PENDING);
             task.setStartedAt(null);
             planTaskRepository.save(task);
         }
+        for (PlanTask task : reviewingTasks) {
+            task.setStatus(TaskStatus.PENDING);
+            task.setStartedAt(null);
+            planTaskRepository.save(task);
+        }
 
-        String plan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription();
-        String tasksJson = buildTasksJsonForExecution(suggestion.getId());
-        String taskStatusSummary = buildTaskStatusSummary(suggestion.getId());
-        String context = buildConversationContext(suggestion.getId());
-
-        String resumePrompt = "The application was restarted while you were executing an implementation plan. " +
-                "You need to resume where you left off.\n\n" +
-                "The implementation plan is:\n" + plan + "\n\n" +
-                (tasksJson != null ? "Tasks:\n" + tasksJson + "\n\n" : "") +
-                (taskStatusSummary != null ? "Task status before restart:\n" + taskStatusSummary + "\n\n" : "") +
-                "Please examine the current state of the code in this repository to determine:\n" +
-                "1. Which parts of the plan have already been completed\n" +
-                "2. Which parts still need to be done\n" +
-                "3. Whether any in-progress work needs to be fixed or finished\n\n" +
-                "Then continue executing the remaining steps of the plan. " +
-                "Write unit tests for all new code and run existing tests to ensure nothing is broken.\n\n" +
-                "For EACH task, follow this workflow:\n" +
-                "1. Start: {\"taskOrder\": N, \"status\": \"IN_PROGRESS\", \"message\": \"starting description\"}\n" +
-                "2. Implement the task\n" +
-                "3. Review your code changes — verify they fulfill the task, check for bugs, run tests:\n" +
-                "   {\"taskOrder\": N, \"status\": \"REVIEWING\", \"message\": \"reviewing: what you checked\"}\n" +
-                "4. If review passes, mark completed:\n" +
-                "   {\"taskOrder\": N, \"status\": \"COMPLETED\", \"message\": \"what was done and verified\"}\n" +
-                "   If review finds issues, fix them and re-review before marking completed.\n\n" +
-                "When ALL tasks pass review, output a final summary:\n" +
-                "{\"status\": \"COMPLETED\", \"message\": \"summary\", \"testsRun\": number, \"testsPassed\": number}";
-
-        String executionSessionId = claudeService.generateSessionId();
-
-        new Thread(() -> {
-            claudeService.continueConversation(
-                    executionSessionId,
-                    resumePrompt,
-                    context,
-                    workDir,
-                    progress -> {
-                        handleExecutionProgress(suggestion.getId(), progress);
-                    }
-            ).thenAccept(result -> {
-                handleExecutionResult(suggestion.getId(), result);
-            });
-        }).start();
+        // Resume sequential task execution — pick up from the next pending task
+        executeNextTask(suggestion.getId());
     }
 
     public List<Suggestion> getAllSuggestions() {
@@ -1060,7 +1027,6 @@ public class SuggestionService {
 
     private void executeApprovedSuggestion(Suggestion suggestion) {
         log.info("[AI-FLOW] suggestion={} starting execution", suggestion.getId());
-        long executionStart = System.currentTimeMillis();
         String repoUrl = settingsService.getSettings().getTargetRepoUrl();
         if (repoUrl == null || repoUrl.isBlank()) {
             addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
@@ -1089,31 +1055,10 @@ public class SuggestionService {
                 suggestionRepository.save(suggestion);
 
                 addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                        "Workspace ready. Starting work on your suggestion...");
+                        "Workspace ready. Starting work on your suggestion one task at a time...");
 
-                // Set initial phase to first task if available
-                List<PlanTask> tasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestion.getId());
-                if (!tasks.isEmpty()) {
-                    suggestion.setCurrentPhase("Task 1/" + tasks.size() + ": " + tasks.get(0).getTitle());
-                } else {
-                    suggestion.setCurrentPhase("Working on your suggestion...");
-                }
-                suggestionRepository.save(suggestion);
-                broadcastUpdate(suggestion);
-
-                String executionSessionId = claudeService.generateSessionId();
-                String tasksJson = buildTasksJsonForExecution(suggestion.getId());
-                claudeService.executePlan(
-                        executionSessionId,
-                        suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription(),
-                        tasksJson,
-                        workDir,
-                        progress -> {
-                            handleExecutionProgress(suggestion.getId(), progress);
-                        }
-                ).thenAccept(result -> {
-                    handleExecutionResult(suggestion.getId(), result);
-                });
+                // Start executing the first task
+                executeNextTask(suggestion.getId());
 
             } catch (Exception e) {
                 log.error("Failed to execute suggestion {}: {}", suggestion.getId(), e.getMessage(), e);
@@ -1125,6 +1070,314 @@ public class SuggestionService {
                 broadcastUpdate(suggestion);
             }
         }).start();
+    }
+
+    /**
+     * Find the next PENDING task and execute it. Called after each task's expert review passes.
+     * If no more tasks remain, finalize the suggestion as COMPLETED.
+     */
+    private void executeNextTask(Long suggestionId) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) return;
+
+        List<PlanTask> tasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
+        if (tasks.isEmpty()) {
+            // No tasks — use legacy full-plan execution
+            log.warn("[AI-FLOW] suggestion={} has no tasks, falling back to full plan execution", suggestionId);
+            String workDir = suggestion.getWorkingDirectory();
+            String executionSessionId = claudeService.generateSessionId();
+            String tasksJson = buildTasksJsonForExecution(suggestionId);
+            claudeService.executePlan(
+                    executionSessionId,
+                    suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription(),
+                    tasksJson,
+                    workDir,
+                    progress -> handleExecutionProgress(suggestionId, progress)
+            ).thenAccept(result -> handleExecutionResult(suggestionId, result));
+            return;
+        }
+
+        // Find the next pending task
+        PlanTask nextTask = tasks.stream()
+                .filter(t -> t.getStatus() == TaskStatus.PENDING)
+                .findFirst()
+                .orElse(null);
+
+        if (nextTask == null) {
+            // All tasks are done — finalize
+            log.info("[AI-FLOW] suggestion={} all {} tasks completed, finalizing", suggestionId, tasks.size());
+            markRemainingTasksCompleted(suggestionId);
+
+            suggestion.setStatus(SuggestionStatus.COMPLETED);
+            suggestion.setCurrentPhase("Work completed — submitting changes...");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+
+            addMessage(suggestionId, SenderType.SYSTEM, "System",
+                    "All tasks have been completed and verified by expert review. Submitting changes...");
+            createPrAsync(suggestionId);
+            return;
+        }
+
+        int totalTasks = tasks.size();
+        int taskOrder = nextTask.getTaskOrder();
+        log.info("[AI-FLOW] suggestion={} executing task {}/{}: {}", suggestionId, taskOrder, totalTasks, nextTask.getTitle());
+
+        suggestion.setCurrentPhase("Task " + taskOrder + "/" + totalTasks + ": " + nextTask.getTitle());
+        suggestionRepository.save(suggestion);
+        broadcastUpdate(suggestion);
+
+        // Build summary of previously completed tasks for context
+        String completedSummary = buildCompletedTasksSummary(suggestionId);
+
+        String executionSessionId = claudeService.generateSessionId();
+        String workDir = suggestion.getWorkingDirectory();
+        String plan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription();
+
+        claudeService.executeSingleTask(
+                executionSessionId,
+                plan,
+                taskOrder,
+                nextTask.getTitle(),
+                nextTask.getDescription(),
+                totalTasks,
+                completedSummary,
+                workDir,
+                progress -> handleExecutionProgress(suggestionId, progress)
+        ).thenAccept(result -> handleSingleTaskResult(suggestionId, taskOrder, result));
+    }
+
+    /**
+     * Handle the result of a single task execution. If the task completed,
+     * trigger expert review before moving to the next task.
+     */
+    private void handleSingleTaskResult(Long suggestionId, int taskOrder, String result) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) return;
+
+        log.info("[AI-FLOW] suggestion={} task {} execution result: resultLength={}",
+                suggestionId, taskOrder, result.length());
+
+        Optional<PlanTask> optTask = planTaskRepository.findBySuggestionIdAndTaskOrder(suggestionId, taskOrder);
+        if (optTask.isEmpty()) return;
+
+        PlanTask task = optTask.get();
+
+        if (task.getStatus() == TaskStatus.COMPLETED) {
+            // Task was marked completed during progress streaming — trigger expert review
+            addMessage(suggestionId, SenderType.SYSTEM, "System",
+                    "Task " + taskOrder + " implementation complete. Experts are now reviewing the work...");
+            startTaskCompletionReview(suggestionId, taskOrder);
+        } else if (task.getStatus() == TaskStatus.FAILED) {
+            // Task failed — notify and halt
+            addMessage(suggestionId, SenderType.AI, "Claude", result);
+            suggestion.setCurrentPhase("Task " + taskOrder + " failed — can retry");
+            suggestion.setStatus(SuggestionStatus.PLANNED);
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+        } else {
+            // Task didn't report completion through progress — mark it and review
+            task.setStatus(TaskStatus.COMPLETED);
+            task.setCompletedAt(Instant.now());
+            if (task.getStartedAt() == null) task.setStartedAt(task.getCompletedAt());
+            planTaskRepository.save(task);
+            broadcastTaskUpdate(suggestionId, task);
+
+            addMessage(suggestionId, SenderType.SYSTEM, "System",
+                    "Task " + taskOrder + " implementation complete. Experts are now reviewing the work...");
+            startTaskCompletionReview(suggestionId, taskOrder);
+        }
+    }
+
+    /**
+     * Start expert review of a completed task. Uses Software Engineer and QA Engineer
+     * to verify the task was properly implemented before proceeding.
+     */
+    private void startTaskCompletionReview(Long suggestionId, int taskOrder) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) return;
+
+        Optional<PlanTask> optTask = planTaskRepository.findBySuggestionIdAndTaskOrder(suggestionId, taskOrder);
+        if (optTask.isEmpty()) return;
+
+        PlanTask task = optTask.get();
+        List<PlanTask> allTasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
+        int totalTasks = allTasks.size();
+
+        suggestion.setCurrentPhase("Experts reviewing task " + taskOrder + "/" + totalTasks + ": " + task.getTitle());
+        suggestionRepository.save(suggestion);
+        broadcastUpdate(suggestion);
+
+        // Use Software Engineer and QA Engineer to review the task completion
+        ExpertRole[] taskReviewers = { ExpertRole.SOFTWARE_ENGINEER, ExpertRole.QA_ENGINEER };
+        String plan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription();
+        String workDir = suggestion.getWorkingDirectory();
+
+        // Run reviewers sequentially — SE first, then QA
+        runTaskReviewer(suggestionId, taskOrder, task, plan, workDir, taskReviewers, 0);
+    }
+
+    /**
+     * Run a single task reviewer. After completion, either run the next reviewer
+     * or proceed to the next task.
+     */
+    private void runTaskReviewer(Long suggestionId, int taskOrder, PlanTask task,
+                                   String plan, String workDir,
+                                   ExpertRole[] reviewers, int reviewerIndex) {
+        if (reviewerIndex >= reviewers.length) {
+            // All reviewers approved — move to next task
+            Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+            if (suggestion == null) return;
+
+            List<PlanTask> allTasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
+            long completedCount = allTasks.stream().filter(t -> t.getStatus() == TaskStatus.COMPLETED).count();
+
+            addMessage(suggestionId, SenderType.SYSTEM, "System",
+                    "Task " + taskOrder + " has been verified by expert review (" + completedCount + "/" + allTasks.size() + " tasks complete). Moving to the next task...");
+
+            log.info("[AI-FLOW] suggestion={} task {} passed expert review, proceeding to next task", suggestionId, taskOrder);
+            executeNextTask(suggestionId);
+            return;
+        }
+
+        ExpertRole reviewer = reviewers[reviewerIndex];
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) return;
+
+        List<PlanTask> allTasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
+        int totalTasks = allTasks.size();
+
+        suggestion.setCurrentPhase(reviewer.getDisplayName() + " reviewing task " + taskOrder + "/" + totalTasks + "...");
+        suggestionRepository.save(suggestion);
+        broadcastUpdate(suggestion);
+
+        String reviewSessionId = claudeService.generateSessionId();
+        claudeService.reviewTaskCompletion(
+                reviewSessionId,
+                reviewer.getDisplayName(),
+                reviewer.getReviewPrompt(),
+                suggestion.getTitle(),
+                taskOrder,
+                task.getTitle(),
+                task.getDescription(),
+                plan,
+                workDir,
+                progress -> {
+                    webSocketHandler.sendToSuggestion(suggestionId,
+                            "{\"type\":\"execution_progress\",\"content\":\"" +
+                                    escapeJson(progress) + "\"}");
+                }
+        ).thenAccept(response -> {
+            handleTaskReviewResponse(suggestionId, taskOrder, task, plan, workDir,
+                    reviewer, reviewers, reviewerIndex, response);
+        });
+    }
+
+    /**
+     * Handle the response from a task completion reviewer.
+     */
+    private void handleTaskReviewResponse(Long suggestionId, int taskOrder, PlanTask task,
+                                            String plan, String workDir,
+                                            ExpertRole reviewer, ExpertRole[] reviewers,
+                                            int reviewerIndex, String response) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) return;
+
+        log.info("[AI-FLOW] suggestion={} task {} reviewer={} response received",
+                suggestionId, taskOrder, reviewer.getDisplayName());
+
+        try {
+            String json = extractJsonBlock(response);
+            if (json == null) {
+                // Can't parse — treat as approved to avoid blocking
+                log.warn("Task reviewer {} provided no structured response for task {}, treating as approved",
+                        reviewer.getDisplayName(), taskOrder);
+                broadcastExpertNote(suggestionId, reviewer.getDisplayName(),
+                        "Task " + taskOrder + " review: Approved (no structured response).");
+                runTaskReviewer(suggestionId, taskOrder, task, plan, workDir, reviewers, reviewerIndex + 1);
+                return;
+            }
+
+            JsonNode root = objectMapper.readTree(json);
+            String status = root.has("status") ? root.get("status").asText() : "APPROVED";
+            String analysis = root.has("analysis") ? root.get("analysis").asText() : "";
+            String message = root.has("message") ? root.get("message").asText() : "";
+
+            log.info("[AI-FLOW] suggestion={} task {} reviewer={} verdict={}",
+                    suggestionId, taskOrder, reviewer.getDisplayName(), status);
+
+            if ("NEEDS_FIXES".equals(status)) {
+                String fixes = root.has("fixes") ? root.get("fixes").asText() : analysis;
+
+                broadcastExpertNote(suggestionId, reviewer.getDisplayName(),
+                        "Task " + taskOrder + " review: Needs fixes. " + analysis);
+                addMessage(suggestionId, SenderType.AI, reviewer.getDisplayName(), message);
+
+                // Send fixes back to Claude to address, then re-review
+                addMessage(suggestionId, SenderType.SYSTEM, "System",
+                        reviewer.getDisplayName() + " found issues with task " + taskOrder + ". Fixing...");
+
+                suggestion.setCurrentPhase("Fixing issues in task " + taskOrder + " found by " + reviewer.getDisplayName() + "...");
+                suggestionRepository.save(suggestion);
+                broadcastUpdate(suggestion);
+
+                // Re-execute the task with fix instructions
+                String fixSessionId = claudeService.generateSessionId();
+                String fixPrompt = String.format(
+                        "The %s has reviewed your implementation of task %d and found issues that need to be fixed.\n\n" +
+                        "Task: %s\n" +
+                        "Description: %s\n\n" +
+                        "Issues found:\n%s\n\n" +
+                        "Please fix these issues. After fixing, verify your changes are correct.\n\n" +
+                        "When done, output:\n" +
+                        "{\"taskOrder\": %d, \"status\": \"COMPLETED\", \"message\": \"what was fixed and verified\"}",
+                        reviewer.getDisplayName(), taskOrder,
+                        task.getTitle(),
+                        task.getDescription() != null ? task.getDescription() : task.getTitle(),
+                        fixes,
+                        taskOrder
+                );
+
+                claudeService.continueConversation(
+                        fixSessionId,
+                        fixPrompt,
+                        null,
+                        workDir,
+                        progress -> handleExecutionProgress(suggestionId, progress)
+                ).thenAccept(fixResult -> {
+                    // After fixing, re-run the same reviewer
+                    log.info("[AI-FLOW] suggestion={} task {} fix applied, re-reviewing with {}",
+                            suggestionId, taskOrder, reviewer.getDisplayName());
+                    runTaskReviewer(suggestionId, taskOrder, task, plan, workDir, reviewers, reviewerIndex);
+                });
+                return;
+            }
+
+            // APPROVED — record note and move to next reviewer
+            broadcastExpertNote(suggestionId, reviewer.getDisplayName(),
+                    "Task " + taskOrder + " review: Approved. " + analysis);
+            addMessage(suggestionId, SenderType.AI, reviewer.getDisplayName(), message);
+            runTaskReviewer(suggestionId, taskOrder, task, plan, workDir, reviewers, reviewerIndex + 1);
+
+        } catch (Exception e) {
+            log.error("Failed to handle task review response for suggestion {} task {}: {}",
+                    suggestionId, taskOrder, e.getMessage(), e);
+            // Treat as approved to avoid blocking
+            broadcastExpertNote(suggestionId, reviewer.getDisplayName(),
+                    "Task " + taskOrder + " review: Approved (processing error).");
+            runTaskReviewer(suggestionId, taskOrder, task, plan, workDir, reviewers, reviewerIndex + 1);
+        }
+    }
+
+    private String buildCompletedTasksSummary(Long suggestionId) {
+        List<PlanTask> tasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
+        StringBuilder sb = new StringBuilder();
+        for (PlanTask task : tasks) {
+            if (task.getStatus() == TaskStatus.COMPLETED) {
+                sb.append("Task ").append(task.getTaskOrder()).append(" (COMPLETED): ").append(task.getTitle()).append("\n");
+            }
+        }
+        return sb.toString();
     }
 
     @Transactional

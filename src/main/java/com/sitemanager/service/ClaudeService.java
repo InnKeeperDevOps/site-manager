@@ -247,6 +247,112 @@ public class ClaudeService {
         return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "execute", resolveModel(), 0);
     }
 
+    /**
+     * Execute a single task from the plan. Called one task at a time so experts
+     * can review each task's output before proceeding to the next.
+     */
+    public CompletableFuture<String> executeSingleTask(String sessionId, String plan,
+                                                         int taskOrder, String taskTitle,
+                                                         String taskDescription,
+                                                         int totalTasks,
+                                                         String completedTasksSummary,
+                                                         String workingDir,
+                                                         Consumer<String> progressCallback) {
+        String prompt = String.format(
+                "Execute ONLY task %d of %d in the repository at %s.\n\n" +
+                "Overall Plan:\n%s\n\n" +
+                "%s" +
+                "YOUR TASK (Task %d of %d):\n" +
+                "Title: %s\n" +
+                "Description: %s\n\n" +
+                "COMMUNICATION RULES:\n" +
+                "- All message fields in your JSON output MUST be written in plain, non-technical language.\n" +
+                "- NEVER mention programming languages, frameworks, libraries, file names, class names, or technical details in messages.\n" +
+                "- Describe progress in terms of what is changing from the user's perspective.\n\n" +
+                "Instructions:\n" +
+                "1. Execute ONLY this single task — do NOT work on other tasks\n" +
+                "2. Write unit tests for all new code in this task\n" +
+                "3. Run existing tests to ensure nothing is broken\n\n" +
+                "Follow this workflow:\n\n" +
+                "Step A — Start the task:\n" +
+                "{\"taskOrder\": %d, \"status\": \"IN_PROGRESS\", \"message\": \"starting description\"}\n\n" +
+                "Step B — Implement the task (write code, make changes)\n\n" +
+                "Step C — Review the task. After implementing, review your own code changes:\n" +
+                "  - Verify the code changes actually fulfill the task requirements\n" +
+                "  - Check for bugs, missing edge cases, or incomplete implementation\n" +
+                "  - Run any relevant tests to confirm correctness\n" +
+                "Output a review status:\n" +
+                "{\"taskOrder\": %d, \"status\": \"REVIEWING\", \"message\": \"reviewing: what you checked\"}\n\n" +
+                "Step D — If the review passes, mark the task completed:\n" +
+                "{\"taskOrder\": %d, \"status\": \"COMPLETED\", \"message\": \"what was done and verified\"}\n" +
+                "If the review finds issues, fix them and re-review before marking completed.\n\n" +
+                "Step E — If the task cannot be completed, mark it failed:\n" +
+                "{\"taskOrder\": %d, \"status\": \"FAILED\", \"message\": \"what went wrong\"}\n\n" +
+                "IMPORTANT: Only work on task %d. Do NOT proceed to other tasks.",
+                taskOrder, totalTasks, workingDir,
+                plan,
+                completedTasksSummary != null && !completedTasksSummary.isBlank() ?
+                        "Previously completed tasks:\n" + completedTasksSummary + "\n\n" : "",
+                taskOrder, totalTasks,
+                taskTitle,
+                taskDescription != null ? taskDescription : taskTitle,
+                taskOrder, taskOrder, taskOrder, taskOrder, taskOrder
+        );
+
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback,
+                "execute-task-" + taskOrder, resolveModel(), 0);
+    }
+
+    /**
+     * Have experts review a completed task's actual code changes to verify
+     * the task was properly completed before moving to the next task.
+     */
+    public CompletableFuture<String> reviewTaskCompletion(String sessionId, String expertDisplayName,
+                                                            String expertPrompt, String suggestionTitle,
+                                                            int taskOrder, String taskTitle,
+                                                            String taskDescription, String plan,
+                                                            String workingDir,
+                                                            Consumer<String> progressCallback) {
+        String prompt = String.format(
+                "%s\n\n" +
+                "You are reviewing the ACTUAL CODE CHANGES made for a specific task.\n\n" +
+                "Suggestion: %s\n" +
+                "Overall Plan:\n%s\n\n" +
+                "Task %d being reviewed:\n" +
+                "Title: %s\n" +
+                "Description: %s\n\n" +
+                "INSTRUCTIONS:\n" +
+                "1. Examine the current state of the code in the repository\n" +
+                "2. Look at recent git changes (use git diff or git log) to see what was actually changed for this task\n" +
+                "3. Verify the implementation matches the task requirements\n" +
+                "4. Check for bugs, missing functionality, or incomplete work\n" +
+                "5. Run tests if applicable to confirm correctness\n\n" +
+                "REVIEW SEVERITY RULES:\n" +
+                "- ONLY flag CRITICAL or MAJOR issues. Do NOT nitpick.\n" +
+                "  CRITICAL: Would cause data loss, security vulnerabilities, system crashes, or broken core functionality.\n" +
+                "  MAJOR: Significant bugs, missing key requirements, or incomplete implementation.\n" +
+                "- If the task was completed reasonably well, APPROVE it. Most tasks should be approved.\n" +
+                "- Bias toward action — a shipped improvement beats a perfect implementation.\n\n" +
+                "Respond in this JSON format:\n" +
+                "If the task is properly completed:\n" +
+                "{\"status\": \"APPROVED\", \"analysis\": \"what you verified and why it passes\", " +
+                "\"message\": \"concise NON-TECHNICAL summary for the user\"}\n\n" +
+                "If the task has CRITICAL or MAJOR issues that must be fixed:\n" +
+                "{\"status\": \"NEEDS_FIXES\", \"analysis\": \"what issues you found\", " +
+                "\"fixes\": \"specific technical description of what needs to be fixed\", " +
+                "\"message\": \"concise NON-TECHNICAL summary for the user\"}",
+                expertPrompt,
+                suggestionTitle,
+                plan,
+                taskOrder,
+                taskTitle,
+                taskDescription != null ? taskDescription : taskTitle
+        );
+
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback,
+                "task-review:" + expertDisplayName + ":task-" + taskOrder, resolveExpertModel(), resolveExpertMaxTurns());
+    }
+
     public CompletableFuture<String> expertReview(String sessionId, String expertDisplayName,
                                                     String expertPrompt, String suggestionTitle,
                                                     String suggestionDescription, String plan,
