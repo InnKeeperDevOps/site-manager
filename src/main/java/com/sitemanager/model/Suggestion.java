@@ -70,6 +70,9 @@ public class Suggestion {
     @Column(columnDefinition = "TEXT")
     private String expertReviewNotes;
 
+    @Column
+    private Boolean expertReviewPlanChanged;
+
     @Column(nullable = false)
     private Instant createdAt;
 
@@ -140,4 +143,6 @@ public class Suggestion {
     public void setExpertReviewRound(Integer expertReviewRound) { this.expertReviewRound = expertReviewRound; }
     public String getExpertReviewNotes() { return expertReviewNotes; }
     public void setExpertReviewNotes(String expertReviewNotes) { this.expertReviewNotes = expertReviewNotes; }
+    public Boolean getExpertReviewPlanChanged() { return expertReviewPlanChanged; }
+    public void setExpertReviewPlanChanged(Boolean expertReviewPlanChanged) { this.expertReviewPlanChanged = expertReviewPlanChanged; }
 }

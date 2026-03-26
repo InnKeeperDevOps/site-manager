@@ -280,6 +280,7 @@ public class SuggestionService {
             suggestion.setExpertReviewStep(0);
             suggestion.setExpertReviewRound(1);
             suggestion.setExpertReviewNotes(null);
+            suggestion.setExpertReviewPlanChanged(false);
             suggestion.setCurrentPhase("Plan created — starting expert reviews...");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
@@ -403,14 +404,44 @@ public class SuggestionService {
         ExpertRole[] experts = ExpertRole.reviewOrder();
 
         if (step >= experts.length) {
-            // All experts have reviewed — transition to PLANNED
+            // All experts have reviewed — check if plan was changed during this round
+            boolean planChanged = Boolean.TRUE.equals(suggestion.getExpertReviewPlanChanged());
+            int currentRound = suggestion.getExpertReviewRound() != null ? suggestion.getExpertReviewRound() : 1;
+
+            if (planChanged && currentRound < MAX_EXPERT_REVIEW_ROUNDS) {
+                // Plan was modified during this round — restart so all experts
+                // can re-review the updated plan from scratch
+                suggestion.setExpertReviewStep(0);
+                suggestion.setExpertReviewRound(currentRound + 1);
+                suggestion.setExpertReviewNotes(null);
+                suggestion.setExpertReviewPlanChanged(false);
+                suggestionRepository.save(suggestion);
+
+                addMessage(suggestionId, SenderType.SYSTEM, "System",
+                        "The plan was updated during this round — restarting expert reviews (round " + (currentRound + 1) + ").");
+                broadcastTasks(suggestionId);
+                broadcastExpertReviewStatus(suggestionId);
+                runNextExpertReview(suggestionId);
+                return;
+            }
+
+            if (planChanged) {
+                log.info("Suggestion {} reached max expert review rounds ({}), finalizing plan",
+                        suggestionId, MAX_EXPERT_REVIEW_ROUNDS);
+                addMessage(suggestionId, SenderType.SYSTEM, "System",
+                        "Expert reviews have completed after multiple rounds of refinement.");
+            } else {
+                addMessage(suggestionId, SenderType.SYSTEM, "System",
+                        "All expert reviews are complete. The plan is ready for approval.");
+            }
+
+            // Transition to PLANNED
             suggestion.setStatus(SuggestionStatus.PLANNED);
             suggestion.setExpertReviewStep(null);
+            suggestion.setExpertReviewRound(null);
+            suggestion.setExpertReviewPlanChanged(null);
             suggestion.setCurrentPhase("Plan ready — waiting for approval");
             suggestionRepository.save(suggestion);
-
-            addMessage(suggestionId, SenderType.SYSTEM, "System",
-                    "All expert reviews are complete. The plan is ready for approval.");
             broadcastUpdate(suggestion);
             broadcastExpertReviewStatus(suggestionId);
             return;
@@ -589,32 +620,14 @@ public class SuggestionService {
             addMessage(suggestionId, SenderType.AI, expert.getDisplayName(),
                     expertMessage + "\n\n*Changes have been applied to the plan.*");
 
-            // Plan changed — restart reviews from the beginning so all experts re-review
-            int currentRound = suggestion.getExpertReviewRound() != null ? suggestion.getExpertReviewRound() : 1;
-            if (currentRound >= MAX_EXPERT_REVIEW_ROUNDS) {
-                // Hit the limit — accept the plan as-is and move on
-                log.info("Suggestion {} reached max expert review rounds ({}), finalizing plan",
-                        suggestionId, MAX_EXPERT_REVIEW_ROUNDS);
-                addMessage(suggestionId, SenderType.SYSTEM, "System",
-                        "Expert reviews have completed after multiple rounds of refinement.");
-                suggestion.setStatus(SuggestionStatus.PLANNED);
-                suggestion.setExpertReviewStep(null);
-                suggestion.setExpertReviewRound(null);
-                suggestion.setCurrentPhase("Plan ready — waiting for approval");
-                suggestionRepository.save(suggestion);
-                broadcastUpdate(suggestion);
-                broadcastTasks(suggestionId);
-                broadcastExpertReviewStatus(suggestionId);
-                return;
-            }
-
-            suggestion.setExpertReviewStep(0);
-            suggestion.setExpertReviewRound(currentRound + 1);
-            suggestion.setExpertReviewNotes(null);
+            // Mark that the plan changed during this round — remaining experts still
+            // need a chance to review before we restart from the beginning.
+            suggestion.setExpertReviewPlanChanged(true);
             suggestionRepository.save(suggestion);
 
             addMessage(suggestionId, SenderType.SYSTEM, "System",
-                    "The plan was updated — restarting expert reviews (round " + (currentRound + 1) + ").");
+                    "The plan was updated. Remaining experts will continue reviewing before a new round begins.");
+            advanceExpertStep(suggestion);
             broadcastTasks(suggestionId);
             broadcastExpertReviewStatus(suggestionId);
             runNextExpertReview(suggestionId);
