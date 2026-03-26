@@ -19,7 +19,8 @@ const app = {
             currentStep: -1,
             totalSteps: 0,
             experts: [],
-            active: false
+            active: false,
+            notes: []
         },
         expertClarification: {
             questions: [],
@@ -218,9 +219,9 @@ const app = {
 
         const planEl = document.getElementById('detailPlan');
         const planText = document.getElementById('detailPlanText');
-        if (suggestion.planSummary) {
+        if (suggestion.planDisplaySummary || suggestion.planSummary) {
             planEl.style.display = '';
-            planText.textContent = suggestion.planSummary;
+            planText.textContent = suggestion.planDisplaySummary || suggestion.planSummary;
         } else {
             planEl.style.display = 'none';
         }
@@ -353,8 +354,8 @@ const app = {
             return `<div class="task-item" data-task-order="${t.taskOrder}">
                 <div class="task-icon ${statusClass}">${icon}</div>
                 <div class="task-body">
-                    <div class="${titleClass}">${t.taskOrder}. ${this.esc(t.title)}${statusLabel ? `<span style="font-weight:400;font-size:0.8rem;color:${t.status === 'REVIEWING' ? '#d97706' : '#2563eb'}">${statusLabel}</span>` : ''}</div>
-                    ${t.description ? `<div class="task-desc">${this.esc(t.description)}</div>` : ''}
+                    <div class="${titleClass}">${t.taskOrder}. ${this.esc(t.displayTitle || t.title)}${statusLabel ? `<span style="font-weight:400;font-size:0.8rem;color:${t.status === 'REVIEWING' ? '#d97706' : '#2563eb'}">${statusLabel}</span>` : ''}</div>
+                    ${(t.displayDescription || t.description) ? `<div class="task-desc">${this.esc(t.displayDescription || t.description)}</div>` : ''}
                     ${meta ? `<div class="task-meta">${meta}</div>` : ''}
                 </div>
             </div>`;
@@ -364,6 +365,7 @@ const app = {
     updateTask(taskData) {
         const tasks = this.state.tasks;
         const idx = tasks.findIndex(t => t.taskOrder === taskData.taskOrder);
+        const prevStatus = idx >= 0 ? tasks[idx].status : null;
         if (idx >= 0) {
             tasks[idx] = { ...tasks[idx], ...taskData };
         } else {
@@ -371,6 +373,23 @@ const app = {
             tasks.sort((a, b) => a.taskOrder - b.taskOrder);
         }
         this.renderTasks();
+
+        // Animate the changed task if status transitioned
+        if (taskData.status && taskData.status !== prevStatus) {
+            const taskEl = document.querySelector(`.task-item[data-task-order="${taskData.taskOrder}"]`);
+            if (taskEl) {
+                let animClass = '';
+                if (taskData.status === 'COMPLETED') animClass = 'just-completed';
+                else if (taskData.status === 'FAILED') animClass = 'just-failed';
+                else if (taskData.status === 'IN_PROGRESS') animClass = 'just-started';
+                if (animClass) {
+                    taskEl.classList.add(animClass);
+                    setTimeout(() => taskEl.classList.remove(animClass), 1500);
+                }
+                // Scroll the task into view
+                taskEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+        }
     },
 
     // --- Expert Review UI ---
@@ -390,27 +409,68 @@ const app = {
         document.getElementById('expertProgress').textContent =
             `${completed}/${er.totalSteps} reviewed${roundLabel}`;
 
+        const notes = er.notes || [];
         listEl.innerHTML = er.experts.map((e, i) => {
             const icons = { pending: '○', in_progress: '◉', completed: '✓' };
             const icon = icons[e.status] || '○';
             const statusClass = 'expert-' + e.status;
             const label = e.status === 'in_progress' ? ' — reviewing' : '';
+            const expertNote = notes.find(n => n.expertName === e.name);
+            const noteSnippet = expertNote ? expertNote.note.substring(0, 120) + (expertNote.note.length > 120 ? '...' : '') : '';
             return `<div class="expert-item ${statusClass}">
                 <div class="expert-icon">${icon}</div>
-                <div class="expert-name">${this.esc(e.name)}${label ? `<span style="font-weight:400;font-size:0.8rem;color:#7c3aed">${label}</span>` : ''}</div>
+                <div class="expert-name">${this.esc(e.name)}${label ? `<span style="font-weight:400;font-size:0.8rem;color:#7c3aed">${label}</span>` : ''}${noteSnippet ? `<div style="font-weight:400;font-size:0.78rem;color:#6b7280;margin-top:2px;">${this.esc(noteSnippet)}</div>` : ''}</div>
             </div>`;
         }).join('');
+
+        this.renderExpertNotes();
     },
 
     updateExpertReview(data) {
+        const prevNotes = this.state.expertReview.notes || [];
+        // Reset notes when a new round starts
+        const isNewRound = data.round && data.round !== this.state.expertReview.round && data.currentStep === 0;
         this.state.expertReview = {
             currentStep: data.currentStep,
             totalSteps: data.totalSteps,
             experts: data.experts,
             round: data.round || 1,
-            active: true
+            active: true,
+            notes: isNewRound ? [] : prevNotes
         };
         this.renderExpertReview();
+    },
+
+    addExpertNote(expertName, note) {
+        if (!this.state.expertReview.notes) {
+            this.state.expertReview.notes = [];
+        }
+        this.state.expertReview.notes.push({ expertName, note });
+        this.renderExpertNotes();
+    },
+
+    renderExpertNotes() {
+        let notesEl = document.getElementById('expertNotes');
+        if (!notesEl) {
+            const container = document.getElementById('detailExpertReview');
+            if (!container) return;
+            notesEl = document.createElement('div');
+            notesEl.id = 'expertNotes';
+            notesEl.style.cssText = 'margin-top:0.75rem;max-height:200px;overflow-y:auto;font-size:0.85rem;';
+            container.appendChild(notesEl);
+        }
+        const notes = this.state.expertReview.notes || [];
+        if (notes.length === 0) {
+            notesEl.style.display = 'none';
+            return;
+        }
+        notesEl.style.display = '';
+        notesEl.innerHTML = notes.map(n =>
+            `<div style="margin-bottom:0.5rem;padding:0.4rem 0.6rem;background:#f8f7ff;border-radius:6px;border-left:3px solid #7c3aed;">
+                <strong style="color:#7c3aed;font-size:0.8rem;">${this.esc(n.expertName)}</strong>
+                <div style="color:#374151;margin-top:2px;">${this.esc(n.note).substring(0, 300)}${n.note.length > 300 ? '...' : ''}</div>
+            </div>`
+        ).join('');
     },
 
     // --- Expert Clarification Wizard ---
@@ -738,6 +798,15 @@ const app = {
                 document.getElementById('detailUpVotes').textContent = data.upVotes;
                 document.getElementById('detailDownVotes').textContent = data.downVotes;
 
+                // Update plan display if changed
+                const planEl2 = document.getElementById('detailPlan');
+                const planText2 = document.getElementById('detailPlanText');
+                const displayPlan = data.planDisplaySummary || data.planSummary;
+                if (displayPlan) {
+                    planEl2.style.display = '';
+                    planText2.textContent = displayPlan;
+                }
+
                 // Update admin actions visibility
                 const isAdmin = this.state.role === 'ROOT_ADMIN' || this.state.role === 'ADMIN';
                 const canApprove = ['PLANNED', 'DISCUSSING'].includes(data.status);
@@ -788,6 +857,12 @@ const app = {
             }
             case 'expert_review_status': {
                 this.updateExpertReview(data);
+                break;
+            }
+            case 'expert_note': {
+                if (data.expertName && data.note) {
+                    this.addExpertNote(data.expertName, data.note);
+                }
                 break;
             }
             case 'expert_clarification_questions': {

@@ -83,14 +83,13 @@ public class ClaudeService {
                 "1. Is this suggestion detailed enough to implement? Does it clearly describe what changes are needed?\n" +
                 "2. If NOT detailed enough, ask specific clarifying questions to the user.\n" +
                 "3. If it IS detailed enough, look at the repository and create a concrete implementation plan.\n\n" +
-                "COMMUNICATION RULES:\n" +
-                "- All messages, questions, and plan descriptions shown to users MUST be written in plain, non-technical language.\n" +
-                "- NEVER mention programming languages, frameworks, libraries, databases, APIs, file names, class names, or any technical implementation details.\n" +
-                "- Describe changes in terms of what the user will experience — features, behaviors, and outcomes.\n" +
-                "- Questions should be about what the user wants, not how it will be built.\n" +
-                "- Task titles and descriptions should describe what will change from the user's perspective.\n" +
-                "  Good: \"Update the settings page to include a new option\"\n" +
-                "  Bad: \"Add a new field to SiteSettings.java and create a REST endpoint\"\n\n" +
+                "DUAL-LEVEL PLAN RULES:\n" +
+                "- The plan and tasks must have TWO levels of detail:\n" +
+                "  1. LOW-LEVEL (internal/technical): Detailed technical implementation specifics including file names, classes, methods, " +
+                "database changes, API endpoints, frameworks, and step-by-step coding instructions. This is what drives execution.\n" +
+                "  2. HIGH-LEVEL (user-facing display): Plain, non-technical language describing features, behaviors, and outcomes " +
+                "from the user's perspective. No programming languages, file names, class names, or technical details.\n" +
+                "- Questions to users should always be in plain, non-technical language about desired behavior and outcomes.\n\n" +
                 "Respond in this JSON format:\n" +
                 "If clarification needed:\n" +
                 "{\"status\": \"NEEDS_CLARIFICATION\", " +
@@ -98,15 +97,23 @@ public class ClaudeService {
                 "\"questions\": [\"specific question 1\", \"specific question 2\", ...]}\n\n" +
                 "If ready to plan:\n" +
                 "{\"status\": \"PLAN_READY\", " +
-                "\"message\": \"your response to the user\", " +
-                "\"plan\": \"brief overall summary of the implementation\", " +
+                "\"message\": \"your response to the user (high-level, non-technical)\", " +
+                "\"plan\": \"detailed low-level technical implementation plan with file names, classes, methods, database schema changes, " +
+                "API endpoints, specific code changes needed, and technical approach\", " +
+                "\"planDisplaySummary\": \"brief high-level summary of the implementation in plain non-technical language for the user\", " +
                 "\"tasks\": [\n" +
-                "  {\"title\": \"short task name\", \"description\": \"what this task involves\", \"estimatedMinutes\": number},\n" +
+                "  {\"title\": \"low-level technical task name (e.g. Add emailNotifications column to site_settings table)\", " +
+                "\"description\": \"detailed technical description with specific files, classes, methods to modify and how\", " +
+                "\"displayTitle\": \"high-level user-facing task name (e.g. Add email notification option to settings)\", " +
+                "\"displayDescription\": \"plain language description of what this changes from the user's perspective\", " +
+                "\"estimatedMinutes\": number},\n" +
                 "  ...\n" +
                 "]}\n\n" +
                 "IMPORTANT: When status is NEEDS_CLARIFICATION, you MUST include a \"questions\" array with each clarifying question as a separate string element. Each question should be self-contained and specific.\n" +
                 "When status is PLAN_READY, you MUST include a \"tasks\" array that breaks the plan into ordered implementation steps. " +
                 "Each task should be a concrete, actionable unit of work with a realistic time estimate in minutes. " +
+                "The low-level title/description should include specific technical details (file paths, method names, database operations). " +
+                "The displayTitle/displayDescription should be completely non-technical. " +
                 "Order tasks by implementation sequence. Typically 3-8 tasks is appropriate.",
                 repoUrl != null ? repoUrl : "not configured",
                 suggestionTitle,
@@ -178,26 +185,39 @@ public class ClaudeService {
                 "Current Plan:\n%s\n\n" +
                 "%s" +
                 "%s" +
-                "COMMUNICATION RULES:\n" +
-                "- All messages, questions, and descriptions MUST be written in plain, non-technical language.\n" +
-                "- NEVER mention programming languages, frameworks, libraries, databases, APIs, file names, class names, or any technical implementation details.\n" +
-                "- Describe everything from the user's perspective — features, behaviors, and outcomes.\n" +
-                "- Questions should be about desired behavior and outcomes, not technical choices.\n\n" +
+                "DUAL-LEVEL DETAIL RULES:\n" +
+                "- The plan you are reviewing contains LOW-LEVEL technical details (file names, classes, methods, etc.). " +
+                "Use these details for your analysis — review them thoroughly from your expertise area.\n" +
+                "- Your 'analysis' field should reference technical specifics when relevant to your expertise.\n" +
+                "- Your 'message' field (shown to the user) MUST be written in plain, non-technical language — " +
+                "describe features, behaviors, and outcomes only. NEVER mention file names, classes, APIs, or technical details in the message.\n" +
+                "- Questions to users should be about desired behavior and outcomes, not technical choices.\n\n" +
+                "MANDATORY PARTICIPATION RULES:\n" +
+                "- You MUST provide a detailed, substantive analysis from your area of expertise. Every expert must contribute meaningful feedback each round.\n" +
+                "- Your analysis MUST be at least 2-3 sentences covering specific observations, concerns, or confirmations relevant to your domain.\n" +
+                "- Even when approving, you MUST explain WHAT specifically you evaluated, WHY it meets your standards, and any minor observations or recommendations.\n" +
+                "- Do NOT give generic or rubber-stamp approvals like 'looks good' or 'no issues found'. Be specific about what you reviewed.\n" +
+                "- Your message to the user MUST also be substantive — summarize your key findings and perspective in plain language.\n\n" +
                 "Respond in this JSON format:\n" +
                 "If the plan looks good from your perspective:\n" +
-                "{\"status\": \"APPROVED\", \"analysis\": \"your analysis of the plan\", \"message\": \"high-level summary for the user\"}\n\n" +
+                "{\"status\": \"APPROVED\", \"analysis\": \"your detailed technical analysis — MUST cover specific aspects you evaluated from your expertise area, referencing specific files/classes/methods where relevant, what you found acceptable and why, and any minor recommendations\", \"message\": \"substantive NON-TECHNICAL summary of your review findings for the user\"}\n\n" +
                 "If you recommend changes:\n" +
-                "{\"status\": \"CHANGES_PROPOSED\", \"analysis\": \"your analysis\", " +
-                "\"proposedChanges\": \"description of what should change\", " +
-                "\"revisedPlan\": \"updated plan summary\", " +
-                "\"revisedTasks\": [{\"title\": \"task name\", \"description\": \"what this involves\", \"estimatedMinutes\": number}, ...], " +
-                "\"message\": \"high-level summary for the user\"}\n\n" +
+                "{\"status\": \"CHANGES_PROPOSED\", \"analysis\": \"your detailed technical analysis\", " +
+                "\"proposedChanges\": \"technical description of what should change\", " +
+                "\"revisedPlan\": \"updated low-level technical plan\", " +
+                "\"revisedPlanDisplaySummary\": \"updated high-level non-technical summary for the user\", " +
+                "\"revisedTasks\": [{\"title\": \"low-level technical task name\", \"description\": \"detailed technical description\", " +
+                "\"displayTitle\": \"high-level user-facing task name\", \"displayDescription\": \"plain language description\", " +
+                "\"estimatedMinutes\": number}, ...], " +
+                "\"message\": \"substantive NON-TECHNICAL summary for the user\"}\n\n" +
                 "If you need the user to answer questions before you can complete your review:\n" +
                 "{\"status\": \"NEEDS_CLARIFICATION\", \"analysis\": \"what you've found so far\", " +
-                "\"questions\": [\"high-level question 1\", \"high-level question 2\"], " +
+                "\"questions\": [\"high-level non-technical question 1\", \"high-level non-technical question 2\"], " +
                 "\"message\": \"brief summary of what you need to know\"}\n\n" +
                 "IMPORTANT: When proposing changes, you MUST include revisedTasks with the COMPLETE task list (not just changed tasks). " +
-                "When asking questions, keep them high-level and non-technical.",
+                "Each task MUST have both low-level (title/description) and high-level (displayTitle/displayDescription) fields. " +
+                "When asking questions, keep them high-level and non-technical. " +
+                "Remember: your participation is REQUIRED — provide real, thoughtful feedback from your area of expertise.",
                 expertPrompt,
                 suggestionTitle,
                 suggestionDescription,

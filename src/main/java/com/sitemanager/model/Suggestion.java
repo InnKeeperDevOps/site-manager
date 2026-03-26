@@ -31,6 +31,9 @@ public class Suggestion {
     @Column(columnDefinition = "TEXT")
     private String planSummary;
 
+    @Column(columnDefinition = "TEXT")
+    private String planDisplaySummary;
+
     @Column
     private String currentPhase;
 
@@ -105,6 +108,8 @@ public class Suggestion {
     public void setAuthorName(String authorName) { this.authorName = authorName; }
     public String getPlanSummary() { return planSummary; }
     public void setPlanSummary(String planSummary) { this.planSummary = planSummary; }
+    public String getPlanDisplaySummary() { return planDisplaySummary; }
+    public void setPlanDisplaySummary(String planDisplaySummary) { this.planDisplaySummary = planDisplaySummary; }
     public String getCurrentPhase() { return currentPhase; }
     public void setCurrentPhase(String currentPhase) { this.currentPhase = currentPhase; }
     public String getClaudeSessionId() { return claudeSessionId; }
