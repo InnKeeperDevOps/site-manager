@@ -103,9 +103,9 @@ public enum ExpertRole {
     public String getReviewPrompt() { return reviewPrompt; }
 
     public static ExpertRole[] reviewOrder() {
-        return new ExpertRole[] { SOFTWARE_ARCHITECT, DATA_ANALYST, SOFTWARE_ENGINEER,
-                PRODUCT_MANAGER, FRONTEND_ENGINEER, QA_ENGINEER,
-                SECURITY_ENGINEER, DEVOPS_ENGINEER, PERFORMANCE_ENGINEER, INFRASTRUCTURE_ENGINEER };
+        return new ExpertRole[] { SOFTWARE_ARCHITECT, SECURITY_ENGINEER, INFRASTRUCTURE_ENGINEER,
+                DATA_ANALYST, PERFORMANCE_ENGINEER, DEVOPS_ENGINEER,
+                SOFTWARE_ENGINEER, FRONTEND_ENGINEER, PRODUCT_MANAGER, QA_ENGINEER };
     }
 
     public static ExpertRole fromStep(int step) {
