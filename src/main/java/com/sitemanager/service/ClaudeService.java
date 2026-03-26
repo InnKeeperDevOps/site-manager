@@ -256,6 +256,15 @@ public class ClaudeService {
                 "Current Plan:\n%s\n\n" +
                 "%s" +
                 "%s" +
+                "REVIEW SEVERITY RULES:\n" +
+                "- ONLY flag CRITICAL, MAJOR, or MEDIUM issues. Do NOT nitpick.\n" +
+                "  CRITICAL: Would cause data loss, security vulnerabilities, system crashes, or broken core functionality.\n" +
+                "  MAJOR: Significant bugs, missing key requirements, architectural problems that would require rework.\n" +
+                "  MEDIUM: Notable gaps in error handling, performance concerns under real usage, or missing edge cases that users will likely hit.\n" +
+                "- Do NOT propose changes for: style preferences, minor naming conventions, theoretical concerns that are unlikely in practice, " +
+                "or optimizations that don't matter at current scale.\n" +
+                "- If the plan is reasonable and has no critical/major/medium issues, APPROVE it. Most plans should be approved.\n" +
+                "- Bias toward action — a shipped improvement beats a perfect plan.\n\n" +
                 "DUAL-LEVEL DETAIL RULES:\n" +
                 "- The plan you are reviewing contains LOW-LEVEL technical details (file names, classes, methods, etc.). " +
                 "Use these details for your analysis — review them thoroughly from your expertise area.\n" +
@@ -263,24 +272,23 @@ public class ClaudeService {
                 "- Your 'message' field (shown to the user) MUST be written in plain, non-technical language — " +
                 "describe features, behaviors, and outcomes only. NEVER mention file names, classes, APIs, or technical details in the message.\n" +
                 "- Questions to users should be about desired behavior and outcomes, not technical choices.\n\n" +
-                "MANDATORY PARTICIPATION RULES:\n" +
-                "- You MUST provide a detailed, substantive analysis from your area of expertise. Every expert must contribute meaningful feedback each round.\n" +
-                "- Your analysis MUST be at least 2-3 sentences covering specific observations, concerns, or confirmations relevant to your domain.\n" +
-                "- Even when approving, you MUST explain WHAT specifically you evaluated, WHY it meets your standards, and any minor observations or recommendations.\n" +
-                "- Do NOT give generic or rubber-stamp approvals like 'looks good' or 'no issues found'. Be specific about what you reviewed.\n" +
-                "- Your message to the user MUST also be substantive — summarize your key findings and perspective in plain language.\n\n" +
+                "PARTICIPATION RULES:\n" +
+                "- Provide a concise, focused analysis from your area of expertise.\n" +
+                "- Your analysis should be 2-3 sentences covering the most important observations from your domain.\n" +
+                "- When approving, briefly state what you evaluated and why it's acceptable.\n" +
+                "- Do NOT give generic approvals like 'looks good'. Be specific but brief.\n\n" +
                 "Respond in this JSON format:\n" +
                 "If the plan looks good from your perspective:\n" +
-                "{\"status\": \"APPROVED\", \"analysis\": \"your detailed technical analysis — MUST cover specific aspects you evaluated from your expertise area, referencing specific files/classes/methods where relevant, what you found acceptable and why, and any minor recommendations\", \"message\": \"substantive NON-TECHNICAL summary of your review findings for the user\"}\n\n" +
-                "If you recommend changes:\n" +
-                "{\"status\": \"CHANGES_PROPOSED\", \"analysis\": \"your detailed technical analysis\", " +
+                "{\"status\": \"APPROVED\", \"analysis\": \"your focused technical analysis — what you evaluated and why it passes\", \"message\": \"concise NON-TECHNICAL summary for the user\"}\n\n" +
+                "If you find CRITICAL or MAJOR issues that must be fixed:\n" +
+                "{\"status\": \"CHANGES_PROPOSED\", \"analysis\": \"your technical analysis of the issues found\", " +
                 "\"proposedChanges\": \"technical description of what should change\", " +
                 "\"revisedPlan\": \"updated low-level technical plan\", " +
                 "\"revisedPlanDisplaySummary\": \"updated high-level non-technical summary for the user\", " +
                 "\"revisedTasks\": [{\"title\": \"low-level technical task name\", \"description\": \"detailed technical description\", " +
                 "\"displayTitle\": \"high-level user-facing task name\", \"displayDescription\": \"plain language description\", " +
                 "\"estimatedMinutes\": number}, ...], " +
-                "\"message\": \"substantive NON-TECHNICAL summary for the user\"}\n\n" +
+                "\"message\": \"concise NON-TECHNICAL summary for the user\"}\n\n" +
                 "If you need the user to answer questions before you can complete your review:\n" +
                 "{\"status\": \"NEEDS_CLARIFICATION\", \"analysis\": \"what you've found so far\", " +
                 "\"questions\": [\"high-level non-technical question 1\", \"high-level non-technical question 2\"], " +
@@ -288,7 +296,7 @@ public class ClaudeService {
                 "IMPORTANT: When proposing changes, you MUST include revisedTasks with the COMPLETE task list (not just changed tasks). " +
                 "Each task MUST have both low-level (title/description) and high-level (displayTitle/displayDescription) fields. " +
                 "When asking questions, keep them high-level and non-technical. " +
-                "Remember: your participation is REQUIRED — provide real, thoughtful feedback from your area of expertise.",
+                "Only propose CHANGES_PROPOSED for critical or major issues — approve with notes for medium issues.",
                 expertPrompt,
                 suggestionTitle,
                 suggestionDescription,
@@ -349,7 +357,9 @@ public class ClaudeService {
         long startTime = System.currentTimeMillis();
         String logPrefix = String.format("[CLAUDE-REQ-%d][%s]", requestId, operationType);
 
-        String cliSessionId = sessionMap.get(sessionId);
+        // Expert reviews and feedback always get a fresh session (no resume)
+        boolean isExpertOp = operationType.startsWith("expert-review:") || operationType.startsWith("review-feedback:");
+        String cliSessionId = isExpertOp ? null : sessionMap.get(sessionId);
         boolean isResume = cliSessionId != null;
 
         // Build command with optional model and max-turns flags
