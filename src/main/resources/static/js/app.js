@@ -12,6 +12,21 @@ const app = {
             answers: [],
             currentIndex: 0,
             active: false
+        },
+        tasks: [],
+        taskTimer: null,
+        expertReview: {
+            currentStep: -1,
+            totalSteps: 0,
+            experts: [],
+            active: false
+        },
+        expertClarification: {
+            questions: [],
+            answers: [],
+            currentIndex: 0,
+            active: false,
+            expertName: ''
         }
     },
 
@@ -160,7 +175,7 @@ const app = {
                         </div>
                         <span class="status-badge status-${s.status}">${s.status.replace('_', ' ')}</span>
                     </div>
-                    ${s.currentPhase ? `<div style="font-size:0.8rem;color:var(--text-muted);margin-top:0.5rem">${this.esc(s.currentPhase)}</div>` : ''}
+                    ${s.currentPhase ? `<div style="font-size:0.8rem;color:${['IN_PROGRESS','EXPERT_REVIEW'].includes(s.status) ? 'var(--primary)' : 'var(--text-muted)'};margin-top:0.5rem">${['IN_PROGRESS','EXPERT_REVIEW'].includes(s.status) ? '<span class="spinner" style="display:inline-block;width:12px;height:12px;margin-right:4px;vertical-align:middle"></span>' : ''}${this.esc(s.currentPhase)}</div>` : ''}
                 </div>
             `).join('');
         } catch (err) {
@@ -172,6 +187,8 @@ const app = {
         this.state.currentSuggestion = id;
         const suggestion = await this.api('/suggestions/' + id);
         const messages = await this.api('/suggestions/' + id + '/messages');
+        const tasks = await this.api('/suggestions/' + id + '/tasks');
+        this.state.tasks = tasks || [];
 
         document.getElementById('detailTitle').textContent = suggestion.title;
         document.getElementById('detailDescription').textContent = suggestion.description;
@@ -190,7 +207,9 @@ const app = {
 
         const phaseEl = document.getElementById('detailPhase');
         const phaseText = document.getElementById('detailPhaseText');
-        if (suggestion.currentPhase && !['COMPLETED', 'DENIED', 'TIMED_OUT'].includes(suggestion.status)) {
+        const phaseFinished = ['DENIED', 'TIMED_OUT'].includes(suggestion.status) ||
+            (suggestion.status === 'COMPLETED' && (!suggestion.currentPhase || suggestion.currentPhase.startsWith('Implementation completed')));
+        if (suggestion.currentPhase && !phaseFinished) {
             phaseEl.style.display = '';
             phaseText.textContent = suggestion.currentPhase;
         } else {
@@ -205,6 +224,17 @@ const app = {
         } else {
             planEl.style.display = 'none';
         }
+
+        // Expert review status — show if in EXPERT_REVIEW or if step data exists
+        if (suggestion.status === 'EXPERT_REVIEW' && suggestion.expertReviewStep != null) {
+            this.state.expertReview.active = true;
+        } else {
+            this.state.expertReview.active = false;
+        }
+        this.renderExpertReview();
+
+        // Tasks
+        this.renderTasks();
 
         // PR link
         const prEl = document.getElementById('detailPr');
@@ -277,6 +307,186 @@ const app = {
         `;
     },
 
+    renderTasks() {
+        const container = document.getElementById('detailTasks');
+        const listEl = document.getElementById('taskList');
+        const tasks = this.state.tasks;
+        if (!tasks || tasks.length === 0) {
+            container.style.display = 'none';
+            return;
+        }
+        container.style.display = '';
+
+        const completed = tasks.filter(t => t.status === 'COMPLETED').length;
+        const total = tasks.length;
+        const pct = Math.round((completed / total) * 100);
+        document.getElementById('taskProgress').textContent = `${completed}/${total} completed`;
+        document.getElementById('taskProgressFill').style.width = pct + '%';
+
+        // Start/stop elapsed time timer for in-progress tasks
+        const hasActiveTask = tasks.some(t => (t.status === 'IN_PROGRESS' || t.status === 'REVIEWING') && t.startedAt);
+        if (hasActiveTask && !this.state.taskTimer) {
+            this.state.taskTimer = setInterval(() => this.renderTasks(), 10000);
+        } else if (!hasActiveTask && this.state.taskTimer) {
+            clearInterval(this.state.taskTimer);
+            this.state.taskTimer = null;
+        }
+
+        listEl.innerHTML = tasks.map(t => {
+            const icons = { PENDING: '○', IN_PROGRESS: '◉', REVIEWING: '⟳', COMPLETED: '✓', FAILED: '✗' };
+            const icon = icons[t.status] || '○';
+            const statusClass = t.status.toLowerCase();
+            const titleClass = t.status === 'COMPLETED' ? 'task-title completed' : 'task-title';
+            const statusLabel = t.status === 'REVIEWING' ? ' — reviewing' : (t.status === 'IN_PROGRESS' ? ' — in progress' : '');
+
+            let meta = '';
+            if (t.estimatedMinutes) meta += `~${t.estimatedMinutes} min`;
+            if (t.startedAt && !t.completedAt) {
+                const elapsed = Math.round((Date.now() - new Date(t.startedAt).getTime()) / 60000);
+                meta += (meta ? ' · ' : '') + `${elapsed} min elapsed`;
+            }
+            if (t.startedAt && t.completedAt) {
+                const dur = Math.round((new Date(t.completedAt).getTime() - new Date(t.startedAt).getTime()) / 60000);
+                meta += (meta ? ' · ' : '') + `took ${dur} min`;
+            }
+
+            return `<div class="task-item" data-task-order="${t.taskOrder}">
+                <div class="task-icon ${statusClass}">${icon}</div>
+                <div class="task-body">
+                    <div class="${titleClass}">${t.taskOrder}. ${this.esc(t.title)}${statusLabel ? `<span style="font-weight:400;font-size:0.8rem;color:${t.status === 'REVIEWING' ? '#d97706' : '#2563eb'}">${statusLabel}</span>` : ''}</div>
+                    ${t.description ? `<div class="task-desc">${this.esc(t.description)}</div>` : ''}
+                    ${meta ? `<div class="task-meta">${meta}</div>` : ''}
+                </div>
+            </div>`;
+        }).join('');
+    },
+
+    updateTask(taskData) {
+        const tasks = this.state.tasks;
+        const idx = tasks.findIndex(t => t.taskOrder === taskData.taskOrder);
+        if (idx >= 0) {
+            tasks[idx] = { ...tasks[idx], ...taskData };
+        } else {
+            tasks.push(taskData);
+            tasks.sort((a, b) => a.taskOrder - b.taskOrder);
+        }
+        this.renderTasks();
+    },
+
+    // --- Expert Review UI ---
+    renderExpertReview() {
+        const container = document.getElementById('detailExpertReview');
+        const listEl = document.getElementById('expertList');
+        const er = this.state.expertReview;
+
+        if (!er.active || er.experts.length === 0) {
+            container.style.display = 'none';
+            return;
+        }
+        container.style.display = '';
+
+        const completed = er.experts.filter(e => e.status === 'completed').length;
+        const roundLabel = er.round > 1 ? ` (round ${er.round})` : '';
+        document.getElementById('expertProgress').textContent =
+            `${completed}/${er.totalSteps} reviewed${roundLabel}`;
+
+        listEl.innerHTML = er.experts.map((e, i) => {
+            const icons = { pending: '○', in_progress: '◉', completed: '✓' };
+            const icon = icons[e.status] || '○';
+            const statusClass = 'expert-' + e.status;
+            const label = e.status === 'in_progress' ? ' — reviewing' : '';
+            return `<div class="expert-item ${statusClass}">
+                <div class="expert-icon">${icon}</div>
+                <div class="expert-name">${this.esc(e.name)}${label ? `<span style="font-weight:400;font-size:0.8rem;color:#7c3aed">${label}</span>` : ''}</div>
+            </div>`;
+        }).join('');
+    },
+
+    updateExpertReview(data) {
+        this.state.expertReview = {
+            currentStep: data.currentStep,
+            totalSteps: data.totalSteps,
+            experts: data.experts,
+            round: data.round || 1,
+            active: true
+        };
+        this.renderExpertReview();
+    },
+
+    // --- Expert Clarification Wizard ---
+    showExpertClarificationWizard(questions, expertName) {
+        const c = this.state.expertClarification;
+        c.questions = questions;
+        c.answers = questions.map(() => '');
+        c.currentIndex = 0;
+        c.active = true;
+        c.expertName = expertName;
+
+        // Reuse the same clarification wizard UI
+        document.getElementById('clarificationWizard').style.display = '';
+        document.getElementById('replyBox').style.display = 'none';
+
+        // Update header to show expert name
+        const headerEl = document.getElementById('clarificationWizard').querySelector('.clarification-header h4');
+        if (headerEl) headerEl.textContent = expertName + ' Needs Your Input';
+
+        this.renderExpertClarificationStep();
+    },
+
+    renderExpertClarificationStep() {
+        const c = this.state.expertClarification;
+        const total = c.questions.length;
+        const idx = c.currentIndex;
+
+        document.getElementById('clarificationStep').textContent = 'Question ' + (idx + 1);
+        document.getElementById('clarificationTotal').textContent = 'of ' + total;
+        document.getElementById('clarificationQuestionText').textContent = c.questions[idx];
+        document.getElementById('clarificationAnswer').value = c.answers[idx] || '';
+        document.getElementById('clarificationAnswer').focus();
+
+        const pct = ((idx + 1) / total) * 100;
+        document.getElementById('clarificationProgressFill').style.width = pct + '%';
+
+        document.getElementById('clarificationPrevBtn').style.display = idx > 0 ? '' : 'none';
+        const isLast = idx === total - 1;
+        document.getElementById('clarificationNextBtn').style.display = isLast ? 'none' : '';
+        document.getElementById('clarificationSubmitBtn').style.display = isLast ? '' : 'none';
+    },
+
+    async submitExpertClarifications() {
+        const c = this.state.expertClarification;
+        c.answers[c.currentIndex] = document.getElementById('clarificationAnswer').value.trim();
+
+        const unanswered = c.answers.findIndex(a => !a);
+        if (unanswered >= 0) {
+            c.currentIndex = unanswered;
+            this.renderExpertClarificationStep();
+            alert('Please answer question ' + (unanswered + 1) + ' before submitting.');
+            return;
+        }
+
+        const answers = c.questions.map((q, i) => ({
+            question: q,
+            answer: c.answers[i]
+        }));
+
+        this.hideClarificationWizard();
+        c.active = false;
+
+        // Restore header text
+        const headerEl = document.getElementById('clarificationWizard').querySelector('.clarification-header h4');
+        if (headerEl) headerEl.textContent = 'Clarification Needed';
+
+        const id = this.state.currentSuggestion;
+        await this.api('/suggestions/' + id + '/expert-clarifications', {
+            method: 'POST',
+            body: JSON.stringify({
+                answers,
+                senderName: this.state.username || undefined
+            })
+        });
+    },
+
     async reply() {
         const input = document.getElementById('replyInput');
         const content = input.value.trim();
@@ -336,6 +546,15 @@ const app = {
     },
 
     nextClarification() {
+        if (this.state.expertClarification.active) {
+            const c = this.state.expertClarification;
+            c.answers[c.currentIndex] = document.getElementById('clarificationAnswer').value.trim();
+            if (c.currentIndex < c.questions.length - 1) {
+                c.currentIndex++;
+                this.renderExpertClarificationStep();
+            }
+            return;
+        }
         this.saveClarificationAnswer();
         const c = this.state.clarification;
         if (c.currentIndex < c.questions.length - 1) {
@@ -345,6 +564,15 @@ const app = {
     },
 
     prevClarification() {
+        if (this.state.expertClarification.active) {
+            const c = this.state.expertClarification;
+            c.answers[c.currentIndex] = document.getElementById('clarificationAnswer').value.trim();
+            if (c.currentIndex > 0) {
+                c.currentIndex--;
+                this.renderExpertClarificationStep();
+            }
+            return;
+        }
         this.saveClarificationAnswer();
         const c = this.state.clarification;
         if (c.currentIndex > 0) {
@@ -354,6 +582,9 @@ const app = {
     },
 
     async submitClarifications() {
+        if (this.state.expertClarification.active) {
+            return this.submitExpertClarifications();
+        }
         this.saveClarificationAnswer();
         const c = this.state.clarification;
 
@@ -467,6 +698,10 @@ const app = {
     },
 
     disconnectWs() {
+        if (this.state.taskTimer) {
+            clearInterval(this.state.taskTimer);
+            this.state.taskTimer = null;
+        }
         if (this.state.ws) {
             this.state.ws.onclose = null;
             this.state.ws.close();
@@ -491,7 +726,9 @@ const app = {
 
                 const phaseEl = document.getElementById('detailPhase');
                 const phaseText = document.getElementById('detailPhaseText');
-                if (data.currentPhase && !['COMPLETED', 'DENIED', 'TIMED_OUT'].includes(data.status)) {
+                const phaseFinished = ['DENIED', 'TIMED_OUT'].includes(data.status) ||
+                    (data.status === 'COMPLETED' && (!data.currentPhase || data.currentPhase.startsWith('Implementation completed')));
+                if (data.currentPhase && !phaseFinished) {
                     phaseEl.style.display = '';
                     phaseText.textContent = data.currentPhase;
                 } else {
@@ -513,8 +750,8 @@ const app = {
                     document.getElementById('replyBox').style.display = canReply ? '' : 'none';
                 }
 
-                // Hide clarification wizard if status moved past DISCUSSING
-                if (!['DISCUSSING'].includes(data.status)) {
+                // Hide clarification wizard if status moved past DISCUSSING/EXPERT_REVIEW
+                if (!['DISCUSSING', 'EXPERT_REVIEW'].includes(data.status)) {
                     this.hideClarificationWizard();
                     document.getElementById('replyBox').style.display = canReply ? '' : 'none';
                 }
@@ -533,6 +770,29 @@ const app = {
                     prEl.style.display = '';
                     prLink.href = data.prUrl;
                     prLink.textContent = data.prUrl;
+                }
+                break;
+            }
+            case 'task_update': {
+                if (data.task) {
+                    this.updateTask(data.task);
+                }
+                break;
+            }
+            case 'tasks_update': {
+                if (data.tasks) {
+                    this.state.tasks = data.tasks;
+                    this.renderTasks();
+                }
+                break;
+            }
+            case 'expert_review_status': {
+                this.updateExpertReview(data);
+                break;
+            }
+            case 'expert_clarification_questions': {
+                if (data.questions && data.questions.length > 0) {
+                    this.showExpertClarificationWizard(data.questions, data.expertName || 'Expert');
                 }
                 break;
             }

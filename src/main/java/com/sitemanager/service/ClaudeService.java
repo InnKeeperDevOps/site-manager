@@ -83,6 +83,14 @@ public class ClaudeService {
                 "1. Is this suggestion detailed enough to implement? Does it clearly describe what changes are needed?\n" +
                 "2. If NOT detailed enough, ask specific clarifying questions to the user.\n" +
                 "3. If it IS detailed enough, look at the repository and create a concrete implementation plan.\n\n" +
+                "COMMUNICATION RULES:\n" +
+                "- All messages, questions, and plan descriptions shown to users MUST be written in plain, non-technical language.\n" +
+                "- NEVER mention programming languages, frameworks, libraries, databases, APIs, file names, class names, or any technical implementation details.\n" +
+                "- Describe changes in terms of what the user will experience — features, behaviors, and outcomes.\n" +
+                "- Questions should be about what the user wants, not how it will be built.\n" +
+                "- Task titles and descriptions should describe what will change from the user's perspective.\n" +
+                "  Good: \"Update the settings page to include a new option\"\n" +
+                "  Bad: \"Add a new field to SiteSettings.java and create a REST endpoint\"\n\n" +
                 "Respond in this JSON format:\n" +
                 "If clarification needed:\n" +
                 "{\"status\": \"NEEDS_CLARIFICATION\", " +
@@ -91,8 +99,15 @@ public class ClaudeService {
                 "If ready to plan:\n" +
                 "{\"status\": \"PLAN_READY\", " +
                 "\"message\": \"your response to the user\", " +
-                "\"plan\": \"implementation plan\"}\n\n" +
-                "IMPORTANT: When status is NEEDS_CLARIFICATION, you MUST include a \"questions\" array with each clarifying question as a separate string element. Each question should be self-contained and specific.",
+                "\"plan\": \"brief overall summary of the implementation\", " +
+                "\"tasks\": [\n" +
+                "  {\"title\": \"short task name\", \"description\": \"what this task involves\", \"estimatedMinutes\": number},\n" +
+                "  ...\n" +
+                "]}\n\n" +
+                "IMPORTANT: When status is NEEDS_CLARIFICATION, you MUST include a \"questions\" array with each clarifying question as a separate string element. Each question should be self-contained and specific.\n" +
+                "When status is PLAN_READY, you MUST include a \"tasks\" array that breaks the plan into ordered implementation steps. " +
+                "Each task should be a concrete, actionable unit of work with a realistic time estimate in minutes. " +
+                "Order tasks by implementation sequence. Typically 3-8 tasks is appropriate.",
                 repoUrl != null ? repoUrl : "not configured",
                 suggestionTitle,
                 suggestionDescription
@@ -108,20 +123,111 @@ public class ClaudeService {
         return sendToClaudeAsync(userMessage, sessionId, workingDir, conversationContext, progressCallback);
     }
 
-    public CompletableFuture<String> executePlan(String sessionId, String plan, String workingDir,
+    public CompletableFuture<String> executePlan(String sessionId, String plan, String tasksJson,
+                                                  String workingDir,
                                                   Consumer<String> progressCallback) {
         String prompt = String.format(
                 "Execute the following implementation plan in the repository at %s.\n\n" +
                 "Plan:\n%s\n\n" +
+                "Tasks (execute in order):\n%s\n\n" +
+                "COMMUNICATION RULES:\n" +
+                "- All message fields in your JSON output MUST be written in plain, non-technical language.\n" +
+                "- NEVER mention programming languages, frameworks, libraries, file names, class names, or technical details in messages.\n" +
+                "- Describe progress in terms of what is changing from the user's perspective.\n" +
+                "  Good: \"Added the new option to the settings page\"\n" +
+                "  Bad: \"Created SiteSettings.java field and REST endpoint\"\n\n" +
                 "Instructions:\n" +
-                "1. Implement each step of the plan\n" +
+                "1. Execute each task in order by its task number\n" +
                 "2. Write unit tests for all new code\n" +
-                "3. Run existing tests to ensure nothing is broken\n" +
-                "4. Provide progress updates as you work\n" +
-                "5. Respond in JSON format for each phase:\n" +
-                "{\"phase\": \"description\", \"status\": \"IN_PROGRESS\" or \"COMPLETED\" or \"FAILED\", " +
-                "\"message\": \"details\", \"testsRun\": number, \"testsPassed\": number}",
-                workingDir, plan
+                "3. Run existing tests to ensure nothing is broken\n\n" +
+                "For EACH task, follow this workflow:\n\n" +
+                "Step A — Start the task:\n" +
+                "{\"taskOrder\": number, \"status\": \"IN_PROGRESS\", \"message\": \"starting description\"}\n\n" +
+                "Step B — Implement the task (write code, make changes)\n\n" +
+                "Step C — Review the task. After implementing, review your own code changes for this task:\n" +
+                "  - Verify the code changes actually fulfill the task requirements\n" +
+                "  - Check for bugs, missing edge cases, or incomplete implementation\n" +
+                "  - Run any relevant tests to confirm correctness\n" +
+                "Output a review status:\n" +
+                "{\"taskOrder\": number, \"status\": \"REVIEWING\", \"message\": \"reviewing: what you checked\"}\n\n" +
+                "Step D — If the review passes, mark the task completed:\n" +
+                "{\"taskOrder\": number, \"status\": \"COMPLETED\", \"message\": \"what was done and verified\"}\n" +
+                "If the review finds issues, fix them and re-review before marking completed.\n\n" +
+                "Step E — If a task cannot be completed, mark it failed:\n" +
+                "{\"taskOrder\": number, \"status\": \"FAILED\", \"message\": \"what went wrong\"}\n\n" +
+                "After ALL tasks pass review, output a final summary:\n" +
+                "{\"status\": \"COMPLETED\", \"message\": \"summary\", \"testsRun\": number, \"testsPassed\": number}\n" +
+                "If the overall execution fails:\n" +
+                "{\"status\": \"FAILED\", \"message\": \"what went wrong\"}",
+                workingDir, plan, tasksJson != null ? tasksJson : "No structured tasks — follow the plan above."
+        );
+
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
+    }
+
+    public CompletableFuture<String> expertReview(String sessionId, String expertDisplayName,
+                                                    String expertPrompt, String suggestionTitle,
+                                                    String suggestionDescription, String plan,
+                                                    String tasksJson, String previousNotes,
+                                                    String workingDir,
+                                                    Consumer<String> progressCallback) {
+        String prompt = String.format(
+                "%s\n\n" +
+                "Suggestion Title: %s\n" +
+                "Suggestion Description: %s\n\n" +
+                "Current Plan:\n%s\n\n" +
+                "%s" +
+                "%s" +
+                "COMMUNICATION RULES:\n" +
+                "- All messages, questions, and descriptions MUST be written in plain, non-technical language.\n" +
+                "- NEVER mention programming languages, frameworks, libraries, databases, APIs, file names, class names, or any technical implementation details.\n" +
+                "- Describe everything from the user's perspective — features, behaviors, and outcomes.\n" +
+                "- Questions should be about desired behavior and outcomes, not technical choices.\n\n" +
+                "Respond in this JSON format:\n" +
+                "If the plan looks good from your perspective:\n" +
+                "{\"status\": \"APPROVED\", \"analysis\": \"your analysis of the plan\", \"message\": \"high-level summary for the user\"}\n\n" +
+                "If you recommend changes:\n" +
+                "{\"status\": \"CHANGES_PROPOSED\", \"analysis\": \"your analysis\", " +
+                "\"proposedChanges\": \"description of what should change\", " +
+                "\"revisedPlan\": \"updated plan summary\", " +
+                "\"revisedTasks\": [{\"title\": \"task name\", \"description\": \"what this involves\", \"estimatedMinutes\": number}, ...], " +
+                "\"message\": \"high-level summary for the user\"}\n\n" +
+                "If you need the user to answer questions before you can complete your review:\n" +
+                "{\"status\": \"NEEDS_CLARIFICATION\", \"analysis\": \"what you've found so far\", " +
+                "\"questions\": [\"high-level question 1\", \"high-level question 2\"], " +
+                "\"message\": \"brief summary of what you need to know\"}\n\n" +
+                "IMPORTANT: When proposing changes, you MUST include revisedTasks with the COMPLETE task list (not just changed tasks). " +
+                "When asking questions, keep them high-level and non-technical.",
+                expertPrompt,
+                suggestionTitle,
+                suggestionDescription,
+                plan,
+                tasksJson != null ? "Current Tasks:\n" + tasksJson + "\n\n" : "",
+                previousNotes != null && !previousNotes.isBlank() ?
+                        "Previous expert reviews:\n" + previousNotes + "\n\n" : ""
+        );
+
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
+    }
+
+    public CompletableFuture<String> reviewExpertFeedback(String sessionId, String expertDisplayName,
+                                                            String expertAnalysis, String proposedChanges,
+                                                            String currentPlan, String workingDir,
+                                                            Consumer<String> progressCallback) {
+        String prompt = String.format(
+                "You are a senior reviewer. A %s has reviewed an implementation plan and provided feedback.\n\n" +
+                "Current plan:\n%s\n\n" +
+                "The %s's analysis:\n%s\n\n" +
+                "Their proposed changes:\n%s\n\n" +
+                "Evaluate whether these proposed changes improve the plan. Consider:\n" +
+                "- Do the changes address real issues or add unnecessary complexity?\n" +
+                "- Will the changes improve the outcome for the user?\n" +
+                "- Are the changes compatible with the overall approach?\n\n" +
+                "Respond in this JSON format:\n" +
+                "{\"valid\": true/false, \"notes\": \"your assessment of why the changes are or aren't valuable\", " +
+                "\"apply\": true/false}\n\n" +
+                "Set apply=true ONLY if the changes genuinely improve the plan.",
+                expertDisplayName, currentPlan, expertDisplayName, expertAnalysis, proposedChanges
         );
 
         return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
