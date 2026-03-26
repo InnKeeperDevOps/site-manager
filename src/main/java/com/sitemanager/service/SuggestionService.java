@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sitemanager.dto.ClarificationRequest;
 import com.sitemanager.model.Suggestion;
 import com.sitemanager.model.SuggestionMessage;
+import com.sitemanager.model.enums.ExpertRole;
 import com.sitemanager.model.enums.SenderType;
 import com.sitemanager.model.enums.SuggestionStatus;
 import com.sitemanager.model.PlanTask;
@@ -261,12 +262,22 @@ public class SuggestionService {
         // Try to parse JSON response to determine status
         if (response.contains("PLAN_READY")) {
             addMessage(suggestionId, SenderType.AI, "Claude", displayMessage);
-            suggestion.setStatus(SuggestionStatus.PLANNED);
-            suggestion.setCurrentPhase("Plan ready — waiting for approval");
             suggestion.setPlanSummary(extractPlan(response));
             suggestion.setPendingClarificationQuestions(null);
             // Parse and save structured tasks
             savePlanTasks(suggestionId, response);
+
+            // Start expert review pipeline instead of going directly to PLANNED
+            suggestion.setStatus(SuggestionStatus.EXPERT_REVIEW);
+            suggestion.setExpertReviewStep(0);
+            suggestion.setExpertReviewNotes(null);
+            suggestion.setCurrentPhase("Plan created — starting expert reviews...");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+
+            // Kick off the first expert review asynchronously
+            startExpertReviewPipeline(suggestionId);
+            return;
         } else if (response.contains("NEEDS_CLARIFICATION")) {
             // Do NOT post clarification questions to the user discussion;
             // they are delivered via WebSocket as structured prompts instead
@@ -366,6 +377,345 @@ public class SuggestionService {
         ).thenAccept(response -> {
             handleAiResponse(suggestionId, response);
         });
+    }
+
+    // --- Expert Review Pipeline ---
+
+    private void startExpertReviewPipeline(Long suggestionId) {
+        broadcastExpertReviewStatus(suggestionId);
+        runNextExpertReview(suggestionId);
+    }
+
+    private void runNextExpertReview(Long suggestionId) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) return;
+
+        int step = suggestion.getExpertReviewStep() != null ? suggestion.getExpertReviewStep() : 0;
+        ExpertRole[] experts = ExpertRole.reviewOrder();
+
+        if (step >= experts.length) {
+            // All experts have reviewed — transition to PLANNED
+            suggestion.setStatus(SuggestionStatus.PLANNED);
+            suggestion.setExpertReviewStep(null);
+            suggestion.setCurrentPhase("Plan ready — waiting for approval");
+            suggestionRepository.save(suggestion);
+
+            addMessage(suggestionId, SenderType.SYSTEM, "System",
+                    "All expert reviews are complete. The plan is ready for approval.");
+            broadcastUpdate(suggestion);
+            broadcastExpertReviewStatus(suggestionId);
+            return;
+        }
+
+        ExpertRole expert = experts[step];
+        suggestion.setCurrentPhase(expert.getDisplayName() + " is reviewing the plan...");
+        suggestionRepository.save(suggestion);
+        broadcastUpdate(suggestion);
+        broadcastExpertReviewStatus(suggestionId);
+
+        String plan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription();
+        String tasksJson = buildTasksJsonForExecution(suggestionId);
+        String previousNotes = suggestion.getExpertReviewNotes();
+
+        String reviewSessionId = claudeService.generateSessionId();
+        claudeService.expertReview(
+                reviewSessionId,
+                expert.getDisplayName(),
+                expert.getReviewPrompt(),
+                suggestion.getTitle(),
+                suggestion.getDescription(),
+                plan,
+                tasksJson,
+                previousNotes,
+                claudeService.getMainRepoDir(),
+                progress -> {
+                    webSocketHandler.sendToSuggestion(suggestionId,
+                            "{\"type\":\"progress\",\"content\":\"" +
+                                    escapeJson(progress) + "\"}");
+                }
+        ).thenAccept(response -> {
+            handleExpertReviewResponse(suggestionId, response, expert, reviewSessionId);
+        });
+    }
+
+    @Transactional
+    public void handleExpertReviewResponse(Long suggestionId, String response,
+                                            ExpertRole expert, String reviewSessionId) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) return;
+
+        suggestion.setLastActivityAt(Instant.now());
+
+        try {
+            String json = extractJsonBlock(response);
+            if (json == null) {
+                // Can't parse — record as note and move on
+                appendExpertNote(suggestion, expert, "Review completed (no structured response).");
+                advanceExpertStep(suggestion);
+                runNextExpertReview(suggestionId);
+                return;
+            }
+
+            JsonNode root = objectMapper.readTree(json);
+            String status = root.has("status") ? root.get("status").asText() : "APPROVED";
+            String analysis = root.has("analysis") ? root.get("analysis").asText() : "";
+            String message = root.has("message") ? root.get("message").asText() : "";
+
+            if ("NEEDS_CLARIFICATION".equals(status)) {
+                // Expert needs user input — save questions and wait
+                List<String> questions = extractQuestions(response);
+                if (questions != null && !questions.isEmpty()) {
+                    try {
+                        suggestion.setPendingClarificationQuestions(objectMapper.writeValueAsString(questions));
+                    } catch (JsonProcessingException e) {
+                        log.error("Failed to serialize expert clarification questions", e);
+                    }
+                    suggestion.setCurrentPhase(expert.getDisplayName() + " has questions for you");
+                    suggestionRepository.save(suggestion);
+                    broadcastUpdate(suggestion);
+
+                    addMessage(suggestionId, SenderType.AI, expert.getDisplayName(), message);
+                    broadcastExpertClarificationQuestions(suggestionId, questions, expert);
+                } else {
+                    // No actual questions — treat as approved
+                    appendExpertNote(suggestion, expert, "Approved. " + analysis);
+                    addMessage(suggestionId, SenderType.AI, expert.getDisplayName(), message);
+                    advanceExpertStep(suggestion);
+                    runNextExpertReview(suggestionId);
+                }
+                return;
+            }
+
+            if ("CHANGES_PROPOSED".equals(status)) {
+                String proposedChanges = root.has("proposedChanges") ? root.get("proposedChanges").asText() : "";
+
+                // Send to reviewer Claude to validate
+                suggestion.setCurrentPhase("Reviewing " + expert.getDisplayName() + "'s recommendations...");
+                suggestionRepository.save(suggestion);
+                broadcastUpdate(suggestion);
+
+                String reviewerSessionId = claudeService.generateSessionId();
+                String currentPlan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : "";
+
+                claudeService.reviewExpertFeedback(
+                        reviewerSessionId,
+                        expert.getDisplayName(),
+                        analysis,
+                        proposedChanges,
+                        currentPlan,
+                        claudeService.getMainRepoDir(),
+                        progress -> {}
+                ).thenAccept(reviewerResponse -> {
+                    handleReviewerResponse(suggestionId, reviewerResponse, expert, response, analysis, message);
+                });
+                return;
+            }
+
+            // APPROVED or unknown status — record note and advance
+            appendExpertNote(suggestion, expert, "Approved. " + analysis);
+            addMessage(suggestionId, SenderType.AI, expert.getDisplayName(), message);
+            advanceExpertStep(suggestion);
+            runNextExpertReview(suggestionId);
+
+        } catch (Exception e) {
+            log.error("Failed to handle expert review response for suggestion {}: {}",
+                    suggestionId, e.getMessage(), e);
+            appendExpertNote(suggestion, expert, "Review completed with error.");
+            advanceExpertStep(suggestion);
+            runNextExpertReview(suggestionId);
+        }
+    }
+
+    @Transactional
+    public void handleReviewerResponse(Long suggestionId, String reviewerResponse,
+                                        ExpertRole expert, String originalExpertResponse,
+                                        String expertAnalysis, String expertMessage) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) return;
+
+        boolean applyChanges = false;
+        String reviewerNotes = "";
+
+        try {
+            String json = extractJsonBlock(reviewerResponse);
+            if (json != null) {
+                JsonNode root = objectMapper.readTree(json);
+                applyChanges = root.has("apply") && root.get("apply").asBoolean();
+                reviewerNotes = root.has("notes") ? root.get("notes").asText() : "";
+            }
+        } catch (Exception e) {
+            log.warn("Failed to parse reviewer response: {}", e.getMessage());
+        }
+
+        if (applyChanges) {
+            // Apply the expert's proposed changes to the plan
+            try {
+                String json = extractJsonBlock(originalExpertResponse);
+                if (json != null) {
+                    JsonNode root = objectMapper.readTree(json);
+                    if (root.has("revisedPlan")) {
+                        suggestion.setPlanSummary(root.get("revisedPlan").asText());
+                    }
+                    if (root.has("revisedTasks") && root.get("revisedTasks").isArray()) {
+                        // Update tasks from the expert's revision
+                        savePlanTasksFromNode(suggestionId, root.get("revisedTasks"));
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("Failed to apply expert changes: {}", e.getMessage());
+            }
+
+            appendExpertNote(suggestion, expert,
+                    "Proposed changes — ACCEPTED. " + expertAnalysis +
+                    "\nReviewer: " + reviewerNotes);
+            addMessage(suggestionId, SenderType.AI, expert.getDisplayName(),
+                    expertMessage + "\n\n*Changes have been applied to the plan.*");
+        } else {
+            appendExpertNote(suggestion, expert,
+                    "Proposed changes — not applied. " + expertAnalysis +
+                    "\nReviewer: " + reviewerNotes);
+            addMessage(suggestionId, SenderType.AI, expert.getDisplayName(),
+                    expertMessage + "\n\n*Recommendations were noted but the plan remains unchanged.*");
+        }
+
+        advanceExpertStep(suggestion);
+        broadcastTasks(suggestionId);
+        runNextExpertReview(suggestionId);
+    }
+
+    @Transactional
+    public void handleExpertClarificationAnswers(Long suggestionId, String senderName,
+                                                   List<ClarificationRequest.ClarificationAnswer> answers) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId)
+                .orElseThrow(() -> new IllegalArgumentException("Suggestion not found"));
+
+        suggestion.setLastActivityAt(Instant.now());
+        suggestion.setPendingClarificationQuestions(null);
+        suggestionRepository.save(suggestion);
+
+        int step = suggestion.getExpertReviewStep() != null ? suggestion.getExpertReviewStep() : 0;
+        ExpertRole expert = ExpertRole.fromStep(step);
+        if (expert == null) return;
+
+        // Format answers as message
+        StringBuilder formattedMessage = new StringBuilder();
+        for (ClarificationRequest.ClarificationAnswer qa : answers) {
+            formattedMessage.append("**Q: ").append(qa.getQuestion()).append("**\n");
+            formattedMessage.append("A: ").append(qa.getAnswer()).append("\n\n");
+        }
+        addMessage(suggestionId, SenderType.USER, senderName, formattedMessage.toString().trim());
+
+        // Build prompt with user's answers for the expert to continue
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("The user has provided answers to your questions. Please continue your review as ")
+              .append(expert.getDisplayName()).append(".\n\n");
+        for (ClarificationRequest.ClarificationAnswer qa : answers) {
+            prompt.append("Question: ").append(qa.getQuestion()).append("\n");
+            prompt.append("Answer: ").append(qa.getAnswer()).append("\n\n");
+        }
+        prompt.append("Based on these answers, complete your review of the plan.\n\n");
+        prompt.append("Respond in this JSON format:\n");
+        prompt.append("If the plan looks good: {\"status\": \"APPROVED\", \"analysis\": \"...\", \"message\": \"...\"}\n");
+        prompt.append("If you recommend changes: {\"status\": \"CHANGES_PROPOSED\", \"analysis\": \"...\", ");
+        prompt.append("\"proposedChanges\": \"...\", \"revisedPlan\": \"...\", ");
+        prompt.append("\"revisedTasks\": [{\"title\": \"...\", \"description\": \"...\", \"estimatedMinutes\": N}, ...], ");
+        prompt.append("\"message\": \"...\"}\n");
+        prompt.append("If you still need clarification: {\"status\": \"NEEDS_CLARIFICATION\", \"analysis\": \"...\", ");
+        prompt.append("\"questions\": [...], \"message\": \"...\"}\n\n");
+        prompt.append("COMMUNICATION RULES: All messages MUST be plain, non-technical language. NEVER mention technologies or implementation details.");
+
+        suggestion.setCurrentPhase(expert.getDisplayName() + " is reviewing your answers...");
+        suggestionRepository.save(suggestion);
+        broadcastUpdate(suggestion);
+
+        String reviewSessionId = claudeService.generateSessionId();
+        claudeService.continueConversation(
+                reviewSessionId,
+                prompt.toString(),
+                null,
+                claudeService.getMainRepoDir(),
+                progress -> {
+                    webSocketHandler.sendToSuggestion(suggestionId,
+                            "{\"type\":\"progress\",\"content\":\"" +
+                                    escapeJson(progress) + "\"}");
+                }
+        ).thenAccept(response -> {
+            handleExpertReviewResponse(suggestionId, response, expert, reviewSessionId);
+        });
+    }
+
+    private void advanceExpertStep(Suggestion suggestion) {
+        int current = suggestion.getExpertReviewStep() != null ? suggestion.getExpertReviewStep() : 0;
+        suggestion.setExpertReviewStep(current + 1);
+        suggestionRepository.save(suggestion);
+    }
+
+    private void appendExpertNote(Suggestion suggestion, ExpertRole expert, String note) {
+        String existing = suggestion.getExpertReviewNotes();
+        String entry = "**" + expert.getDisplayName() + "**: " + note;
+        if (existing == null || existing.isBlank()) {
+            suggestion.setExpertReviewNotes(entry);
+        } else {
+            suggestion.setExpertReviewNotes(existing + "\n\n" + entry);
+        }
+        suggestionRepository.save(suggestion);
+    }
+
+    private void savePlanTasksFromNode(Long suggestionId, JsonNode tasksNode) {
+        planTaskRepository.deleteBySuggestionId(suggestionId);
+
+        int order = 1;
+        for (JsonNode taskNode : tasksNode) {
+            PlanTask task = new PlanTask();
+            task.setSuggestionId(suggestionId);
+            task.setTaskOrder(order++);
+            task.setTitle(taskNode.has("title") ? taskNode.get("title").asText() : "Task " + (order - 1));
+            task.setDescription(taskNode.has("description") ? taskNode.get("description").asText() : null);
+            task.setEstimatedMinutes(taskNode.has("estimatedMinutes") ? taskNode.get("estimatedMinutes").asInt() : null);
+            task.setStatus(TaskStatus.PENDING);
+            planTaskRepository.save(task);
+        }
+        log.info("Updated {} plan tasks for suggestion {} from expert revision", order - 1, suggestionId);
+    }
+
+    private void broadcastExpertReviewStatus(Long suggestionId) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) return;
+
+        int currentStep = suggestion.getExpertReviewStep() != null ? suggestion.getExpertReviewStep() : 0;
+        ExpertRole[] experts = ExpertRole.reviewOrder();
+
+        StringBuilder json = new StringBuilder();
+        json.append("{\"type\":\"expert_review_status\",\"currentStep\":").append(currentStep);
+        json.append(",\"totalSteps\":").append(experts.length);
+        json.append(",\"experts\":[");
+        for (int i = 0; i < experts.length; i++) {
+            if (i > 0) json.append(",");
+            String stepStatus;
+            if (i < currentStep) stepStatus = "completed";
+            else if (i == currentStep) stepStatus = "in_progress";
+            else stepStatus = "pending";
+            json.append("{\"name\":\"").append(escapeJson(experts[i].getDisplayName()))
+                .append("\",\"status\":\"").append(stepStatus).append("\"}");
+        }
+        json.append("]}");
+        webSocketHandler.sendToSuggestion(suggestionId, json.toString());
+    }
+
+    private void broadcastExpertClarificationQuestions(Long suggestionId, List<String> questions,
+                                                        ExpertRole expert) {
+        try {
+            String questionsJson = objectMapper.writeValueAsString(questions);
+            webSocketHandler.sendToSuggestion(suggestionId,
+                    "{\"type\":\"expert_clarification_questions\",\"questions\":" + questionsJson +
+                    ",\"expertName\":\"" + escapeJson(expert.getDisplayName()) + "\"}");
+        } catch (JsonProcessingException e) {
+            log.error("Failed to broadcast expert clarification questions", e);
+        }
+    }
+
+    public int getExpertReviewTotalSteps() {
+        return ExpertRole.reviewOrder().length;
     }
 
     @Transactional
@@ -836,7 +1186,7 @@ public class SuggestionService {
         Instant cutoff = Instant.now().minus(timeout, ChronoUnit.MINUTES);
 
         List<Suggestion> stale = suggestionRepository.findByStatusInAndLastActivityAtBefore(
-                List.of(SuggestionStatus.DRAFT, SuggestionStatus.DISCUSSING),
+                List.of(SuggestionStatus.DRAFT, SuggestionStatus.DISCUSSING, SuggestionStatus.EXPERT_REVIEW),
                 cutoff
         );
 
@@ -1020,6 +1370,7 @@ public class SuggestionService {
         // Find all active suggestions that have a working directory
         List<SuggestionStatus> activeStatuses = List.of(
                 SuggestionStatus.DISCUSSING,
+                SuggestionStatus.EXPERT_REVIEW,
                 SuggestionStatus.PLANNED,
                 SuggestionStatus.APPROVED,
                 SuggestionStatus.IN_PROGRESS,

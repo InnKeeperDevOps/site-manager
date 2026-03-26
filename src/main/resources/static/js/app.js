@@ -14,7 +14,20 @@ const app = {
             active: false
         },
         tasks: [],
-        taskTimer: null
+        taskTimer: null,
+        expertReview: {
+            currentStep: -1,
+            totalSteps: 0,
+            experts: [],
+            active: false
+        },
+        expertClarification: {
+            questions: [],
+            answers: [],
+            currentIndex: 0,
+            active: false,
+            expertName: ''
+        }
     },
 
     async init() {
@@ -162,7 +175,7 @@ const app = {
                         </div>
                         <span class="status-badge status-${s.status}">${s.status.replace('_', ' ')}</span>
                     </div>
-                    ${s.currentPhase ? `<div style="font-size:0.8rem;color:${s.status === 'IN_PROGRESS' ? 'var(--primary)' : 'var(--text-muted)'};margin-top:0.5rem">${s.status === 'IN_PROGRESS' ? '<span class="spinner" style="display:inline-block;width:12px;height:12px;margin-right:4px;vertical-align:middle"></span>' : ''}${this.esc(s.currentPhase)}</div>` : ''}
+                    ${s.currentPhase ? `<div style="font-size:0.8rem;color:${['IN_PROGRESS','EXPERT_REVIEW'].includes(s.status) ? 'var(--primary)' : 'var(--text-muted)'};margin-top:0.5rem">${['IN_PROGRESS','EXPERT_REVIEW'].includes(s.status) ? '<span class="spinner" style="display:inline-block;width:12px;height:12px;margin-right:4px;vertical-align:middle"></span>' : ''}${this.esc(s.currentPhase)}</div>` : ''}
                 </div>
             `).join('');
         } catch (err) {
@@ -211,6 +224,14 @@ const app = {
         } else {
             planEl.style.display = 'none';
         }
+
+        // Expert review status — show if in EXPERT_REVIEW or if step data exists
+        if (suggestion.status === 'EXPERT_REVIEW' && suggestion.expertReviewStep != null) {
+            this.state.expertReview.active = true;
+        } else {
+            this.state.expertReview.active = false;
+        }
+        this.renderExpertReview();
 
         // Tasks
         this.renderTasks();
@@ -352,6 +373,118 @@ const app = {
         this.renderTasks();
     },
 
+    // --- Expert Review UI ---
+    renderExpertReview() {
+        const container = document.getElementById('detailExpertReview');
+        const listEl = document.getElementById('expertList');
+        const er = this.state.expertReview;
+
+        if (!er.active || er.experts.length === 0) {
+            container.style.display = 'none';
+            return;
+        }
+        container.style.display = '';
+
+        const completed = er.experts.filter(e => e.status === 'completed').length;
+        document.getElementById('expertProgress').textContent =
+            `${completed}/${er.totalSteps} reviewed`;
+
+        listEl.innerHTML = er.experts.map((e, i) => {
+            const icons = { pending: '○', in_progress: '◉', completed: '✓' };
+            const icon = icons[e.status] || '○';
+            const statusClass = 'expert-' + e.status;
+            const label = e.status === 'in_progress' ? ' — reviewing' : '';
+            return `<div class="expert-item ${statusClass}">
+                <div class="expert-icon">${icon}</div>
+                <div class="expert-name">${this.esc(e.name)}${label ? `<span style="font-weight:400;font-size:0.8rem;color:#7c3aed">${label}</span>` : ''}</div>
+            </div>`;
+        }).join('');
+    },
+
+    updateExpertReview(data) {
+        this.state.expertReview = {
+            currentStep: data.currentStep,
+            totalSteps: data.totalSteps,
+            experts: data.experts,
+            active: true
+        };
+        this.renderExpertReview();
+    },
+
+    // --- Expert Clarification Wizard ---
+    showExpertClarificationWizard(questions, expertName) {
+        const c = this.state.expertClarification;
+        c.questions = questions;
+        c.answers = questions.map(() => '');
+        c.currentIndex = 0;
+        c.active = true;
+        c.expertName = expertName;
+
+        // Reuse the same clarification wizard UI
+        document.getElementById('clarificationWizard').style.display = '';
+        document.getElementById('replyBox').style.display = 'none';
+
+        // Update header to show expert name
+        const headerEl = document.getElementById('clarificationWizard').querySelector('.clarification-header h4');
+        if (headerEl) headerEl.textContent = expertName + ' Needs Your Input';
+
+        this.renderExpertClarificationStep();
+    },
+
+    renderExpertClarificationStep() {
+        const c = this.state.expertClarification;
+        const total = c.questions.length;
+        const idx = c.currentIndex;
+
+        document.getElementById('clarificationStep').textContent = 'Question ' + (idx + 1);
+        document.getElementById('clarificationTotal').textContent = 'of ' + total;
+        document.getElementById('clarificationQuestionText').textContent = c.questions[idx];
+        document.getElementById('clarificationAnswer').value = c.answers[idx] || '';
+        document.getElementById('clarificationAnswer').focus();
+
+        const pct = ((idx + 1) / total) * 100;
+        document.getElementById('clarificationProgressFill').style.width = pct + '%';
+
+        document.getElementById('clarificationPrevBtn').style.display = idx > 0 ? '' : 'none';
+        const isLast = idx === total - 1;
+        document.getElementById('clarificationNextBtn').style.display = isLast ? 'none' : '';
+        document.getElementById('clarificationSubmitBtn').style.display = isLast ? '' : 'none';
+    },
+
+    async submitExpertClarifications() {
+        const c = this.state.expertClarification;
+        c.answers[c.currentIndex] = document.getElementById('clarificationAnswer').value.trim();
+
+        const unanswered = c.answers.findIndex(a => !a);
+        if (unanswered >= 0) {
+            c.currentIndex = unanswered;
+            this.renderExpertClarificationStep();
+            alert('Please answer question ' + (unanswered + 1) + ' before submitting.');
+            return;
+        }
+
+        const answers = c.questions.map((q, i) => ({
+            question: q,
+            answer: c.answers[i]
+        }));
+
+        this.hideClarificationWizard();
+        c.active = false;
+
+        // Restore header text
+        const headerEl = document.getElementById('clarificationWizard').querySelector('.clarification-header h4');
+        if (headerEl) headerEl.textContent = 'Clarification Needed';
+
+        const id = this.state.currentSuggestion;
+        await this.api('/suggestions/' + id + '/expert-clarifications', {
+            method: 'POST',
+            body: JSON.stringify({
+                answers,
+                senderName: this.state.username || undefined
+            })
+        });
+    },
+
     async reply() {
         const input = document.getElementById('replyInput');
         const content = input.value.trim();
@@ -411,6 +544,15 @@ const app = {
     },
 
     nextClarification() {
+        if (this.state.expertClarification.active) {
+            const c = this.state.expertClarification;
+            c.answers[c.currentIndex] = document.getElementById('clarificationAnswer').value.trim();
+            if (c.currentIndex < c.questions.length - 1) {
+                c.currentIndex++;
+                this.renderExpertClarificationStep();
+            }
+            return;
+        }
         this.saveClarificationAnswer();
         const c = this.state.clarification;
         if (c.currentIndex < c.questions.length - 1) {
@@ -420,6 +562,15 @@ const app = {
     },
 
     prevClarification() {
+        if (this.state.expertClarification.active) {
+            const c = this.state.expertClarification;
+            c.answers[c.currentIndex] = document.getElementById('clarificationAnswer').value.trim();
+            if (c.currentIndex > 0) {
+                c.currentIndex--;
+                this.renderExpertClarificationStep();
+            }
+            return;
+        }
         this.saveClarificationAnswer();
         const c = this.state.clarification;
         if (c.currentIndex > 0) {
@@ -429,6 +580,9 @@ const app = {
     },
 
     async submitClarifications() {
+        if (this.state.expertClarification.active) {
+            return this.submitExpertClarifications();
+        }
         this.saveClarificationAnswer();
         const c = this.state.clarification;
 
@@ -594,8 +748,8 @@ const app = {
                     document.getElementById('replyBox').style.display = canReply ? '' : 'none';
                 }
 
-                // Hide clarification wizard if status moved past DISCUSSING
-                if (!['DISCUSSING'].includes(data.status)) {
+                // Hide clarification wizard if status moved past DISCUSSING/EXPERT_REVIEW
+                if (!['DISCUSSING', 'EXPERT_REVIEW'].includes(data.status)) {
                     this.hideClarificationWizard();
                     document.getElementById('replyBox').style.display = canReply ? '' : 'none';
                 }
@@ -627,6 +781,16 @@ const app = {
                 if (data.tasks) {
                     this.state.tasks = data.tasks;
                     this.renderTasks();
+                }
+                break;
+            }
+            case 'expert_review_status': {
+                this.updateExpertReview(data);
+                break;
+            }
+            case 'expert_clarification_questions': {
+                if (data.questions && data.questions.length > 0) {
+                    this.showExpertClarificationWizard(data.questions, data.expertName || 'Expert');
                 }
                 break;
             }

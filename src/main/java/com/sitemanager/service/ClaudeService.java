@@ -165,6 +165,74 @@ public class ClaudeService {
         return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
     }
 
+    public CompletableFuture<String> expertReview(String sessionId, String expertDisplayName,
+                                                    String expertPrompt, String suggestionTitle,
+                                                    String suggestionDescription, String plan,
+                                                    String tasksJson, String previousNotes,
+                                                    String workingDir,
+                                                    Consumer<String> progressCallback) {
+        String prompt = String.format(
+                "%s\n\n" +
+                "Suggestion Title: %s\n" +
+                "Suggestion Description: %s\n\n" +
+                "Current Plan:\n%s\n\n" +
+                "%s" +
+                "%s" +
+                "COMMUNICATION RULES:\n" +
+                "- All messages, questions, and descriptions MUST be written in plain, non-technical language.\n" +
+                "- NEVER mention programming languages, frameworks, libraries, databases, APIs, file names, class names, or any technical implementation details.\n" +
+                "- Describe everything from the user's perspective — features, behaviors, and outcomes.\n" +
+                "- Questions should be about desired behavior and outcomes, not technical choices.\n\n" +
+                "Respond in this JSON format:\n" +
+                "If the plan looks good from your perspective:\n" +
+                "{\"status\": \"APPROVED\", \"analysis\": \"your analysis of the plan\", \"message\": \"high-level summary for the user\"}\n\n" +
+                "If you recommend changes:\n" +
+                "{\"status\": \"CHANGES_PROPOSED\", \"analysis\": \"your analysis\", " +
+                "\"proposedChanges\": \"description of what should change\", " +
+                "\"revisedPlan\": \"updated plan summary\", " +
+                "\"revisedTasks\": [{\"title\": \"task name\", \"description\": \"what this involves\", \"estimatedMinutes\": number}, ...], " +
+                "\"message\": \"high-level summary for the user\"}\n\n" +
+                "If you need the user to answer questions before you can complete your review:\n" +
+                "{\"status\": \"NEEDS_CLARIFICATION\", \"analysis\": \"what you've found so far\", " +
+                "\"questions\": [\"high-level question 1\", \"high-level question 2\"], " +
+                "\"message\": \"brief summary of what you need to know\"}\n\n" +
+                "IMPORTANT: When proposing changes, you MUST include revisedTasks with the COMPLETE task list (not just changed tasks). " +
+                "When asking questions, keep them high-level and non-technical.",
+                expertPrompt,
+                suggestionTitle,
+                suggestionDescription,
+                plan,
+                tasksJson != null ? "Current Tasks:\n" + tasksJson + "\n\n" : "",
+                previousNotes != null && !previousNotes.isBlank() ?
+                        "Previous expert reviews:\n" + previousNotes + "\n\n" : ""
+        );
+
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
+    }
+
+    public CompletableFuture<String> reviewExpertFeedback(String sessionId, String expertDisplayName,
+                                                            String expertAnalysis, String proposedChanges,
+                                                            String currentPlan, String workingDir,
+                                                            Consumer<String> progressCallback) {
+        String prompt = String.format(
+                "You are a senior reviewer. A %s has reviewed an implementation plan and provided feedback.\n\n" +
+                "Current plan:\n%s\n\n" +
+                "The %s's analysis:\n%s\n\n" +
+                "Their proposed changes:\n%s\n\n" +
+                "Evaluate whether these proposed changes improve the plan. Consider:\n" +
+                "- Do the changes address real issues or add unnecessary complexity?\n" +
+                "- Will the changes improve the outcome for the user?\n" +
+                "- Are the changes compatible with the overall approach?\n\n" +
+                "Respond in this JSON format:\n" +
+                "{\"valid\": true/false, \"notes\": \"your assessment of why the changes are or aren't valuable\", " +
+                "\"apply\": true/false}\n\n" +
+                "Set apply=true ONLY if the changes genuinely improve the plan.",
+                expertDisplayName, currentPlan, expertDisplayName, expertAnalysis, proposedChanges
+        );
+
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback);
+    }
+
     private CompletableFuture<String> sendToClaudeAsync(String prompt, String sessionId,
                                                          String workingDir, String conversationContext,
                                                          Consumer<String> progressCallback) {

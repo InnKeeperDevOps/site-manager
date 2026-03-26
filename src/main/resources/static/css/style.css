@@ -406,6 +406,34 @@ textarea { resize: vertical; min-height: 80px; }
 .task-desc { font-size: 0.8rem; color: #64748b; margin-top: 2px; }
 .task-meta { font-size: 0.75rem; color: #94a3b8; margin-top: 2px; display: flex; gap: 0.75rem; }
 
+/* Expert review list */
+.expert-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid #f1f5f9;
+}
+.expert-item:last-child { border-bottom: none; }
+.expert-icon {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+.expert-pending .expert-icon { background: #f1f5f9; color: #94a3b8; }
+.expert-in_progress .expert-icon { background: #f3e8ff; color: #7c3aed; animation: pulse 1.5s infinite; }
+.expert-completed .expert-icon { background: #dcfce7; color: #16a34a; }
+.expert-name { font-size: 0.9rem; font-weight: 500; }
+
+/* Status badge for EXPERT_REVIEW */
+.status-EXPERT_REVIEW { background: #f3e8ff; color: #7c3aed; }
+
 /* Responsive */
 @media (max-width: 640px) {
     .suggestion-header { flex-direction: column; }

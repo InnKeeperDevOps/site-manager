@@ -102,6 +102,18 @@ public class SuggestionController {
         return ResponseEntity.ok(suggestionService.getPlanTasks(id));
     }
 
+    @PostMapping("/{id}/expert-clarifications")
+    public ResponseEntity<?> submitExpertClarifications(@PathVariable Long id,
+                                                          @Valid @RequestBody ClarificationRequest request,
+                                                          HttpSession session) {
+        String username = (String) session.getAttribute("username");
+        String senderName = username != null ? username :
+                (request.getSenderName() != null ? request.getSenderName() : "Anonymous");
+
+        suggestionService.handleExpertClarificationAnswers(id, senderName, request.getAnswers());
+        return ResponseEntity.ok(Map.of("message", "Expert clarification answers submitted"));
+    }
+
     @GetMapping("/{id}/clarification-questions")
     public ResponseEntity<?> getClarificationQuestions(@PathVariable Long id) {
         java.util.List<String> questions = suggestionService.getPendingQuestions(id);

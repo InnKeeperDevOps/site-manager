@@ -58,6 +58,12 @@ public class Suggestion {
     @Column(columnDefinition = "TEXT")
     private String changelogEntry;
 
+    @Column
+    private Integer expertReviewStep;
+
+    @Column(columnDefinition = "TEXT")
+    private String expertReviewNotes;
+
     @Column(nullable = false)
     private Instant createdAt;
 
@@ -120,4 +126,8 @@ public class Suggestion {
     public void setPrNumber(Integer prNumber) { this.prNumber = prNumber; }
     public String getChangelogEntry() { return changelogEntry; }
     public void setChangelogEntry(String changelogEntry) { this.changelogEntry = changelogEntry; }
+    public Integer getExpertReviewStep() { return expertReviewStep; }
+    public void setExpertReviewStep(Integer expertReviewStep) { this.expertReviewStep = expertReviewStep; }
+    public String getExpertReviewNotes() { return expertReviewNotes; }
+    public void setExpertReviewNotes(String expertReviewNotes) { this.expertReviewNotes = expertReviewNotes; }
 }
