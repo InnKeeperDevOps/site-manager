@@ -40,7 +40,7 @@ import java.util.Optional;
 public class SuggestionService {
 
     private static final Logger log = LoggerFactory.getLogger(SuggestionService.class);
-    private static final int MAX_EXPERT_REVIEW_ROUNDS = 3;
+    private static final int MAX_EXPERT_REVIEW_ROUNDS = 5;
     private static final int MIN_EXPERT_ANALYSIS_LENGTH = 50;
     private static final int MAX_EXPERT_RETRIES = 2;
     private final ConcurrentHashMap<String, Integer> expertRetryCount = new ConcurrentHashMap<>();
@@ -407,14 +407,38 @@ public class SuggestionService {
             }
 
             if (planChanged) {
-                log.info("Suggestion {} reached max expert review rounds ({}), finalizing plan",
+                // Max rounds reached but experts still proposing changes —
+                // pause and ask the user for high-level guidance
+                log.info("Suggestion {} reached max expert review rounds ({}), asking user for guidance",
                         suggestionId, MAX_EXPERT_REVIEW_ROUNDS);
+
+                List<String> questions = List.of(
+                        "Our reviewers have gone through " + MAX_EXPERT_REVIEW_ROUNDS +
+                                " rounds of review and are still suggesting changes to the plan. " +
+                                "Could you help us settle on a direction?",
+                        "Are there any parts of the plan you feel strongly about keeping as-is?",
+                        "Are there specific areas where you'd like us to focus or simplify the approach?"
+                );
+
+                try {
+                    suggestion.setPendingClarificationQuestions(objectMapper.writeValueAsString(questions));
+                } catch (JsonProcessingException e) {
+                    log.error("Failed to serialize max-rounds clarification questions", e);
+                }
+                suggestion.setCurrentPhase("Needs your guidance after " + MAX_EXPERT_REVIEW_ROUNDS + " review rounds");
+                suggestionRepository.save(suggestion);
+                broadcastUpdate(suggestion);
+
                 addMessage(suggestionId, SenderType.SYSTEM, "System",
-                        "Expert reviews have completed after multiple rounds of refinement.");
-            } else {
-                addMessage(suggestionId, SenderType.SYSTEM, "System",
-                        "All expert reviews are complete. The plan is ready for approval.");
+                        "Expert reviews have gone through " + MAX_EXPERT_REVIEW_ROUNDS +
+                        " rounds and are still refining the plan. We need your input to settle on a direction.");
+                broadcastClarificationQuestions(suggestionId, questions);
+                broadcastExpertReviewStatus(suggestionId);
+                return;
             }
+
+            addMessage(suggestionId, SenderType.SYSTEM, "System",
+                    "All expert reviews are complete. The plan is ready for approval.");
 
             // Transition to PLANNED
             suggestion.setStatus(SuggestionStatus.PLANNED);
@@ -765,7 +789,38 @@ public class SuggestionService {
 
         int step = suggestion.getExpertReviewStep() != null ? suggestion.getExpertReviewStep() : 0;
         ExpertRole expert = ExpertRole.fromStep(step);
-        if (expert == null) return;
+
+        if (expert == null) {
+            // User answered the max-rounds clarification — restart expert review
+            // with their guidance incorporated into the expert notes
+            StringBuilder formattedMsg = new StringBuilder();
+            for (ClarificationRequest.ClarificationAnswer qa : answers) {
+                formattedMsg.append("**Q: ").append(qa.getQuestion()).append("**\n");
+                formattedMsg.append("A: ").append(qa.getAnswer()).append("\n\n");
+            }
+            addMessage(suggestionId, SenderType.USER, senderName, formattedMsg.toString().trim());
+
+            // Append user guidance to expert notes so reviewers can see it
+            String userGuidance = "User guidance after " + MAX_EXPERT_REVIEW_ROUNDS + " review rounds:\n" +
+                    formattedMsg.toString().trim();
+            String existingNotes = suggestion.getExpertReviewNotes();
+            suggestion.setExpertReviewNotes(
+                    (existingNotes != null ? existingNotes + "\n\n" : "") + userGuidance);
+
+            // Reset review pipeline with fresh rounds
+            suggestion.setExpertReviewStep(0);
+            suggestion.setExpertReviewRound(1);
+            suggestion.setExpertReviewPlanChanged(false);
+            suggestion.setCurrentPhase("Restarting expert reviews with your guidance...");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+
+            addMessage(suggestionId, SenderType.SYSTEM, "System",
+                    "Thank you for the guidance. Restarting expert reviews with your direction in mind.");
+            broadcastExpertReviewStatus(suggestionId);
+            runNextExpertReview(suggestionId);
+            return;
+        }
 
         // Format answers as message
         StringBuilder formattedMessage = new StringBuilder();
