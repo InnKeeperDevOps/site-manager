@@ -24,6 +24,12 @@ public class PlanTask {
     @Column(columnDefinition = "TEXT")
     private String description;
 
+    @Column
+    private String displayTitle;
+
+    @Column(columnDefinition = "TEXT")
+    private String displayDescription;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private TaskStatus status = TaskStatus.PENDING;
@@ -49,6 +55,10 @@ public class PlanTask {
     public void setTitle(String title) { this.title = title; }
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
+    public String getDisplayTitle() { return displayTitle; }
+    public void setDisplayTitle(String displayTitle) { this.displayTitle = displayTitle; }
+    public String getDisplayDescription() { return displayDescription; }
+    public void setDisplayDescription(String displayDescription) { this.displayDescription = displayDescription; }
     public TaskStatus getStatus() { return status; }
     public void setStatus(TaskStatus status) { this.status = status; }
     public Integer getEstimatedMinutes() { return estimatedMinutes; }

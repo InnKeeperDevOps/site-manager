@@ -28,6 +28,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.io.File;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.List;
 import java.util.Optional;
 
@@ -36,6 +37,9 @@ public class SuggestionService {
 
     private static final Logger log = LoggerFactory.getLogger(SuggestionService.class);
     private static final int MAX_EXPERT_REVIEW_ROUNDS = 3;
+    private static final int MIN_EXPERT_ANALYSIS_LENGTH = 50;
+    private static final int MAX_EXPERT_RETRIES = 2;
+    private final ConcurrentHashMap<String, Integer> expertRetryCount = new ConcurrentHashMap<>();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final SuggestionRepository suggestionRepository;
@@ -264,6 +268,7 @@ public class SuggestionService {
         if (response.contains("PLAN_READY")) {
             addMessage(suggestionId, SenderType.AI, "Claude", displayMessage);
             suggestion.setPlanSummary(extractPlan(response));
+            suggestion.setPlanDisplaySummary(extractPlanDisplaySummary(response));
             suggestion.setPendingClarificationQuestions(null);
             // Parse and save structured tasks
             savePlanTasks(suggestionId, response);
@@ -451,10 +456,9 @@ public class SuggestionService {
         try {
             String json = extractJsonBlock(response);
             if (json == null) {
-                // Can't parse — record as note and move on
-                appendExpertNote(suggestion, expert, "Review completed (no structured response).");
-                advanceExpertStep(suggestion);
-                runNextExpertReview(suggestionId);
+                // Can't parse — re-invoke expert for a proper structured response
+                log.info("Expert {} provided no structured response, re-invoking for proper review", expert.getDisplayName());
+                reInvokeExpertForDetailedReview(suggestionId, expert, reviewSessionId);
                 return;
             }
 
@@ -462,6 +466,14 @@ public class SuggestionService {
             String status = root.has("status") ? root.get("status").asText() : "APPROVED";
             String analysis = root.has("analysis") ? root.get("analysis").asText() : "";
             String message = root.has("message") ? root.get("message").asText() : "";
+
+            // Ensure every expert provides substantive feedback
+            if (!isSubstantiveAnalysis(analysis) && !"NEEDS_CLARIFICATION".equals(status)) {
+                log.info("Expert {} provided insufficient analysis (length={}), re-invoking for detailed review",
+                        expert.getDisplayName(), analysis.length());
+                reInvokeExpertForDetailedReview(suggestionId, expert, reviewSessionId);
+                return;
+            }
 
             if ("NEEDS_CLARIFICATION".equals(status)) {
                 // Expert needs user input — save questions and wait
@@ -522,9 +534,9 @@ public class SuggestionService {
         } catch (Exception e) {
             log.error("Failed to handle expert review response for suggestion {}: {}",
                     suggestionId, e.getMessage(), e);
-            appendExpertNote(suggestion, expert, "Review completed with error.");
-            advanceExpertStep(suggestion);
-            runNextExpertReview(suggestionId);
+            // Re-invoke the expert instead of skipping — every expert must participate
+            log.info("Re-invoking {} after error to ensure participation", expert.getDisplayName());
+            reInvokeExpertForDetailedReview(suggestionId, expert, reviewSessionId);
         }
     }
 
@@ -557,6 +569,9 @@ public class SuggestionService {
                     JsonNode root = objectMapper.readTree(json);
                     if (root.has("revisedPlan")) {
                         suggestion.setPlanSummary(root.get("revisedPlan").asText());
+                    }
+                    if (root.has("revisedPlanDisplaySummary")) {
+                        suggestion.setPlanDisplaySummary(root.get("revisedPlanDisplaySummary").asText());
                     }
                     if (root.has("revisedTasks") && root.get("revisedTasks").isArray()) {
                         savePlanTasksFromNode(suggestionId, root.get("revisedTasks"));
@@ -677,6 +692,10 @@ public class SuggestionService {
 
     private void advanceExpertStep(Suggestion suggestion) {
         int current = suggestion.getExpertReviewStep() != null ? suggestion.getExpertReviewStep() : 0;
+        ExpertRole expert = ExpertRole.fromStep(current);
+        if (expert != null) {
+            expertRetryCount.remove(suggestion.getId() + "-" + expert.name());
+        }
         suggestion.setExpertReviewStep(current + 1);
         suggestionRepository.save(suggestion);
     }
@@ -692,6 +711,59 @@ public class SuggestionService {
         suggestionRepository.save(suggestion);
     }
 
+    private boolean isSubstantiveAnalysis(String analysis) {
+        if (analysis == null || analysis.isBlank()) return false;
+        return analysis.trim().length() >= MIN_EXPERT_ANALYSIS_LENGTH;
+    }
+
+    private void reInvokeExpertForDetailedReview(Long suggestionId, ExpertRole expert, String originalSessionId) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) return;
+
+        String retryKey = suggestionId + "-" + expert.name();
+        int retries = expertRetryCount.getOrDefault(retryKey, 0);
+        if (retries >= MAX_EXPERT_RETRIES) {
+            log.warn("Expert {} exceeded max retries for suggestion {}, accepting current response",
+                    expert.getDisplayName(), suggestionId);
+            expertRetryCount.remove(retryKey);
+            appendExpertNote(suggestion, expert, "Review completed (response accepted after retries).");
+            advanceExpertStep(suggestion);
+            runNextExpertReview(suggestionId);
+            return;
+        }
+        expertRetryCount.put(retryKey, retries + 1);
+
+        String plan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription();
+        String tasksJson = buildTasksJsonForExecution(suggestionId);
+        String previousNotes = suggestion.getExpertReviewNotes();
+
+        String retrySessionId = claudeService.generateSessionId();
+        String reinforcedPrompt = expert.getReviewPrompt() +
+                "\n\nIMPORTANT: Your previous response did not include enough detail. " +
+                "You MUST provide a thorough, substantive analysis (at least 2-3 sentences) covering specific aspects " +
+                "of this plan from your expertise as a " + expert.getDisplayName() + ". " +
+                "Explain what you evaluated, what you found, and why. Do NOT give a brief or generic response.";
+
+        claudeService.expertReview(
+                retrySessionId,
+                expert.getDisplayName(),
+                reinforcedPrompt,
+                suggestion.getTitle(),
+                suggestion.getDescription(),
+                plan,
+                tasksJson,
+                previousNotes,
+                claudeService.getMainRepoDir(),
+                progress -> {
+                    webSocketHandler.sendToSuggestion(suggestionId,
+                            "{\"type\":\"progress\",\"content\":\"" +
+                                    escapeJson(progress) + "\"}");
+                }
+        ).thenAccept(response -> {
+            handleExpertReviewResponse(suggestionId, response, expert, retrySessionId);
+        });
+    }
+
     private void savePlanTasksFromNode(Long suggestionId, JsonNode tasksNode) {
         planTaskRepository.deleteBySuggestionId(suggestionId);
 
@@ -702,6 +774,8 @@ public class SuggestionService {
             task.setTaskOrder(order++);
             task.setTitle(taskNode.has("title") ? taskNode.get("title").asText() : "Task " + (order - 1));
             task.setDescription(taskNode.has("description") ? taskNode.get("description").asText() : null);
+            task.setDisplayTitle(taskNode.has("displayTitle") ? taskNode.get("displayTitle").asText() : task.getTitle());
+            task.setDisplayDescription(taskNode.has("displayDescription") ? taskNode.get("displayDescription").asText() : task.getDescription());
             task.setEstimatedMinutes(taskNode.has("estimatedMinutes") ? taskNode.get("estimatedMinutes").asInt() : null);
             task.setStatus(TaskStatus.PENDING);
             planTaskRepository.save(task);
@@ -1046,6 +1120,8 @@ public class SuggestionService {
                 task.setTaskOrder(order++);
                 task.setTitle(taskNode.has("title") ? taskNode.get("title").asText() : "Task " + (order - 1));
                 task.setDescription(taskNode.has("description") ? taskNode.get("description").asText() : null);
+                task.setDisplayTitle(taskNode.has("displayTitle") ? taskNode.get("displayTitle").asText() : task.getTitle());
+                task.setDisplayDescription(taskNode.has("displayDescription") ? taskNode.get("displayDescription").asText() : task.getDescription());
                 task.setEstimatedMinutes(taskNode.has("estimatedMinutes") ? taskNode.get("estimatedMinutes").asInt() : null);
                 task.setStatus(TaskStatus.PENDING);
                 planTaskRepository.save(task);
@@ -1363,6 +1439,17 @@ public class SuggestionService {
 
     private String extractPlan(String response) {
         // Try to extract plan from JSON response
+        try {
+            String json = extractJsonBlock(response);
+            if (json != null) {
+                JsonNode root = objectMapper.readTree(json);
+                if (root.has("plan")) {
+                    return root.get("plan").asText();
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to extract plan via JSON parsing, falling back to string parsing");
+        }
         int planIdx = response.indexOf("\"plan\"");
         if (planIdx >= 0) {
             int start = response.indexOf("\"", planIdx + 6);
@@ -1375,6 +1462,22 @@ public class SuggestionService {
             }
         }
         return response;
+    }
+
+    private String extractPlanDisplaySummary(String response) {
+        try {
+            String json = extractJsonBlock(response);
+            if (json != null) {
+                JsonNode root = objectMapper.readTree(json);
+                if (root.has("planDisplaySummary")) {
+                    return root.get("planDisplaySummary").asText();
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to extract planDisplaySummary: {}", e.getMessage());
+        }
+        // Fallback: return the regular plan if no display summary
+        return extractPlan(response);
     }
 
     private int findClosingQuote(String s, int start) {

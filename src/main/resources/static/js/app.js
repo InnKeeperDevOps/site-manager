@@ -218,9 +218,9 @@ const app = {
 
         const planEl = document.getElementById('detailPlan');
         const planText = document.getElementById('detailPlanText');
-        if (suggestion.planSummary) {
+        if (suggestion.planDisplaySummary || suggestion.planSummary) {
             planEl.style.display = '';
-            planText.textContent = suggestion.planSummary;
+            planText.textContent = suggestion.planDisplaySummary || suggestion.planSummary;
         } else {
             planEl.style.display = 'none';
         }
@@ -353,8 +353,8 @@ const app = {
             return `<div class="task-item" data-task-order="${t.taskOrder}">
                 <div class="task-icon ${statusClass}">${icon}</div>
                 <div class="task-body">
-                    <div class="${titleClass}">${t.taskOrder}. ${this.esc(t.title)}${statusLabel ? `<span style="font-weight:400;font-size:0.8rem;color:${t.status === 'REVIEWING' ? '#d97706' : '#2563eb'}">${statusLabel}</span>` : ''}</div>
-                    ${t.description ? `<div class="task-desc">${this.esc(t.description)}</div>` : ''}
+                    <div class="${titleClass}">${t.taskOrder}. ${this.esc(t.displayTitle || t.title)}${statusLabel ? `<span style="font-weight:400;font-size:0.8rem;color:${t.status === 'REVIEWING' ? '#d97706' : '#2563eb'}">${statusLabel}</span>` : ''}</div>
+                    ${(t.displayDescription || t.description) ? `<div class="task-desc">${this.esc(t.displayDescription || t.description)}</div>` : ''}
                     ${meta ? `<div class="task-meta">${meta}</div>` : ''}
                 </div>
             </div>`;
