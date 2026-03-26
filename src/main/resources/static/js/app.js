@@ -891,6 +891,9 @@ const app = {
         document.getElementById('settingRepoUrl').value = settings.targetRepoUrl || '';
         document.getElementById('settingTimeout').value = settings.suggestionTimeoutMinutes || 1440;
         document.getElementById('settingGithubToken').value = settings.githubToken || '';
+        document.getElementById('settingClaudeModel').value = settings.claudeModel || '';
+        document.getElementById('settingClaudeModelExpert').value = settings.claudeModelExpert || '';
+        document.getElementById('settingClaudeMaxTurnsExpert').value = settings.claudeMaxTurnsExpert || '';
         document.getElementById('settingAnonymous').checked = settings.allowAnonymousSuggestions;
         document.getElementById('settingVoting').checked = settings.allowVoting;
         document.getElementById('settingApproval').checked = settings.requireApproval;
@@ -904,6 +907,9 @@ const app = {
                 targetRepoUrl: document.getElementById('settingRepoUrl').value,
                 suggestionTimeoutMinutes: parseInt(document.getElementById('settingTimeout').value) || 1440,
                 githubToken: document.getElementById('settingGithubToken').value || null,
+                claudeModel: document.getElementById('settingClaudeModel').value || null,
+                claudeModelExpert: document.getElementById('settingClaudeModelExpert').value || null,
+                claudeMaxTurnsExpert: parseInt(document.getElementById('settingClaudeMaxTurnsExpert').value) || null,
                 allowAnonymousSuggestions: document.getElementById('settingAnonymous').checked,
                 allowVoting: document.getElementById('settingVoting').checked,
                 requireApproval: document.getElementById('settingApproval').checked

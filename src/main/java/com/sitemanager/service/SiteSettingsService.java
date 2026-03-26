@@ -39,6 +39,9 @@ public class SiteSettingsService {
         current.setRequireApproval(updated.isRequireApproval());
         current.setSiteName(updated.getSiteName());
         current.setGithubToken(updated.getGithubToken());
+        current.setClaudeModel(updated.getClaudeModel());
+        current.setClaudeModelExpert(updated.getClaudeModelExpert());
+        current.setClaudeMaxTurnsExpert(updated.getClaudeMaxTurnsExpert());
         SiteSettings saved = settingsRepository.save(current);
 
         // Re-clone the target repository into main-repo/ so files are up to date

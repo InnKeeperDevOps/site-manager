@@ -2,6 +2,8 @@ package com.sitemanager.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sitemanager.model.SiteSettings;
+import com.sitemanager.repository.SiteSettingsRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -31,6 +33,8 @@ public class ClaudeService {
     private final Map<String, String> sessionMap = new ConcurrentHashMap<>();
     private final AtomicLong requestCounter = new AtomicLong(0);
 
+    private final SiteSettingsRepository settingsRepository;
+
     @Value("${app.claude-cli-path:claude}")
     private String claudeCliPath;
 
@@ -44,13 +48,64 @@ public class ClaudeService {
     private int claudeTimeoutMinutes;
 
     @Value("${app.claude-model:}")
-    private String claudeModel;
+    private String claudeModelDefault;
 
     @Value("${app.claude-model-expert:}")
-    private String claudeModelExpert;
+    private String claudeModelExpertDefault;
 
     @Value("${app.claude-max-turns-expert:3}")
-    private int claudeMaxTurnsExpert;
+    private int claudeMaxTurnsExpertDefault;
+
+    public ClaudeService(SiteSettingsRepository settingsRepository) {
+        this.settingsRepository = settingsRepository;
+    }
+
+    private SiteSettings getSettings() {
+        return settingsRepository.findAll().stream().findFirst().orElse(new SiteSettings());
+    }
+
+    /**
+     * Resolve the model to use for main operations.
+     * Settings DB takes priority, then application.yml / env var, then CLI default.
+     */
+    private String resolveModel() {
+        try {
+            String fromSettings = getSettings().getClaudeModel();
+            if (fromSettings != null && !fromSettings.isBlank()) return fromSettings;
+        } catch (Exception e) {
+            log.debug("Could not read model from settings: {}", e.getMessage());
+        }
+        return claudeModelDefault;
+    }
+
+    /**
+     * Resolve the model to use for expert reviews.
+     * Settings DB takes priority, then application.yml / env var, then falls back to main model.
+     */
+    private String resolveExpertModel() {
+        try {
+            String fromSettings = getSettings().getClaudeModelExpert();
+            if (fromSettings != null && !fromSettings.isBlank()) return fromSettings;
+        } catch (Exception e) {
+            log.debug("Could not read expert model from settings: {}", e.getMessage());
+        }
+        if (claudeModelExpertDefault != null && !claudeModelExpertDefault.isBlank()) return claudeModelExpertDefault;
+        return resolveModel();
+    }
+
+    /**
+     * Resolve max turns for expert reviews.
+     * Settings DB takes priority, then application.yml / env var default.
+     */
+    private int resolveExpertMaxTurns() {
+        try {
+            Integer fromSettings = getSettings().getClaudeMaxTurnsExpert();
+            if (fromSettings != null && fromSettings > 0) return fromSettings;
+        } catch (Exception e) {
+            log.debug("Could not read expert max turns from settings: {}", e.getMessage());
+        }
+        return claudeMaxTurnsExpertDefault;
+    }
 
     public String generateSessionId() {
         return UUID.randomUUID().toString();
@@ -136,14 +191,14 @@ public class ClaudeService {
                 suggestionDescription
         );
 
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "evaluate", claudeModel, 0);
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "evaluate", resolveModel(), 0);
     }
 
     public CompletableFuture<String> continueConversation(String sessionId, String userMessage,
                                                            String conversationContext,
                                                            String workingDir,
                                                            Consumer<String> progressCallback) {
-        return sendToClaudeAsync(userMessage, sessionId, workingDir, conversationContext, progressCallback, "continue", claudeModel, 0);
+        return sendToClaudeAsync(userMessage, sessionId, workingDir, conversationContext, progressCallback, "continue", resolveModel(), 0);
     }
 
     public CompletableFuture<String> executePlan(String sessionId, String plan, String tasksJson,
@@ -185,7 +240,7 @@ public class ClaudeService {
                 workingDir, plan, tasksJson != null ? tasksJson : "No structured tasks — follow the plan above."
         );
 
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "execute", claudeModel, 0);
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "execute", resolveModel(), 0);
     }
 
     public CompletableFuture<String> expertReview(String sessionId, String expertDisplayName,
@@ -243,9 +298,8 @@ public class ClaudeService {
                         "Previous expert reviews:\n" + previousNotes + "\n\n" : ""
         );
 
-        String model = (claudeModelExpert != null && !claudeModelExpert.isBlank()) ? claudeModelExpert : claudeModel;
         return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback,
-                "expert-review:" + expertDisplayName, model, claudeMaxTurnsExpert);
+                "expert-review:" + expertDisplayName, resolveExpertModel(), resolveExpertMaxTurns());
     }
 
     public CompletableFuture<String> reviewExpertFeedback(String sessionId, String expertDisplayName,
@@ -268,9 +322,8 @@ public class ClaudeService {
                 expertDisplayName, currentPlan, expertDisplayName, expertAnalysis, proposedChanges
         );
 
-        String model = (claudeModelExpert != null && !claudeModelExpert.isBlank()) ? claudeModelExpert : claudeModel;
         return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback,
-                "review-feedback:" + expertDisplayName, model, claudeMaxTurnsExpert);
+                "review-feedback:" + expertDisplayName, resolveExpertModel(), resolveExpertMaxTurns());
     }
 
     private CompletableFuture<String> sendToClaudeAsync(String prompt, String sessionId,

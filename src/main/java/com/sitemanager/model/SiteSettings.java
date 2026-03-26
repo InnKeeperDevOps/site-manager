@@ -31,6 +31,15 @@ public class SiteSettings {
     @Column
     private String githubToken;
 
+    @Column
+    private String claudeModel;
+
+    @Column
+    private String claudeModelExpert;
+
+    @Column
+    private Integer claudeMaxTurnsExpert;
+
     public SiteSettings() {}
 
     public Long getId() { return id; }
@@ -49,4 +58,10 @@ public class SiteSettings {
     public void setSiteName(String v) { this.siteName = v; }
     public String getGithubToken() { return githubToken; }
     public void setGithubToken(String v) { this.githubToken = v; }
+    public String getClaudeModel() { return claudeModel; }
+    public void setClaudeModel(String v) { this.claudeModel = v; }
+    public String getClaudeModelExpert() { return claudeModelExpert; }
+    public void setClaudeModelExpert(String v) { this.claudeModelExpert = v; }
+    public Integer getClaudeMaxTurnsExpert() { return claudeMaxTurnsExpert; }
+    public void setClaudeMaxTurnsExpert(Integer v) { this.claudeMaxTurnsExpert = v; }
 }
