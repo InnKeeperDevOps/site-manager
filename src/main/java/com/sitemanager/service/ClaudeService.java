@@ -546,7 +546,7 @@ public class ClaudeService {
                 if (claudeVerbose) {
                     log.info("{} [stdout] {}", logPrefix, line);
                 }
-                if (progressCallback != null) {
+                if (progressCallback != null && !isCliJsonEnvelope(line)) {
                     progressCallback.accept(line);
                 }
             }
@@ -634,6 +634,18 @@ public class ClaudeService {
         if (text == null) return "null";
         if (text.length() <= maxLength) return text;
         return text.substring(0, maxLength) + "...[truncated, total=" + text.length() + "]";
+    }
+
+    /**
+     * Detect lines that are part of the Claude CLI JSON result envelope
+     * (e.g. {"type":"result","subtype":"success",...}) so they are not
+     * forwarded as raw progress to the UI.
+     */
+    private static boolean isCliJsonEnvelope(String line) {
+        if (line == null) return false;
+        String trimmed = line.trim();
+        return trimmed.startsWith("{") && trimmed.contains("\"type\"") &&
+                (trimmed.contains("\"result\"") || trimmed.contains("\"system\""));
     }
 
     private boolean isDeadSessionError(String output) {
