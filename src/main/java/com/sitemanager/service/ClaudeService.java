@@ -37,12 +37,13 @@ public class ClaudeService {
     private final Map<String, String> sessionMap = new ConcurrentHashMap<>();
     private final AtomicLong requestCounter = new AtomicLong(0);
 
-    // Rate limiter: sliding window of call timestamps
-    private final AtomicLong[] callTimestamps;
-    private int callTimestampIndex = 0;
-    private final Object rateLimitLock = new Object();
+    // FIFO rate limiter: fair ReentrantLock guarantees threads acquire in arrival order
+    private long[] callTimestamps;
+    private int timestampHead = 0;
+    private final java.util.concurrent.locks.ReentrantLock rateLimitLock =
+            new java.util.concurrent.locks.ReentrantLock(true); // fair = FIFO
 
-    // Concurrency gate: limits parallel CLI processes
+    // Concurrency gate: fair semaphore limits parallel CLI processes in FIFO order
     private final Semaphore claudeGate;
 
     private final SiteSettingsRepository settingsRepository;
@@ -79,41 +80,50 @@ public class ClaudeService {
 
     public ClaudeService(SiteSettingsRepository settingsRepository) {
         this.settingsRepository = settingsRepository;
-        // Initialize with defaults; @PostConstruct will re-init with configured values
-        this.claudeGate = new Semaphore(2);
-        this.callTimestamps = new AtomicLong[10];
-        for (int i = 0; i < callTimestamps.length; i++) {
-            callTimestamps[i] = new AtomicLong(0);
-        }
+        // Defaults; @PostConstruct re-inits with configured values
+        this.claudeGate = new Semaphore(2, true); // fair = FIFO ordering
+        this.callTimestamps = new long[10];
     }
 
     @jakarta.annotation.PostConstruct
     private void initRateLimiter() {
-        // Re-initialize semaphore with configured value (drainPermits + release pattern)
+        // Re-initialize semaphore with configured concurrency limit
         claudeGate.drainPermits();
         claudeGate.release(claudeMaxConcurrent);
-        log.info("Claude CLI rate limiter initialized: maxConcurrent={}, maxCallsPerMinute={}",
+        // Re-size timestamp buffer to match configured rate limit
+        this.callTimestamps = new long[claudeMaxCallsPerMinute];
+        this.timestampHead = 0;
+        log.info("Claude CLI rate limiter initialized: maxConcurrent={}, maxCallsPerMinute={}, fifo=true",
                 claudeMaxConcurrent, claudeMaxCallsPerMinute);
     }
 
     /**
-     * Acquire a rate limit slot. Blocks if we've exceeded maxCallsPerMinute within
-     * the last 60 seconds (sliding window).
+     * Acquire a rate limit slot using a FIFO fair lock.
+     * Threads queue in arrival order. If the sliding window is full (N calls in last 60s),
+     * the calling thread sleeps for exactly the time needed until the oldest call expires,
+     * while holding the fair lock so all other callers wait behind it in FIFO order.
      */
     private void acquireRateLimit() throws InterruptedException {
-        synchronized (rateLimitLock) {
-            int windowSize = Math.min(claudeMaxCallsPerMinute, callTimestamps.length);
-            long now = System.currentTimeMillis();
-            long oldest = callTimestamps[callTimestampIndex % windowSize].get();
+        rateLimitLock.lockInterruptibly(); // FIFO: threads queue in arrival order
+        try {
+            int windowSize = callTimestamps.length;
             long windowMs = 60_000L;
-            if (oldest > 0 && (now - oldest) < windowMs) {
-                long sleepMs = windowMs - (now - oldest) + 50; // +50ms buffer
-                log.info("[CLAUDE-RATE-LIMIT] Throttling: {} calls in last 60s, sleeping {}ms",
-                        windowSize, sleepMs);
-                rateLimitLock.wait(sleepMs);
+            int slot = timestampHead % windowSize;
+            long oldest = callTimestamps[slot];
+            if (oldest > 0) {
+                long elapsed = System.currentTimeMillis() - oldest;
+                if (elapsed < windowMs) {
+                    long sleepMs = windowMs - elapsed + 50; // +50ms buffer
+                    log.info("[CLAUDE-RATE-LIMIT] FIFO queue: {} calls in last 60s, sleeping {}ms",
+                            windowSize, sleepMs);
+                    Thread.sleep(sleepMs);
+                }
             }
-            callTimestamps[callTimestampIndex % windowSize].set(System.currentTimeMillis());
-            callTimestampIndex = (callTimestampIndex + 1) % windowSize;
+            // Record this call's timestamp in the circular buffer
+            callTimestamps[slot] = System.currentTimeMillis();
+            timestampHead++;
+        } finally {
+            rateLimitLock.unlock();
         }
     }
 
