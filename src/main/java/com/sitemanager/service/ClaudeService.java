@@ -1136,9 +1136,12 @@ public class ClaudeService {
      * Returns true if a commit was created, false if there were no changes to commit.
      */
     public boolean commitAllChanges(String repoDir, String message) throws Exception {
-        File dir = new File(repoDir);
+        stageAllChanges(repoDir);
+        return commitStagedChanges(repoDir, message);
+    }
 
-        // Step 1: Stage all changes
+    public void stageAllChanges(String repoDir) throws Exception {
+        File dir = new File(repoDir);
         ProcessBuilder addPb = new ProcessBuilder("git", "add", "-A");
         addPb.directory(dir);
         addPb.redirectErrorStream(true);
@@ -1149,8 +1152,12 @@ public class ClaudeService {
         if (addExit != 0) {
             throw new RuntimeException("Failed to stage changes: " + addOutput);
         }
+    }
 
-        // Step 2: Check if there are staged changes (exit 0 = no changes, exit 1 = changes exist)
+    public boolean commitStagedChanges(String repoDir, String message) throws Exception {
+        File dir = new File(repoDir);
+
+        // Check if there are staged changes (exit 0 = no changes, exit 1 = changes exist)
         ProcessBuilder diffPb = new ProcessBuilder("git", "diff", "--cached", "--quiet");
         diffPb.directory(dir);
         diffPb.redirectErrorStream(true);
@@ -1163,7 +1170,7 @@ public class ClaudeService {
             return false;
         }
 
-        // Step 3: Commit with embedded author identity (avoids needing global git config)
+        // Commit with embedded author identity (avoids needing global git config)
         ProcessBuilder commitPb = new ProcessBuilder(
                 "git", "-c", "user.name=Site Manager", "-c", "user.email=site-manager@noreply",
                 "commit", "-m", message);
@@ -1186,6 +1193,62 @@ public class ClaudeService {
         }
         log.info("Committed changes in {} with message: {}", repoDir, message);
         return true;
+    }
+
+    public String getStagedDiffSummary(String repoDir) throws Exception {
+        File dir = new File(repoDir);
+
+        // Get the stat summary
+        ProcessBuilder statPb = new ProcessBuilder("git", "diff", "--cached", "--stat");
+        statPb.directory(dir);
+        statPb.redirectErrorStream(true);
+        statPb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+        Process statProcess = statPb.start();
+        String stat = new String(statProcess.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+        statProcess.waitFor();
+
+        // Get the actual diff (truncated)
+        ProcessBuilder diffPb = new ProcessBuilder("git", "diff", "--cached");
+        diffPb.directory(dir);
+        diffPb.redirectErrorStream(true);
+        diffPb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+        Process diffProcess = diffPb.start();
+        String diff = new String(diffProcess.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        diffProcess.waitFor();
+
+        int maxDiffLen = 4000;
+        if (diff.length() > maxDiffLen) {
+            diff = diff.substring(0, maxDiffLen) + "\n... (diff truncated)";
+        }
+
+        return stat + "\n\n" + diff;
+    }
+
+    public String generateCommitMessage(String sessionId, String suggestionTitle,
+                                         String suggestionDescription, String diffSummary) {
+        String prompt = "Generate a concise git commit message for the following changes.\n\n" +
+                "Suggestion title: " + suggestionTitle + "\n" +
+                "Suggestion description: " + suggestionDescription + "\n\n" +
+                "Diff summary:\n" + diffSummary + "\n\n" +
+                "Rules:\n" +
+                "- Write ONLY the commit message, nothing else\n" +
+                "- First line: short summary (max 72 chars), imperative mood\n" +
+                "- Optionally follow with a blank line and a brief body\n" +
+                "- Do NOT wrap in quotes or backticks\n" +
+                "- Do NOT include any explanation or preamble";
+
+        try {
+            String response = sendToClaude(prompt, sessionId, null, null, null,
+                    "generate-commit-message", resolveModel(), 0);
+            String message = response.strip();
+            if (message.isEmpty()) {
+                throw new RuntimeException("Empty commit message from Claude");
+            }
+            return message;
+        } catch (Exception e) {
+            log.error("Failed to generate commit message via Claude: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to generate commit message", e);
+        }
     }
 
     /**

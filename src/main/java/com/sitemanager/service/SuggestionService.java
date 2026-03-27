@@ -1687,10 +1687,24 @@ public class SuggestionService {
         suggestion.setChangelogEntry(changelog);
         suggestionRepository.save(suggestion);
 
-        // Step 2: Commit all changes made by Claude
-        String commitMessage = "Suggestion #" + suggestion.getId() + ": " + suggestion.getTitle();
+        // Step 2: Stage and commit all changes made by Claude
         try {
-            boolean hasChanges = claudeService.commitAllChanges(workDir, commitMessage);
+            claudeService.stageAllChanges(workDir);
+
+            String commitMessage;
+            try {
+                String diffSummary = claudeService.getStagedDiffSummary(workDir);
+                commitMessage = claudeService.generateCommitMessage(
+                        suggestion.getClaudeSessionId(),
+                        suggestion.getTitle(),
+                        suggestion.getDescription(),
+                        diffSummary);
+            } catch (Exception e) {
+                log.warn("Failed to generate commit message via Claude, using default", e);
+                commitMessage = "Suggestion #" + suggestion.getId() + ": " + suggestion.getTitle();
+            }
+
+            boolean hasChanges = claudeService.commitStagedChanges(workDir, commitMessage);
             if (!hasChanges) {
                 log.warn("No changes to commit for suggestion {}", suggestion.getId());
                 addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
