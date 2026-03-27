@@ -272,6 +272,10 @@ const app = {
         document.getElementById('adminActions').style.display =
             (isAdmin && canApprove) ? '' : 'none';
 
+        // Retry PR action
+        const canRetryPr = isAdmin && suggestion.currentPhase === 'Done — review request failed';
+        document.getElementById('retryPrActions').style.display = canRetryPr ? '' : 'none';
+
         // Reply box visibility
         const canReply = ['DRAFT', 'DISCUSSING', 'PLANNED'].includes(suggestion.status);
         document.getElementById('replyBox').style.display = canReply ? '' : 'none';
@@ -714,6 +718,23 @@ const app = {
         });
     },
 
+    async retryPr() {
+        const btn = document.querySelector('#retryPrActions button');
+        btn.disabled = true;
+        btn.textContent = 'Retrying...';
+        try {
+            const result = await this.api('/suggestions/' + this.state.currentSuggestion + '/retry-pr', { method: 'POST' });
+            if (result && !result.success) {
+                alert('Retry failed: ' + (result.error || 'Unknown error'));
+            }
+        } catch (e) {
+            alert('Retry failed: ' + e.message);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Retry Review Request';
+        }
+    },
+
     async vote(value) {
         const id = this.state.currentSuggestion;
         const data = await this.api('/suggestions/' + id + '/vote', {
@@ -829,6 +850,10 @@ const app = {
                 const canApprove = ['PLANNED', 'DISCUSSING'].includes(data.status);
                 document.getElementById('adminActions').style.display =
                     (isAdmin && canApprove) ? '' : 'none';
+
+                // Retry PR action
+                const canRetryPr2 = isAdmin && data.currentPhase === 'Done — review request failed';
+                document.getElementById('retryPrActions').style.display = canRetryPr2 ? '' : 'none';
 
                 const canReply = ['DRAFT', 'DISCUSSING', 'PLANNED'].includes(data.status);
                 // Only show reply box if not in clarification wizard mode

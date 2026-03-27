@@ -163,6 +163,15 @@ public class SuggestionController {
         return ResponseEntity.ok(suggestionService.denySuggestion(id, reason));
     }
 
+    @PostMapping("/{id}/retry-pr")
+    public ResponseEntity<?> retryPr(@PathVariable Long id, HttpSession session) {
+        String role = (String) session.getAttribute("role");
+        if (!isAdmin(role)) {
+            return ResponseEntity.status(403).body(Map.of("error", "Admin access required"));
+        }
+        return ResponseEntity.ok(suggestionService.retryPrCreation(id));
+    }
+
     @PostMapping("/{id}/vote")
     public ResponseEntity<?> vote(@PathVariable Long id, @Valid @RequestBody VoteRequest request,
                                   HttpSession session) {

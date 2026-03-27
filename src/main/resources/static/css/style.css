@@ -160,6 +160,7 @@ textarea { resize: vertical; min-height: 80px; }
 .status-IN_PROGRESS { background: #e0e7ff; color: #3730a3; }
 .status-TESTING { background: #fce7f3; color: #9d174d; }
 .status-COMPLETED { background: #d1fae5; color: #065f46; }
+.status-FINAL_REVIEW { background: #dbeafe; color: #1e40af; }
 .status-DENIED { background: #fee2e2; color: #991b1b; }
 .status-TIMED_OUT { background: #f1f5f9; color: #64748b; }
 

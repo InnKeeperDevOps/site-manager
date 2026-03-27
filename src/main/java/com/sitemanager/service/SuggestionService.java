@@ -1734,6 +1734,7 @@ public class SuggestionService {
 
             suggestion.setPrUrl(prUrl);
             suggestion.setPrNumber(prNumber);
+            suggestion.setStatus(SuggestionStatus.FINAL_REVIEW);
             suggestion.setCurrentPhase("Done — ready for review");
             suggestionRepository.save(suggestion);
 
@@ -1753,6 +1754,64 @@ public class SuggestionService {
             suggestion.setCurrentPhase("Done — review request failed");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
+        }
+    }
+
+    public Map<String, Object> retryPrCreation(Long suggestionId) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) {
+            return Map.of("success", false, "error", "Suggestion not found");
+        }
+        if (!"Done — review request failed".equals(suggestion.getCurrentPhase())) {
+            return Map.of("success", false, "error", "Suggestion is not in a retryable state");
+        }
+
+        String repoUrl = settingsService.getSettings().getTargetRepoUrl();
+        String githubToken = settingsService.getSettings().getGithubToken();
+        String branchName = "suggestion-" + suggestion.getId();
+
+        if (githubToken == null || githubToken.isBlank()) {
+            return Map.of("success", false, "error", "No GitHub token configured. Please update it in Settings.");
+        }
+
+        try {
+            suggestion.setCurrentPhase("Creating a review request...");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+
+            String prTitle = "Suggestion #" + suggestion.getId() + ": " + suggestion.getTitle();
+            String prBody = buildPrBody(suggestion);
+
+            var prResult = claudeService.createGitHubPullRequest(
+                    repoUrl, branchName, prTitle, prBody, githubToken);
+
+            String prUrl = (String) prResult.get("html_url");
+            int prNumber = (int) prResult.get("number");
+
+            suggestion.setPrUrl(prUrl);
+            suggestion.setPrNumber(prNumber);
+            suggestion.setStatus(SuggestionStatus.FINAL_REVIEW);
+            suggestion.setCurrentPhase("Done — ready for review");
+            suggestionRepository.save(suggestion);
+
+            addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                    "Changes are ready for review: " + prUrl);
+
+            broadcastUpdate(suggestion);
+            webSocketHandler.sendToSuggestion(suggestion.getId(),
+                    "{\"type\":\"pr_created\",\"prUrl\":\"" + escapeJson(prUrl) +
+                    "\",\"prNumber\":" + prNumber + "}");
+
+            return Map.of("success", true, "prUrl", prUrl);
+
+        } catch (Exception e) {
+            log.error("Retry PR creation failed for suggestion {}: {}", suggestion.getId(), e.getMessage(), e);
+            addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                    "Review request retry failed. An admin can try again.");
+            suggestion.setCurrentPhase("Done — review request failed");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+            return Map.of("success", false, "error", "PR creation failed: " + e.getMessage());
         }
     }
 
