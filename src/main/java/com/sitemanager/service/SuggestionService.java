@@ -674,8 +674,8 @@ public class SuggestionService {
                     broadcastExpertClarificationQuestions(suggestionId, questions, expert);
                 } else {
                     // No actual questions — treat as approved
-                    appendExpertNote(suggestion, expert, "Approved. " + analysis);
-                    addMessage(suggestionId, SenderType.AI, expert.getDisplayName(), message);
+                    appendExpertNote(suggestion, expert, "Approved.");
+                    addMessage(suggestionId, SenderType.AI, expert.getDisplayName(), "Approved.");
                     advanceExpertStep(suggestion);
                     runNextExpertReview(suggestionId);
                 }
@@ -716,8 +716,8 @@ public class SuggestionService {
             }
 
             // APPROVED or unknown status — record note and advance
-            appendExpertNote(suggestion, expert, "Approved. " + analysis);
-            addMessage(suggestionId, SenderType.AI, expert.getDisplayName(), message);
+            appendExpertNote(suggestion, expert, "Approved.");
+            addMessage(suggestionId, SenderType.AI, expert.getDisplayName(), "Approved.");
             advanceExpertStep(suggestion);
             runNextExpertReview(suggestionId);
 
@@ -1548,8 +1548,8 @@ public class SuggestionService {
 
             // APPROVED — record note and move to next reviewer
             broadcastExpertNote(suggestionId, reviewer.getDisplayName(),
-                    "Task " + taskOrder + " review: Approved. " + analysis);
-            addMessage(suggestionId, SenderType.AI, reviewer.getDisplayName(), message);
+                    "Task " + taskOrder + ": Approved.");
+            addMessage(suggestionId, SenderType.AI, reviewer.getDisplayName(), "Approved.");
             runTaskReviewer(suggestionId, taskOrder, task, plan, workDir, reviewers, reviewerIndex + 1);
 
         } catch (Exception e) {
