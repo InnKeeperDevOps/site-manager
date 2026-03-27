@@ -18,6 +18,7 @@ import com.sitemanager.repository.PlanTaskRepository;
 import com.sitemanager.repository.SuggestionMessageRepository;
 import com.sitemanager.repository.SuggestionRepository;
 import com.sitemanager.websocket.SuggestionWebSocketHandler;
+import com.sitemanager.websocket.UserNotificationWebSocketHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -56,19 +57,22 @@ public class SuggestionService {
     private final ClaudeService claudeService;
     private final SiteSettingsService settingsService;
     private final SuggestionWebSocketHandler webSocketHandler;
+    private final UserNotificationWebSocketHandler userNotificationHandler;
 
     public SuggestionService(SuggestionRepository suggestionRepository,
                              SuggestionMessageRepository messageRepository,
                              PlanTaskRepository planTaskRepository,
                              ClaudeService claudeService,
                              SiteSettingsService settingsService,
-                             SuggestionWebSocketHandler webSocketHandler) {
+                             SuggestionWebSocketHandler webSocketHandler,
+                             UserNotificationWebSocketHandler userNotificationHandler) {
         this.suggestionRepository = suggestionRepository;
         this.messageRepository = messageRepository;
         this.planTaskRepository = planTaskRepository;
         this.claudeService = claudeService;
         this.settingsService = settingsService;
         this.webSocketHandler = webSocketHandler;
+        this.userNotificationHandler = userNotificationHandler;
     }
 
     /**
@@ -2162,6 +2166,18 @@ public class SuggestionService {
         } catch (JsonProcessingException e) {
             log.error("Failed to broadcast clarification questions", e);
         }
+
+        suggestionRepository.findById(suggestionId).ifPresent(suggestion -> {
+            String authorName = suggestion.getAuthorName();
+            if (authorName != null) {
+                userNotificationHandler.sendNotificationToUser(authorName, Map.of(
+                        "type", "clarification_needed",
+                        "suggestionId", suggestionId,
+                        "suggestionTitle", suggestion.getTitle() != null ? suggestion.getTitle() : "",
+                        "questionCount", questions.size()
+                ));
+            }
+        });
     }
 
     public List<String> getPendingQuestions(Long suggestionId) {
