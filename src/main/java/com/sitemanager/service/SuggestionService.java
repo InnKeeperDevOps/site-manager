@@ -1394,6 +1394,24 @@ public class SuggestionService {
         if (optTask.isEmpty()) return;
 
         PlanTask task = optTask.get();
+
+        // Block review if the task is already being reviewed or is not in COMPLETED state
+        if (task.getStatus() == TaskStatus.REVIEWING) {
+            log.warn("Task {} for suggestion {} is already being reviewed, skipping duplicate review",
+                    taskOrder, suggestionId);
+            return;
+        }
+        if (task.getStatus() != TaskStatus.COMPLETED) {
+            log.warn("Task {} for suggestion {} is in {} state, not eligible for expert review",
+                    taskOrder, suggestionId, task.getStatus());
+            return;
+        }
+
+        // Mark as REVIEWING to prevent re-entry
+        task.setStatus(TaskStatus.REVIEWING);
+        planTaskRepository.save(task);
+        broadcastTaskUpdate(suggestionId, task);
+
         List<PlanTask> allTasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
         int totalTasks = allTasks.size();
 
@@ -1418,7 +1436,11 @@ public class SuggestionService {
                                    String plan, String workDir,
                                    ExpertRole[] reviewers, int reviewerIndex) {
         if (reviewerIndex >= reviewers.length) {
-            // All reviewers approved — move to next task
+            // All reviewers approved — mark task as COMPLETED and move to next task
+            task.setStatus(TaskStatus.COMPLETED);
+            planTaskRepository.save(task);
+            broadcastTaskUpdate(suggestionId, task);
+
             Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
             if (suggestion == null) return;
 
