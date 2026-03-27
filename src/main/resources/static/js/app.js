@@ -8,6 +8,8 @@ const app = {
         currentStatus: null,
         settings: {},
         ws: null,
+        notificationWs: null,
+        notificationWsReconnectTimeout: null,
         clarification: {
             questions: [],
             answers: [],
@@ -117,6 +119,8 @@ const app = {
         this.state.username = data.username;
         this.state.role = data.role;
         this.updateHeader();
+        Notification.requestPermission();
+        this.connectNotificationsWs(this.state.username);
         this.navigate('list');
     },
 
@@ -125,6 +129,8 @@ const app = {
         this.state.loggedIn = false;
         this.state.username = '';
         this.state.role = '';
+        this.state.notificationWs?.close();
+        clearTimeout(this.state.notificationWsReconnectTimeout);
         this.updateHeader();
         this.navigate('list');
     },
@@ -802,6 +808,47 @@ const app = {
             this.state.ws.onclose = null;
             this.state.ws.close();
             this.state.ws = null;
+        }
+    },
+
+    connectNotificationsWs(username) {
+        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = protocol + '//' + location.host + '/ws/notifications?username=' + encodeURIComponent(username);
+        const ws = new WebSocket(url);
+
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                this.handleNotificationWsMessage(data);
+            } catch (e) {
+                console.error('Notification WS parse error:', e);
+            }
+        };
+
+        ws.onclose = () => {
+            this.state.notificationWsReconnectTimeout = setTimeout(() => {
+                if (this.state.loggedIn) {
+                    this.connectNotificationsWs(this.state.username);
+                }
+            }, 3000);
+        };
+
+        this.state.notificationWs = ws;
+    },
+
+    handleNotificationWsMessage(data) {
+        if (data.type === 'clarification_needed') {
+            if (Notification.permission !== 'granted') {
+                return;
+            }
+            if (this.state.currentSuggestion?.id === data.suggestionId) {
+                return;
+            }
+            const n = new Notification('Clarification Needed', {
+                body: 'Your suggestion "' + data.suggestionTitle + '" needs ' + data.questionCount + ' question(s) answered.',
+                tag: 'suggestion-clarification-' + data.suggestionId
+            });
+            n.onclick = () => { window.focus(); loadDetail(data.suggestionId); n.close(); };
         }
     },
 
