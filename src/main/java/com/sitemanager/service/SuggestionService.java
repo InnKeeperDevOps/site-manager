@@ -1258,7 +1258,6 @@ public class SuggestionService {
                 addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
                         "Something went wrong while working on this suggestion. It can be retried.");
                 suggestion.setCurrentPhase("Failed — can retry");
-                suggestion.setStatus(SuggestionStatus.PLANNED);
                 suggestionRepository.save(suggestion);
                 broadcastUpdate(suggestion);
             }
@@ -1365,7 +1364,6 @@ public class SuggestionService {
             // Task failed — notify and halt
             addMessage(suggestionId, SenderType.AI, "Claude", result);
             suggestion.setCurrentPhase("Task " + taskOrder + " failed — can retry");
-            suggestion.setStatus(SuggestionStatus.PLANNED);
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
         } else {
@@ -1620,7 +1618,6 @@ public class SuggestionService {
             createPrAsync(suggestion.getId());
             return;
         } else if (result.contains("FAILED")) {
-            suggestion.setStatus(SuggestionStatus.PLANNED);
             suggestion.setCurrentPhase("Something went wrong — can retry");
         } else {
             suggestion.setStatus(SuggestionStatus.TESTING);
