@@ -250,6 +250,11 @@ public class SuggestionService {
 
         // Try to parse JSON response to determine status
         if (response.contains("PLAN_READY")) {
+            if (isPlanLocked(suggestion.getStatus())) {
+                log.warn("Ignoring PLAN_READY for suggestion {} — plan is locked in {} state",
+                        suggestionId, suggestion.getStatus());
+                return;
+            }
             addMessage(suggestionId, SenderType.AI, "Claude", displayMessage);
             suggestion.setPlanSummary(extractPlan(response));
             suggestion.setPlanDisplaySummary(extractPlanDisplaySummary(response));
@@ -751,6 +756,12 @@ public class SuggestionService {
             log.warn("Failed to parse reviewer response: {}", e.getMessage());
         }
 
+        if (applyChanges && isPlanLocked(suggestion.getStatus())) {
+            log.warn("Blocking expert plan changes for suggestion {} — plan is locked in {} state",
+                    suggestionId, suggestion.getStatus());
+            applyChanges = false;
+        }
+
         if (applyChanges) {
             // Apply the expert's proposed changes to the plan
             try {
@@ -1047,6 +1058,13 @@ public class SuggestionService {
         });
     }
 
+    private boolean isPlanLocked(SuggestionStatus status) {
+        return status == SuggestionStatus.APPROVED
+            || status == SuggestionStatus.IN_PROGRESS
+            || status == SuggestionStatus.TESTING
+            || status == SuggestionStatus.COMPLETED;
+    }
+
     private boolean isSubstantiveAnalysis(String analysis) {
         if (analysis == null || analysis.isBlank()) return false;
         return analysis.trim().length() >= MIN_EXPERT_ANALYSIS_LENGTH;
@@ -1107,6 +1125,12 @@ public class SuggestionService {
     }
 
     private void savePlanTasksFromNode(Long suggestionId, JsonNode tasksNode) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion != null && isPlanLocked(suggestion.getStatus())) {
+            log.warn("Blocking plan task changes for suggestion {} — plan is locked in {} state",
+                    suggestionId, suggestion.getStatus());
+            return;
+        }
         planTaskRepository.deleteBySuggestionId(suggestionId);
 
         int order = 1;
@@ -1760,6 +1784,12 @@ public class SuggestionService {
     // --- Plan Task management ---
 
     private void savePlanTasks(Long suggestionId, String response) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion != null && isPlanLocked(suggestion.getStatus())) {
+            log.warn("Blocking plan task changes for suggestion {} — plan is locked in {} state",
+                    suggestionId, suggestion.getStatus());
+            return;
+        }
         try {
             // Delete any existing tasks for this suggestion (re-plan scenario)
             planTaskRepository.deleteBySuggestionId(suggestionId);
