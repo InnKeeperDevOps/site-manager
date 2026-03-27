@@ -212,7 +212,7 @@ const app = {
         const phaseEl = document.getElementById('detailPhase');
         const phaseText = document.getElementById('detailPhaseText');
         const phaseFinished = ['DENIED', 'TIMED_OUT'].includes(suggestion.status) ||
-            (suggestion.status === 'COMPLETED' && (!suggestion.currentPhase || suggestion.currentPhase.startsWith('Implementation completed')));
+            (suggestion.status === 'DEV_COMPLETE' && (!suggestion.currentPhase || suggestion.currentPhase.startsWith('Implementation completed')));
         if (suggestion.currentPhase && !phaseFinished) {
             phaseEl.style.display = '';
             phaseText.textContent = suggestion.currentPhase;
@@ -825,7 +825,7 @@ const app = {
                 const phaseEl = document.getElementById('detailPhase');
                 const phaseText = document.getElementById('detailPhaseText');
                 const phaseFinished = ['DENIED', 'TIMED_OUT'].includes(data.status) ||
-                    (data.status === 'COMPLETED' && (!data.currentPhase || data.currentPhase.startsWith('Implementation completed')));
+                    (data.status === 'DEV_COMPLETE' && (!data.currentPhase || data.currentPhase.startsWith('Implementation completed')));
                 if (data.currentPhase && !phaseFinished) {
                     phaseEl.style.display = '';
                     phaseText.textContent = data.currentPhase;

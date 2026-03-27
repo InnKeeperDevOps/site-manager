@@ -1063,7 +1063,7 @@ public class SuggestionService {
         return status == SuggestionStatus.APPROVED
             || status == SuggestionStatus.IN_PROGRESS
             || status == SuggestionStatus.TESTING
-            || status == SuggestionStatus.COMPLETED;
+            || status == SuggestionStatus.DEV_COMPLETE;
     }
 
     private boolean isSubstantiveAnalysis(String analysis) {
@@ -1338,7 +1338,7 @@ public class SuggestionService {
             log.info("[AI-FLOW] suggestion={} all {} tasks completed, finalizing", suggestionId, tasks.size());
             markRemainingTasksCompleted(suggestionId);
 
-            suggestion.setStatus(SuggestionStatus.COMPLETED);
+            suggestion.setStatus(SuggestionStatus.DEV_COMPLETE);
             suggestion.setCurrentPhase("Work completed — submitting changes...");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
@@ -1647,7 +1647,7 @@ public class SuggestionService {
             // Mark all remaining non-completed tasks as COMPLETED
             markRemainingTasksCompleted(suggestionId);
 
-            suggestion.setStatus(SuggestionStatus.COMPLETED);
+            suggestion.setStatus(SuggestionStatus.DEV_COMPLETE);
             suggestion.setCurrentPhase("Work completed — submitting changes...");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);

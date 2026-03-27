@@ -8,7 +8,7 @@ public enum SuggestionStatus {
     APPROVED,
     IN_PROGRESS,
     TESTING,
-    COMPLETED,
+    DEV_COMPLETE,
     FINAL_REVIEW,
     DENIED,
     TIMED_OUT
