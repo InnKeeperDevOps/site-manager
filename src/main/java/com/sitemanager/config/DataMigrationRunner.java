@@ -53,8 +53,8 @@ public class DataMigrationRunner implements CommandLineRunner {
                 .map(s -> "'" + s.name() + "'")
                 .collect(Collectors.joining(","));
 
-        boolean needsRebuild = !currentSql.contains("'DEV_COMPLETE'")
-                && currentSql.contains("'COMPLETED'");
+        boolean needsRebuild = Arrays.stream(SuggestionStatus.values())
+                .anyMatch(s -> !currentSql.contains("'" + s.name() + "'"));
 
         if (!needsRebuild) {
             return;
