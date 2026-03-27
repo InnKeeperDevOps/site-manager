@@ -40,8 +40,8 @@ import java.util.Optional;
 public class SuggestionService {
 
     private static final Logger log = LoggerFactory.getLogger(SuggestionService.class);
-    private static final int MAX_EXPERT_REVIEW_ROUNDS = 5;
-    private static final int MAX_TOTAL_EXPERT_REVIEW_ROUNDS = 10;
+    private static final int MAX_EXPERT_REVIEW_ROUNDS = 2;
+    private static final int MAX_TOTAL_EXPERT_REVIEW_ROUNDS = 3;
     private static final int MIN_EXPERT_ANALYSIS_LENGTH = 50;
     private static final int MAX_EXPERT_RETRIES = 2;
     private final ConcurrentHashMap<String, Integer> expertRetryCount = new ConcurrentHashMap<>();
@@ -394,20 +394,33 @@ public class SuggestionService {
             int totalRounds = suggestion.getTotalExpertReviewRounds() != null ? suggestion.getTotalExpertReviewRounds() : currentRound;
 
             if (planChanged && currentRound < MAX_EXPERT_REVIEW_ROUNDS && totalRounds < MAX_TOTAL_EXPERT_REVIEW_ROUNDS) {
-                // Plan was modified during this round — restart so all experts
-                // can re-review the updated plan from scratch
-                suggestion.setExpertReviewStep(0);
-                suggestion.setExpertReviewRound(currentRound + 1);
+                // Plan was modified — run targeted re-review of affected domain experts only
+                java.util.Set<ExpertRole.Domain> changedDomains = parseChangedDomains(suggestion.getExpertReviewChangedDomains());
+                java.util.Set<ExpertRole.Domain> affectedDomains = new java.util.HashSet<>();
+                for (ExpertRole.Domain d : changedDomains) {
+                    affectedDomains.addAll(ExpertRole.affectedDomains(d));
+                }
+
+                java.util.List<ExpertRole> expertsToRerun = java.util.Arrays.stream(ExpertRole.reviewOrder())
+                        .filter(e -> affectedDomains.contains(e.domain()))
+                        .toList();
+
+                int nextRound = currentRound + 1;
+                suggestion.setExpertReviewRound(nextRound);
                 suggestion.setTotalExpertReviewRounds(totalRounds + 1);
                 suggestion.setExpertReviewNotes(null);
                 suggestion.setExpertReviewPlanChanged(false);
+                suggestion.setExpertReviewChangedDomains(null);
                 suggestionRepository.save(suggestion);
 
+                String expertNames = expertsToRerun.stream()
+                        .map(ExpertRole::getDisplayName)
+                        .collect(java.util.stream.Collectors.joining(", "));
                 addMessage(suggestionId, SenderType.SYSTEM, "System",
-                        "The plan was updated during this round — restarting expert reviews (round " + (currentRound + 1) + ").");
+                        "The plan was updated — targeted re-review by " + expertNames + " (round " + nextRound + ").");
                 broadcastTasks(suggestionId);
                 broadcastExpertReviewStatus(suggestionId);
-                runNextExpertReview(suggestionId);
+                runTargetedExpertRereviews(suggestionId, expertsToRerun, nextRound);
                 return;
             }
 
@@ -420,33 +433,12 @@ public class SuggestionService {
                         " total rounds of refinement. Finalizing the plan as-is.");
             } else if (planChanged) {
                 // Per-cycle max reached but still under hard cap —
-                // pause and ask the user for high-level guidance
-                log.info("Suggestion {} reached max expert review rounds ({}), asking user for guidance",
+                // force-finalize rather than looping further
+                log.info("Suggestion {} reached max expert review rounds ({}), force-finalizing",
                         suggestionId, MAX_EXPERT_REVIEW_ROUNDS);
-
-                List<String> questions = List.of(
-                        "Our reviewers have gone through " + currentRound +
-                                " rounds of review and are still suggesting changes to the plan. " +
-                                "Could you help us settle on a direction?",
-                        "Are there any parts of the plan you feel strongly about keeping as-is?",
-                        "Are there specific areas where you'd like us to focus or simplify the approach?"
-                );
-
-                try {
-                    suggestion.setPendingClarificationQuestions(objectMapper.writeValueAsString(questions));
-                } catch (JsonProcessingException e) {
-                    log.error("Failed to serialize max-rounds clarification questions", e);
-                }
-                suggestion.setCurrentPhase("Needs your guidance after " + currentRound + " review rounds");
-                suggestionRepository.save(suggestion);
-                broadcastUpdate(suggestion);
-
                 addMessage(suggestionId, SenderType.SYSTEM, "System",
-                        "Expert reviews have gone through " + currentRound +
-                        " rounds and are still refining the plan. We need your input to settle on a direction.");
-                broadcastClarificationQuestions(suggestionId, questions);
-                broadcastExpertReviewStatus(suggestionId);
-                return;
+                        "Expert reviews have completed after " + currentRound +
+                        " rounds. Finalizing the plan.");
             }
 
             addMessage(suggestionId, SenderType.SYSTEM, "System",
@@ -458,6 +450,7 @@ public class SuggestionService {
             suggestion.setExpertReviewRound(null);
             suggestion.setExpertReviewPlanChanged(null);
             suggestion.setTotalExpertReviewRounds(null);
+            suggestion.setExpertReviewChangedDomains(null);
             suggestion.setCurrentPhase("Plan ready — waiting for approval");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
@@ -517,6 +510,7 @@ public class SuggestionService {
         String previousNotes = suggestion.getExpertReviewNotes();
 
         // Launch all experts in this batch concurrently
+        int currentRound = suggestion.getExpertReviewRound() != null ? suggestion.getExpertReviewRound() : 1;
         List<CompletableFuture<ExpertBatchResult>> futures = new ArrayList<>();
         for (ExpertRole expert : batch) {
             String reviewSessionId = claudeService.generateSessionId();
@@ -534,7 +528,8 @@ public class SuggestionService {
                         webSocketHandler.sendToSuggestion(suggestionId,
                                 "{\"type\":\"progress\",\"content\":\"" +
                                         escapeJson(progress) + "\"}");
-                    }
+                    },
+                    currentRound
             ).thenApply(response -> new ExpertBatchResult(expert, reviewSessionId, response));
             futures.add(future);
         }
@@ -578,6 +573,7 @@ public class SuggestionService {
         String tasksJson = buildTasksJsonForExecution(suggestionId);
         String previousNotes = suggestion.getExpertReviewNotes();
 
+        int currentRound = suggestion.getExpertReviewRound() != null ? suggestion.getExpertReviewRound() : 1;
         String reviewSessionId = claudeService.generateSessionId();
         claudeService.expertReview(
                 reviewSessionId,
@@ -593,7 +589,8 @@ public class SuggestionService {
                     webSocketHandler.sendToSuggestion(suggestionId,
                             "{\"type\":\"progress\",\"content\":\"" +
                                     escapeJson(progress) + "\"}");
-                }
+                },
+                currentRound
         ).thenAccept(response -> {
             handleExpertReviewResponse(suggestionId, response, expert, reviewSessionId);
         });
@@ -687,6 +684,7 @@ public class SuggestionService {
 
                 String reviewerSessionId = claudeService.generateSessionId();
                 String currentPlan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : "";
+                int currentRound = suggestion.getExpertReviewRound() != null ? suggestion.getExpertReviewRound() : 1;
 
                 claudeService.reviewExpertFeedback(
                         reviewerSessionId,
@@ -697,7 +695,8 @@ public class SuggestionService {
                         reviewer.getDisplayName(),
                         reviewer.getReviewPrompt(),
                         claudeService.getMainRepoDir(),
-                        progress -> {}
+                        progress -> {},
+                        currentRound
                 ).thenAccept(reviewerResponse -> {
                     handleReviewerResponse(suggestionId, reviewerResponse, expert, response, analysis, message);
                 });
@@ -766,9 +765,15 @@ public class SuggestionService {
             addMessage(suggestionId, SenderType.AI, expert.getDisplayName(),
                     expertMessage + "\n\n*Changes have been applied to the plan.*");
 
-            // Mark that the plan changed during this round — remaining experts still
-            // need a chance to review before we restart from the beginning.
+            // Mark that the plan changed during this round and track which domain caused it
             suggestion.setExpertReviewPlanChanged(true);
+            String changedDomain = expert.domain().name();
+            String existing = suggestion.getExpertReviewChangedDomains();
+            if (existing == null || existing.isBlank()) {
+                suggestion.setExpertReviewChangedDomains(changedDomain);
+            } else if (!existing.contains(changedDomain)) {
+                suggestion.setExpertReviewChangedDomains(existing + "," + changedDomain);
+            }
             suggestionRepository.save(suggestion);
 
             addMessage(suggestionId, SenderType.SYSTEM, "System",
@@ -946,6 +951,83 @@ public class SuggestionService {
         };
     }
 
+    private java.util.Set<ExpertRole.Domain> parseChangedDomains(String domainsStr) {
+        java.util.Set<ExpertRole.Domain> domains = new java.util.HashSet<>();
+        if (domainsStr == null || domainsStr.isBlank()) return domains;
+        for (String name : domainsStr.split(",")) {
+            try {
+                domains.add(ExpertRole.Domain.valueOf(name.trim()));
+            } catch (IllegalArgumentException e) {
+                log.warn("Unknown domain in changed domains: {}", name);
+            }
+        }
+        return domains;
+    }
+
+    /**
+     * Run targeted re-reviews for only the specified experts (affected by domain changes).
+     * Runs experts sequentially since the set is small (typically 2-4 experts).
+     */
+    private void runTargetedExpertRereviews(Long suggestionId, java.util.List<ExpertRole> experts, int round) {
+        if (experts.isEmpty()) {
+            // No experts to re-run — mark all done and trigger finalization
+            Suggestion s = suggestionRepository.findById(suggestionId).orElse(null);
+            if (s == null) return;
+            s.setExpertReviewStep(ExpertRole.reviewOrder().length);
+            suggestionRepository.save(s);
+            runNextExpertReview(suggestionId);
+            return;
+        }
+
+        ExpertRole expert = experts.get(0);
+        java.util.List<ExpertRole> remaining = experts.subList(1, experts.size());
+
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) return;
+
+        suggestion.setCurrentPhase(expert.getDisplayName() + " is re-reviewing the plan (round " + round + ")...");
+        suggestionRepository.save(suggestion);
+        broadcastUpdate(suggestion);
+
+        String plan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription();
+        String tasksJson = buildTasksJsonForExecution(suggestionId);
+        String previousNotes = suggestion.getExpertReviewNotes();
+
+        String reviewSessionId = claudeService.generateSessionId();
+        claudeService.expertReview(
+                reviewSessionId,
+                expert.getDisplayName(),
+                expert.getReviewPrompt(),
+                suggestion.getTitle(),
+                suggestion.getDescription(),
+                plan,
+                tasksJson,
+                previousNotes,
+                claudeService.getMainRepoDir(),
+                progress -> {
+                    webSocketHandler.sendToSuggestion(suggestionId,
+                            "{\"type\":\"progress\",\"content\":\"" +
+                                    escapeJson(progress) + "\"}");
+                },
+                round
+        ).thenAccept(response -> {
+            handleExpertReviewResponse(suggestionId, response, expert, reviewSessionId);
+
+            // Check if pipeline paused for clarification
+            Suggestion refreshed = suggestionRepository.findById(suggestionId).orElse(null);
+            if (refreshed != null && refreshed.getPendingClarificationQuestions() == null) {
+                if (!remaining.isEmpty()) {
+                    runTargetedExpertRereviews(suggestionId, remaining, round);
+                } else {
+                    // All targeted experts done — trigger the finalization check
+                    refreshed.setExpertReviewStep(ExpertRole.reviewOrder().length);
+                    suggestionRepository.save(refreshed);
+                    runNextExpertReview(suggestionId);
+                }
+            }
+        });
+    }
+
     private boolean isSubstantiveAnalysis(String analysis) {
         if (analysis == null || analysis.isBlank()) return false;
         return analysis.trim().length() >= MIN_EXPERT_ANALYSIS_LENGTH;
@@ -983,6 +1065,7 @@ public class SuggestionService {
                 "of this plan from your expertise as a " + expert.getDisplayName() + ". " +
                 "Explain what you evaluated, what you found, and why. Do NOT give a brief or generic response.";
 
+        int currentRound = suggestion.getExpertReviewRound() != null ? suggestion.getExpertReviewRound() : 1;
         claudeService.expertReview(
                 retrySessionId,
                 expert.getDisplayName(),
@@ -997,7 +1080,8 @@ public class SuggestionService {
                     webSocketHandler.sendToSuggestion(suggestionId,
                             "{\"type\":\"progress\",\"content\":\"" +
                                     escapeJson(progress) + "\"}");
-                }
+                },
+                currentRound
         ).thenAccept(response -> {
             handleExpertReviewResponse(suggestionId, response, expert, retrySessionId);
         });

@@ -37,6 +37,14 @@ public class ClaudeService {
     private final Map<String, String> sessionMap = new ConcurrentHashMap<>();
     private final AtomicLong requestCounter = new AtomicLong(0);
 
+    // Rate limiter: sliding window of call timestamps
+    private final AtomicLong[] callTimestamps;
+    private int callTimestampIndex = 0;
+    private final Object rateLimitLock = new Object();
+
+    // Concurrency gate: limits parallel CLI processes
+    private final Semaphore claudeGate;
+
     private final SiteSettingsRepository settingsRepository;
 
     @Value("${app.claude-cli-path:claude}")
@@ -63,8 +71,50 @@ public class ClaudeService {
     @Value("${app.claude-max-turns-expert:3}")
     private int claudeMaxTurnsExpertDefault;
 
+    @Value("${app.claude-max-concurrent:2}")
+    private int claudeMaxConcurrent;
+
+    @Value("${app.claude-max-calls-per-minute:10}")
+    private int claudeMaxCallsPerMinute;
+
     public ClaudeService(SiteSettingsRepository settingsRepository) {
         this.settingsRepository = settingsRepository;
+        // Initialize with defaults; @PostConstruct will re-init with configured values
+        this.claudeGate = new Semaphore(2);
+        this.callTimestamps = new AtomicLong[10];
+        for (int i = 0; i < callTimestamps.length; i++) {
+            callTimestamps[i] = new AtomicLong(0);
+        }
+    }
+
+    @jakarta.annotation.PostConstruct
+    private void initRateLimiter() {
+        // Re-initialize semaphore with configured value (drainPermits + release pattern)
+        claudeGate.drainPermits();
+        claudeGate.release(claudeMaxConcurrent);
+        log.info("Claude CLI rate limiter initialized: maxConcurrent={}, maxCallsPerMinute={}",
+                claudeMaxConcurrent, claudeMaxCallsPerMinute);
+    }
+
+    /**
+     * Acquire a rate limit slot. Blocks if we've exceeded maxCallsPerMinute within
+     * the last 60 seconds (sliding window).
+     */
+    private void acquireRateLimit() throws InterruptedException {
+        synchronized (rateLimitLock) {
+            int windowSize = Math.min(claudeMaxCallsPerMinute, callTimestamps.length);
+            long now = System.currentTimeMillis();
+            long oldest = callTimestamps[callTimestampIndex % windowSize].get();
+            long windowMs = 60_000L;
+            if (oldest > 0 && (now - oldest) < windowMs) {
+                long sleepMs = windowMs - (now - oldest) + 50; // +50ms buffer
+                log.info("[CLAUDE-RATE-LIMIT] Throttling: {} calls in last 60s, sleeping {}ms",
+                        windowSize, sleepMs);
+                rateLimitLock.wait(sleepMs);
+            }
+            callTimestamps[callTimestampIndex % windowSize].set(System.currentTimeMillis());
+            callTimestampIndex = (callTimestampIndex + 1) % windowSize;
+        }
     }
 
     private SiteSettings getSettings() {
@@ -361,9 +411,25 @@ public class ClaudeService {
                                                     String suggestionDescription, String plan,
                                                     String tasksJson, String previousNotes,
                                                     String workingDir,
-                                                    Consumer<String> progressCallback) {
+                                                    Consumer<String> progressCallback,
+                                                    int reviewRound) {
+        String roundContext = "";
+        if (reviewRound > 1) {
+            roundContext = "ROUND " + reviewRound + " RE-REVIEW RULES (MANDATORY):\n" +
+                "- This plan was ALREADY reviewed and updated. You are re-reviewing because changes " +
+                "were made in a domain related to yours.\n" +
+                "- The bar for proposing further changes is EXTREMELY HIGH. Only propose changes for:\n" +
+                "  * CRITICAL issues introduced BY the recent changes (regressions)\n" +
+                "  * CRITICAL issues that were clearly missed in round 1\n" +
+                "- Do NOT re-raise issues noted by other experts in previous rounds.\n" +
+                "- Do NOT propose changes for anything below CRITICAL severity.\n" +
+                "- If the plan is acceptable (even imperfect), you MUST approve it.\n" +
+                "- The goal is CONVERGENCE, not perfection. Approve unless something is broken.\n\n";
+        }
+
         String prompt = String.format(
                 "%s\n\n" +
+                "%s" +
                 "Suggestion Title: %s\n" +
                 "Suggestion Description: %s\n\n" +
                 "Current Plan:\n%s\n\n" +
@@ -411,6 +477,7 @@ public class ClaudeService {
                 "When asking questions, keep them high-level and non-technical. " +
                 "Only propose CHANGES_PROPOSED for critical or major issues — approve with notes for medium issues.",
                 expertPrompt,
+                roundContext,
                 suggestionTitle,
                 suggestionDescription,
                 plan,
@@ -427,9 +494,18 @@ public class ClaudeService {
                                                             String expertAnalysis, String proposedChanges,
                                                             String currentPlan, String reviewerRole,
                                                             String reviewerPrompt, String workingDir,
-                                                            Consumer<String> progressCallback) {
+                                                            Consumer<String> progressCallback,
+                                                            int reviewRound) {
+        String roundWarning = "";
+        if (reviewRound > 1) {
+            roundWarning = "IMPORTANT: This is round " + reviewRound + " of review. The bar for accepting changes is EXTREMELY HIGH. " +
+                "Only approve changes that fix CRITICAL regressions introduced by recent plan updates. " +
+                "Reject ALL other changes to ensure the review converges. When in doubt, REJECT.\n\n";
+        }
+
         String prompt = String.format(
                 "%s\n\n" +
+                "%s" +
                 "A %s has reviewed an implementation plan and proposed changes. " +
                 "As the %s, evaluate whether these changes are warranted.\n\n" +
                 "Current plan:\n%s\n\n" +
@@ -445,7 +521,7 @@ public class ClaudeService {
                 "\"apply\": true/false}\n\n" +
                 "Set apply=true ONLY if the changes fix a critical or major issue. " +
                 "Reject changes that are cosmetic, over-engineered, or add scope without clear value.",
-                reviewerPrompt, expertDisplayName, reviewerRole,
+                reviewerPrompt, roundWarning, expertDisplayName, reviewerRole,
                 currentPlan, expertDisplayName, expertAnalysis, proposedChanges, reviewerRole
         );
 
@@ -469,6 +545,23 @@ public class ClaudeService {
     }
 
     private String sendToClaude(String prompt, String sessionId, String workingDir,
+                                 String conversationContext,
+                                 Consumer<String> progressCallback,
+                                 String operationType, String model, int maxTurns) throws Exception {
+        // Rate limit gate
+        acquireRateLimit();
+
+        // Concurrency gate
+        claudeGate.acquire();
+        try {
+            return sendToClaudeGated(prompt, sessionId, workingDir, conversationContext,
+                    progressCallback, operationType, model, maxTurns);
+        } finally {
+            claudeGate.release();
+        }
+    }
+
+    private String sendToClaudeGated(String prompt, String sessionId, String workingDir,
                                  String conversationContext,
                                  Consumer<String> progressCallback,
                                  String operationType, String model, int maxTurns) throws Exception {

@@ -105,6 +105,15 @@ public enum ExpertRole {
     private final String displayName;
     private final String reviewPrompt;
 
+    public enum Domain {
+        ARCHITECTURE,
+        SECURITY,
+        DATA_PERF,
+        IMPLEMENTATION,
+        FRONTEND_UX,
+        PRODUCT_QA
+    }
+
     ExpertRole(String displayName, String reviewPrompt) {
         this.displayName = displayName;
         this.reviewPrompt = reviewPrompt;
@@ -112,6 +121,32 @@ public enum ExpertRole {
 
     public String getDisplayName() { return displayName; }
     public String getReviewPrompt() { return reviewPrompt; }
+
+    public Domain domain() {
+        return switch (this) {
+            case SOFTWARE_ARCHITECT, INFRASTRUCTURE_ENGINEER -> Domain.ARCHITECTURE;
+            case SECURITY_ENGINEER -> Domain.SECURITY;
+            case DATA_ANALYST, PERFORMANCE_ENGINEER -> Domain.DATA_PERF;
+            case SOFTWARE_ENGINEER, DEVOPS_ENGINEER -> Domain.IMPLEMENTATION;
+            case FRONTEND_ENGINEER, UX_EXPERT -> Domain.FRONTEND_UX;
+            case PRODUCT_MANAGER, QA_ENGINEER -> Domain.PRODUCT_QA;
+        };
+    }
+
+    /**
+     * Returns domains that should re-review when the given domain proposes changes.
+     * Includes the changed domain itself plus closely coupled domains.
+     */
+    public static java.util.Set<Domain> affectedDomains(Domain changedDomain) {
+        return switch (changedDomain) {
+            case ARCHITECTURE -> java.util.Set.of(Domain.ARCHITECTURE, Domain.IMPLEMENTATION);
+            case SECURITY -> java.util.Set.of(Domain.SECURITY, Domain.ARCHITECTURE);
+            case DATA_PERF -> java.util.Set.of(Domain.DATA_PERF, Domain.IMPLEMENTATION);
+            case IMPLEMENTATION -> java.util.Set.of(Domain.IMPLEMENTATION);
+            case FRONTEND_UX -> java.util.Set.of(Domain.FRONTEND_UX, Domain.PRODUCT_QA);
+            case PRODUCT_QA -> java.util.Set.of(Domain.PRODUCT_QA);
+        };
+    }
 
     public static ExpertRole[] reviewOrder() {
         return new ExpertRole[] { SOFTWARE_ARCHITECT, SECURITY_ENGINEER, INFRASTRUCTURE_ENGINEER,
