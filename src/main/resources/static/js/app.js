@@ -5,6 +5,7 @@ const app = {
         role: '',
         setupRequired: false,
         currentSuggestion: null,
+        currentStatus: null,
         settings: {},
         ws: null,
         clarification: {
@@ -196,6 +197,8 @@ const app = {
         document.getElementById('detailMeta').innerHTML =
             `<span>by ${this.esc(suggestion.authorName || 'Anonymous')}</span>` +
             `<span>${this.timeAgo(suggestion.createdAt)}</span>`;
+
+        this.state.currentStatus = suggestion.status;
 
         const statusEl = document.getElementById('detailStatus');
         statusEl.textContent = suggestion.status.replace('_', ' ');
@@ -475,6 +478,9 @@ const app = {
 
     // --- Expert Clarification Wizard ---
     showExpertClarificationWizard(questions, expertName) {
+        if (this.state.currentStatus && this.state.currentStatus !== 'EXPERT_REVIEW') {
+            return;
+        }
         const c = this.state.expertClarification;
         c.questions = questions;
         c.answers = questions.map(() => '');
@@ -514,6 +520,10 @@ const app = {
     },
 
     async submitExpertClarifications() {
+        if (this.state.currentStatus && this.state.currentStatus !== 'EXPERT_REVIEW') {
+            this.hideClarificationWizard();
+            return;
+        }
         const c = this.state.expertClarification;
         c.answers[c.currentIndex] = document.getElementById('clarificationAnswer').value.trim();
 
@@ -780,6 +790,8 @@ const app = {
                 break;
             }
             case 'status_update': {
+                this.state.currentStatus = data.status;
+
                 const statusEl = document.getElementById('detailStatus');
                 statusEl.textContent = data.status.replace('_', ' ');
                 statusEl.className = 'status-badge status-' + data.status;

@@ -375,6 +375,12 @@ public class SuggestionService {
     // --- Expert Review Pipeline ---
 
     private void startExpertReviewPipeline(Long suggestionId) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null || suggestion.getStatus() != SuggestionStatus.EXPERT_REVIEW) {
+            log.warn("Blocking expert review pipeline start for suggestion {} in non-EXPERT_REVIEW state",
+                    suggestionId);
+            return;
+        }
         broadcastExpertReviewStatus(suggestionId);
         runNextExpertReview(suggestionId);
     }
@@ -382,6 +388,12 @@ public class SuggestionService {
     private void runNextExpertReview(Long suggestionId) {
         Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
         if (suggestion == null) return;
+
+        if (suggestion.getStatus() != SuggestionStatus.EXPERT_REVIEW) {
+            log.warn("Aborting expert review step for suggestion {} — status is {}",
+                    suggestionId, suggestion.getStatus());
+            return;
+        }
 
         int step = suggestion.getExpertReviewStep() != null ? suggestion.getExpertReviewStep() : 0;
         ExpertRole[] experts = ExpertRole.reviewOrder();
@@ -800,6 +812,13 @@ public class SuggestionService {
                                                    List<ClarificationRequest.ClarificationAnswer> answers) {
         Suggestion suggestion = suggestionRepository.findById(suggestionId)
                 .orElseThrow(() -> new IllegalArgumentException("Suggestion not found"));
+
+        if (suggestion.getStatus() != SuggestionStatus.EXPERT_REVIEW) {
+            log.warn("Rejecting expert clarification for suggestion {} in state {}",
+                    suggestionId, suggestion.getStatus());
+            throw new IllegalStateException(
+                    "Expert reviews cannot be submitted when the suggestion is in " + suggestion.getStatus() + " state.");
+        }
 
         suggestion.setLastActivityAt(Instant.now());
         suggestion.setPendingClarificationQuestions(null);
