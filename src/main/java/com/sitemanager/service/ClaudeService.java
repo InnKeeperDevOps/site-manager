@@ -885,20 +885,15 @@ public class ClaudeService {
     }
 
     /**
-     * Merge the main-repo default branch into a suggestion repo's working branch.
-     * Returns true if the merge brought in new changes, false if already up to date.
-     * Throws on merge conflict or error.
+     * Fetch the latest from origin in the given repo directory.
      */
-    public boolean mergeSuggestionRepoWithMain(String suggestionRepoDir) throws Exception {
-        File dir = new File(suggestionRepoDir);
-        if (!dir.exists() || !new File(suggestionRepoDir, ".git").exists()) {
-            log.warn("Suggestion repo does not exist: {}", suggestionRepoDir);
-            return false;
+    public void fetchOrigin(String repoDir) throws Exception {
+        File dir = new File(repoDir);
+        if (!dir.exists() || !new File(repoDir, ".git").exists()) {
+            log.warn("Repo does not exist for fetch: {}", repoDir);
+            return;
         }
 
-        String headBefore = getHeadCommit(suggestionRepoDir);
-
-        // Fetch the latest from origin
         ProcessBuilder fetchPb = new ProcessBuilder("git", "fetch", "origin");
         fetchPb.directory(dir);
         fetchPb.redirectErrorStream(true);
@@ -911,46 +906,29 @@ public class ClaudeService {
         Process fetchProcess = fetchPb.start();
         consumeStream(fetchProcess.getInputStream());
         fetchProcess.waitFor();
+        log.info("Fetched origin in {}", repoDir);
+    }
 
-        // Detect default branch name (main or master)
-        String defaultBranch = detectDefaultBranch(suggestionRepoDir);
+    /**
+     * Detect the default branch name (main or master) for the given repo.
+     */
+    public String detectDefaultBranchPublic(String repoDir) throws Exception {
+        return detectDefaultBranch(repoDir);
+    }
 
-        // Merge origin/<default-branch> into current branch
-        ProcessBuilder mergePb = new ProcessBuilder("git", "merge", "origin/" + defaultBranch);
-        mergePb.directory(dir);
-        mergePb.redirectErrorStream(true);
-        mergePb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
-        Process mergeProcess = mergePb.start();
-
-        StringBuilder mergeOutput = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(mergeProcess.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                mergeOutput.append(line).append("\n");
-                log.info("Git merge suggestion-repo: {}", line);
-            }
-        }
-
-        int exitCode = mergeProcess.waitFor();
-        if (exitCode != 0) {
-            // Abort the failed merge so the repo is left clean
-            ProcessBuilder abortPb = new ProcessBuilder("git", "merge", "--abort");
-            abortPb.directory(dir);
-            abortPb.redirectErrorStream(true);
-            Process abortProcess = abortPb.start();
-            consumeStream(abortProcess.getInputStream());
-            abortProcess.waitFor();
-            throw new RuntimeException("Merge conflict in " + suggestionRepoDir +
-                    ": " + mergeOutput.toString().trim());
-        }
-
-        String headAfter = getHeadCommit(suggestionRepoDir);
-        boolean changed = !headAfter.equals(headBefore);
-        if (changed) {
-            log.info("Suggestion repo {} merged main: {} -> {}", suggestionRepoDir, headBefore, headAfter);
-        }
-        return changed;
+    /**
+     * Ask Claude to merge origin/&lt;default-branch&gt; into the suggestion repo's current branch,
+     * resolving any merge conflicts intelligently rather than aborting.
+     * Also asks Claude to assess whether the merged changes affect the suggestion's plan.
+     *
+     * Returns a CompletableFuture with Claude's JSON response describing the merge result.
+     */
+    public CompletableFuture<String> mergeWithMain(String sessionId, String workingDir,
+                                                     String mergePrompt,
+                                                     String conversationContext,
+                                                     Consumer<String> progressCallback) {
+        return sendToClaudeAsync(mergePrompt, sessionId, workingDir, conversationContext,
+                progressCallback, "merge-main", resolveModel(), 0);
     }
 
     /**

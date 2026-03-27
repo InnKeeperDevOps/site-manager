@@ -2272,13 +2272,13 @@ public class SuggestionService {
     }
 
     /**
-     * When main-repo is re-cloned (settings changed), merge main into all active
-     * suggestion repo branches and ask Claude to re-evaluate any that changed.
+     * When main-repo is re-cloned (settings changed), have Claude merge main into all active
+     * suggestion repo branches — resolving any conflicts intelligently — and re-evaluate impact.
      */
     @Async
     @EventListener
     public void onMainRepoUpdated(MainRepoUpdatedEvent event) {
-        log.info("Main repo updated, merging into active suggestion repos...");
+        log.info("Main repo updated, asking Claude to merge into active suggestion repos...");
 
         List<String> suggestionRepoDirs = claudeService.findSuggestionRepoDirs();
         if (suggestionRepoDirs.isEmpty()) {
@@ -2297,21 +2297,11 @@ public class SuggestionService {
         );
 
         for (String repoDir : suggestionRepoDirs) {
-            try {
-                boolean changed = claudeService.mergeSuggestionRepoWithMain(repoDir);
-                if (changed) {
-                    // Find the suggestion that owns this repo and trigger re-evaluation
-                    triggerReEvaluationForRepo(repoDir, activeStatuses);
-                }
-            } catch (Exception e) {
-                log.error("Failed to merge main into {}: {}", repoDir, e.getMessage());
-                // Notify the suggestion owner about the merge conflict
-                notifyMergeConflict(repoDir, e.getMessage(), activeStatuses);
-            }
+            triggerClaudeMergeForRepo(repoDir, activeStatuses);
         }
     }
 
-    private void triggerReEvaluationForRepo(String repoDir, List<SuggestionStatus> activeStatuses) {
+    private void triggerClaudeMergeForRepo(String repoDir, List<SuggestionStatus> activeStatuses) {
         // Extract suggestion ID from directory name (e.g., "suggestion-42-repo")
         String dirName = new java.io.File(repoDir).getName();
         String idStr = dirName.replace("suggestion-", "").replace("-repo", "");
@@ -2322,31 +2312,54 @@ public class SuggestionService {
                 return;
             }
 
-            log.info("Main branch merged into suggestion {} repo — asking Claude to check for impact",
-                    suggestionId);
+            // Fetch the latest from origin (lightweight git operation)
+            try {
+                claudeService.fetchOrigin(repoDir);
+            } catch (Exception e) {
+                log.error("Failed to fetch origin for {}: {}", repoDir, e.getMessage());
+                return;
+            }
+
+            // Detect default branch for the merge prompt
+            String defaultBranch;
+            try {
+                defaultBranch = claudeService.detectDefaultBranchPublic(repoDir);
+            } catch (Exception e) {
+                log.error("Failed to detect default branch for {}: {}", repoDir, e.getMessage());
+                return;
+            }
+
+            log.info("Asking Claude to merge origin/{} into suggestion {} repo and assess impact",
+                    defaultBranch, suggestionId);
 
             addMessage(suggestionId, SenderType.SYSTEM, "System",
-                    "The project has been updated. Checking if these changes affect this suggestion...");
+                    "The project has been updated. Merging changes and checking impact on this suggestion...");
 
-            suggestion.setCurrentPhase("Checking for changes that affect this suggestion...");
+            suggestion.setCurrentPhase("Merging project updates and checking for impact...");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
 
-            String reEvalPrompt = buildReEvaluationPrompt(suggestion);
+            String mergePrompt = buildMergeAndReEvalPrompt(suggestion, defaultBranch);
             String context = buildConversationContext(suggestionId);
 
-            claudeService.continueConversation(
-                    suggestion.getClaudeSessionId(),
-                    reEvalPrompt,
+            // Use the suggestion's existing session if available, otherwise create a new one
+            String sessionId = suggestion.getClaudeSessionId();
+            if (sessionId == null || sessionId.isBlank()) {
+                sessionId = "suggestion-" + suggestionId;
+            }
+
+            claudeService.mergeWithMain(
+                    sessionId,
+                    repoDir,
+                    mergePrompt,
                     context,
-                    claudeService.getMainRepoDir(),
                     progress -> {
                         webSocketHandler.sendToSuggestion(suggestionId,
                                 "{\"type\":\"progress\",\"content\":\"" +
                                         escapeJson(progress) + "\"}");
                     }
             ).thenAccept(response -> {
-                handleAiResponse(suggestionId, response);
+                handleMergeResponse(suggestionId, response);
             });
 
         } catch (NumberFormatException e) {
@@ -2354,43 +2367,63 @@ public class SuggestionService {
         }
     }
 
-    private void notifyMergeConflict(String repoDir, String errorMessage,
-                                      List<SuggestionStatus> activeStatuses) {
-        String dirName = new java.io.File(repoDir).getName();
-        String idStr = dirName.replace("suggestion-", "").replace("-repo", "");
-        try {
-            Long suggestionId = Long.parseLong(idStr);
-            Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
-            if (suggestion == null || !activeStatuses.contains(suggestion.getStatus())) {
-                return;
-            }
+    private void handleMergeResponse(Long suggestionId, String response) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) return;
 
+        // Check if Claude reported a merge failure
+        if (response.contains("MERGE_FAILED")) {
+            log.error("Claude failed to merge main into suggestion {}: {}", suggestionId, response);
+            String displayMessage = extractMessage(response);
             addMessage(suggestionId, SenderType.SYSTEM, "System",
-                    "The project was updated with changes that conflict with this suggestion's work. " +
-                    "This suggestion may need to be re-evaluated.");
+                    "The project was updated but the changes could not be merged automatically. " +
+                    (displayMessage != null ? displayMessage : "This suggestion may need to be re-evaluated."));
 
             suggestion.setStatus(SuggestionStatus.DISCUSSING);
             suggestion.setCurrentPhase("Conflicting changes — needs attention");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
-        } catch (NumberFormatException e) {
-            log.warn("Could not parse suggestion ID from directory: {}", dirName);
+            return;
         }
+
+        // Check if merge reported no changes
+        if (response.contains("NO_CHANGES")) {
+            log.info("No changes to merge for suggestion {}", suggestionId);
+            suggestion.setCurrentPhase(null);
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+            return;
+        }
+
+        // Merge succeeded with changes — delegate to the standard AI response handler
+        // which handles PLAN_READY and NEEDS_CLARIFICATION
+        handleAiResponse(suggestionId, response);
     }
 
-    private String buildReEvaluationPrompt(Suggestion suggestion) {
-        return "The project has just been updated with new changes that have been " +
-                "incorporated into this suggestion's workspace.\n\n" +
+    private String buildMergeAndReEvalPrompt(Suggestion suggestion, String defaultBranch) {
+        return "The main repository has been updated with new changes. You need to merge these " +
+                "changes into the current suggestion branch and then assess the impact.\n\n" +
+                "STEP 1 — MERGE:\n" +
+                "Run: git merge origin/" + defaultBranch + "\n" +
+                "- If the merge completes cleanly with no changes (already up to date), respond with:\n" +
+                "  {\"status\": \"NO_CHANGES\", \"message\": \"Already up to date.\"}\n" +
+                "- If the merge completes cleanly WITH changes, proceed to Step 2.\n" +
+                "- If there are merge conflicts:\n" +
+                "  * Review each conflicting file to understand both sides\n" +
+                "  * Resolve conflicts intelligently, preserving both the suggestion's changes " +
+                "and the incoming main branch changes where possible\n" +
+                "  * Stage the resolved files with git add and complete the merge commit with git commit\n" +
+                "  * Then proceed to Step 2\n" +
+                "- If you cannot resolve the conflicts, respond with:\n" +
+                "  {\"status\": \"MERGE_FAILED\", \"message\": \"<explanation of what went wrong>\"}\n\n" +
+                "STEP 2 — ASSESS IMPACT (only if merge brought in changes):\n" +
+                "Review the merged changes and determine if they affect this suggestion's plan.\n\n" +
                 "Original suggestion:\n" +
                 "Title: " + suggestion.getTitle() + "\n" +
                 "Description: " + suggestion.getDescription() + "\n" +
                 (suggestion.getPlanSummary() != null ?
                         "Current plan: " + suggestion.getPlanSummary() + "\n" : "") +
-                "\nPlease review the recent changes and determine:\n" +
-                "1. Do the new changes affect this suggestion's plan?\n" +
-                "2. Does the plan need to be adjusted?\n" +
-                "3. Are there any new questions for the user?\n\n" +
-                "COMMUNICATION RULES:\n" +
+                "\nCOMMUNICATION RULES:\n" +
                 "- All messages and questions MUST be written in plain, non-technical language.\n" +
                 "- NEVER mention programming languages, frameworks, file names, or technical details.\n" +
                 "- Describe things from the user's perspective.\n\n" +
