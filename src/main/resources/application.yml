@@ -35,6 +35,10 @@ app:
   claude-model-expert: ${CLAUDE_MODEL_EXPERT:}
   # Max turns for expert reviews (limits tool-use loops). Default 3.
   claude-max-turns-expert: ${CLAUDE_MAX_TURNS_EXPERT:3}
+  # Max concurrent Claude CLI processes. Prevents resource exhaustion during batch expert reviews.
+  claude-max-concurrent: ${CLAUDE_MAX_CONCURRENT:2}
+  # Max Claude CLI calls per minute (sliding window). Prevents runaway loops from overwhelming the API.
+  claude-max-calls-per-minute: ${CLAUDE_MAX_CALLS_PER_MINUTE:10}
   git-ssh-key-path: ${GIT_SSH_KEY_PATH:}
   # Enable verbose CLI logging: logs full command, real-time stdout, and response at INFO level.
   # Also passes --verbose to the Claude CLI subprocess for turn-by-turn output.

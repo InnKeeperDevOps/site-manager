@@ -76,6 +76,9 @@ public class Suggestion {
     @Column
     private Integer totalExpertReviewRounds;
 
+    @Column(columnDefinition = "TEXT")
+    private String expertReviewChangedDomains;
+
     @Column(nullable = false)
     private Instant createdAt;
 
@@ -150,4 +153,6 @@ public class Suggestion {
     public void setExpertReviewPlanChanged(Boolean expertReviewPlanChanged) { this.expertReviewPlanChanged = expertReviewPlanChanged; }
     public Integer getTotalExpertReviewRounds() { return totalExpertReviewRounds; }
     public void setTotalExpertReviewRounds(Integer totalExpertReviewRounds) { this.totalExpertReviewRounds = totalExpertReviewRounds; }
+    public String getExpertReviewChangedDomains() { return expertReviewChangedDomains; }
+    public void setExpertReviewChangedDomains(String expertReviewChangedDomains) { this.expertReviewChangedDomains = expertReviewChangedDomains; }
 }
