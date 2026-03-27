@@ -1132,6 +1132,63 @@ public class ClaudeService {
     }
 
     /**
+     * Stage all changes and commit them in the given repo directory.
+     * Returns true if a commit was created, false if there were no changes to commit.
+     */
+    public boolean commitAllChanges(String repoDir, String message) throws Exception {
+        File dir = new File(repoDir);
+
+        // Step 1: Stage all changes
+        ProcessBuilder addPb = new ProcessBuilder("git", "add", "-A");
+        addPb.directory(dir);
+        addPb.redirectErrorStream(true);
+        addPb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+        Process addProcess = addPb.start();
+        String addOutput = new String(addProcess.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+        int addExit = addProcess.waitFor();
+        if (addExit != 0) {
+            throw new RuntimeException("Failed to stage changes: " + addOutput);
+        }
+
+        // Step 2: Check if there are staged changes (exit 0 = no changes, exit 1 = changes exist)
+        ProcessBuilder diffPb = new ProcessBuilder("git", "diff", "--cached", "--quiet");
+        diffPb.directory(dir);
+        diffPb.redirectErrorStream(true);
+        diffPb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+        Process diffProcess = diffPb.start();
+        diffProcess.getInputStream().readAllBytes();
+        int diffExit = diffProcess.waitFor();
+        if (diffExit == 0) {
+            log.warn("No changes to commit in {}", repoDir);
+            return false;
+        }
+
+        // Step 3: Commit with embedded author identity (avoids needing global git config)
+        ProcessBuilder commitPb = new ProcessBuilder(
+                "git", "-c", "user.name=Site Manager", "-c", "user.email=site-manager@noreply",
+                "commit", "-m", message);
+        commitPb.directory(dir);
+        commitPb.redirectErrorStream(true);
+        commitPb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+        Process commitProcess = commitPb.start();
+        StringBuilder commitOutput = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(commitProcess.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                commitOutput.append(line).append("\n");
+                log.info("Git commit: {}", line);
+            }
+        }
+        int commitExit = commitProcess.waitFor();
+        if (commitExit != 0) {
+            throw new RuntimeException("Failed to commit changes: " + commitOutput.toString().trim());
+        }
+        log.info("Committed changes in {} with message: {}", repoDir, message);
+        return true;
+    }
+
+    /**
      * Get the commit log for a branch relative to the default branch.
      */
     public String getCommitLog(String repoDir) throws Exception {

@@ -1687,7 +1687,26 @@ public class SuggestionService {
         suggestion.setChangelogEntry(changelog);
         suggestionRepository.save(suggestion);
 
-        // Step 2: Push branch
+        // Step 2: Commit all changes made by Claude
+        String commitMessage = "Suggestion #" + suggestion.getId() + ": " + suggestion.getTitle();
+        try {
+            boolean hasChanges = claudeService.commitAllChanges(workDir, commitMessage);
+            if (!hasChanges) {
+                log.warn("No changes to commit for suggestion {}", suggestion.getId());
+                addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                        "No file changes were detected. The branch has no new commits.");
+            }
+        } catch (Exception e) {
+            log.error("Failed to commit changes for suggestion {}: {}", suggestion.getId(), e.getMessage(), e);
+            addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                    "Completed the work, but couldn't commit the changes. An admin can retry this.");
+            suggestion.setCurrentPhase("Done, but commit failed");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+            return;
+        }
+
+        // Step 3: Push branch
         try {
             suggestion.setCurrentPhase("Submitting changes...");
             suggestionRepository.save(suggestion);
@@ -1707,7 +1726,7 @@ public class SuggestionService {
             return;
         }
 
-        // Step 3: Create PR
+        // Step 4: Create PR
         if (githubToken == null || githubToken.isBlank()) {
             log.warn("No GitHub token configured, skipping PR creation for suggestion {}", suggestion.getId());
             addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
