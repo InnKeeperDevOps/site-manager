@@ -5,6 +5,7 @@ const app = {
         role: '',
         setupRequired: false,
         currentSuggestion: null,
+        currentStatus: null,
         settings: {},
         ws: null,
         clarification: {
@@ -197,6 +198,8 @@ const app = {
             `<span>by ${this.esc(suggestion.authorName || 'Anonymous')}</span>` +
             `<span>${this.timeAgo(suggestion.createdAt)}</span>`;
 
+        this.state.currentStatus = suggestion.status;
+
         const statusEl = document.getElementById('detailStatus');
         statusEl.textContent = suggestion.status.replace('_', ' ');
         statusEl.className = 'status-badge status-' + suggestion.status;
@@ -226,9 +229,14 @@ const app = {
             planEl.style.display = 'none';
         }
 
-        // Expert review status — show if in EXPERT_REVIEW or if step data exists
+        // Expert review status — fetch current progress if in EXPERT_REVIEW
         if (suggestion.status === 'EXPERT_REVIEW' && suggestion.expertReviewStep != null) {
             this.state.expertReview.active = true;
+            this.api('/suggestions/' + id + '/expert-review-status').then(data => {
+                if (data && data.experts) {
+                    this.updateExpertReview(data);
+                }
+            });
         } else {
             this.state.expertReview.active = false;
         }
@@ -475,6 +483,9 @@ const app = {
 
     // --- Expert Clarification Wizard ---
     showExpertClarificationWizard(questions, expertName) {
+        if (this.state.currentStatus && this.state.currentStatus !== 'EXPERT_REVIEW') {
+            return;
+        }
         const c = this.state.expertClarification;
         c.questions = questions;
         c.answers = questions.map(() => '');
@@ -514,6 +525,10 @@ const app = {
     },
 
     async submitExpertClarifications() {
+        if (this.state.currentStatus && this.state.currentStatus !== 'EXPERT_REVIEW') {
+            this.hideClarificationWizard();
+            return;
+        }
         const c = this.state.expertClarification;
         c.answers[c.currentIndex] = document.getElementById('clarificationAnswer').value.trim();
 
@@ -780,6 +795,8 @@ const app = {
                 break;
             }
             case 'status_update': {
+                this.state.currentStatus = data.status;
+
                 const statusEl = document.getElementById('detailStatus');
                 statusEl.textContent = data.status.replace('_', ' ');
                 statusEl.className = 'status-badge status-' + data.status;

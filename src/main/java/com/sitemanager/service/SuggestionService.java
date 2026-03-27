@@ -34,6 +34,7 @@ import java.util.ArrayList;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @Service
@@ -250,6 +251,11 @@ public class SuggestionService {
 
         // Try to parse JSON response to determine status
         if (response.contains("PLAN_READY")) {
+            if (isPlanLocked(suggestion.getStatus())) {
+                log.warn("Ignoring PLAN_READY for suggestion {} — plan is locked in {} state",
+                        suggestionId, suggestion.getStatus());
+                return;
+            }
             addMessage(suggestionId, SenderType.AI, "Claude", displayMessage);
             suggestion.setPlanSummary(extractPlan(response));
             suggestion.setPlanDisplaySummary(extractPlanDisplaySummary(response));
@@ -375,6 +381,12 @@ public class SuggestionService {
     // --- Expert Review Pipeline ---
 
     private void startExpertReviewPipeline(Long suggestionId) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null || suggestion.getStatus() != SuggestionStatus.EXPERT_REVIEW) {
+            log.warn("Blocking expert review pipeline start for suggestion {} in non-EXPERT_REVIEW state",
+                    suggestionId);
+            return;
+        }
         broadcastExpertReviewStatus(suggestionId);
         runNextExpertReview(suggestionId);
     }
@@ -382,6 +394,12 @@ public class SuggestionService {
     private void runNextExpertReview(Long suggestionId) {
         Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
         if (suggestion == null) return;
+
+        if (suggestion.getStatus() != SuggestionStatus.EXPERT_REVIEW) {
+            log.warn("Aborting expert review step for suggestion {} — status is {}",
+                    suggestionId, suggestion.getStatus());
+            return;
+        }
 
         int step = suggestion.getExpertReviewStep() != null ? suggestion.getExpertReviewStep() : 0;
         ExpertRole[] experts = ExpertRole.reviewOrder();
@@ -662,8 +680,8 @@ public class SuggestionService {
                     broadcastExpertClarificationQuestions(suggestionId, questions, expert);
                 } else {
                     // No actual questions — treat as approved
-                    appendExpertNote(suggestion, expert, "Approved. " + analysis);
-                    addMessage(suggestionId, SenderType.AI, expert.getDisplayName(), message);
+                    appendExpertNote(suggestion, expert, "Approved.");
+                    addMessage(suggestionId, SenderType.AI, expert.getDisplayName(), "Approved.");
                     advanceExpertStep(suggestion);
                     runNextExpertReview(suggestionId);
                 }
@@ -704,8 +722,8 @@ public class SuggestionService {
             }
 
             // APPROVED or unknown status — record note and advance
-            appendExpertNote(suggestion, expert, "Approved. " + analysis);
-            addMessage(suggestionId, SenderType.AI, expert.getDisplayName(), message);
+            appendExpertNote(suggestion, expert, "Approved.");
+            addMessage(suggestionId, SenderType.AI, expert.getDisplayName(), "Approved.");
             advanceExpertStep(suggestion);
             runNextExpertReview(suggestionId);
 
@@ -737,6 +755,12 @@ public class SuggestionService {
             }
         } catch (Exception e) {
             log.warn("Failed to parse reviewer response: {}", e.getMessage());
+        }
+
+        if (applyChanges && isPlanLocked(suggestion.getStatus())) {
+            log.warn("Blocking expert plan changes for suggestion {} — plan is locked in {} state",
+                    suggestionId, suggestion.getStatus());
+            applyChanges = false;
         }
 
         if (applyChanges) {
@@ -800,6 +824,13 @@ public class SuggestionService {
                                                    List<ClarificationRequest.ClarificationAnswer> answers) {
         Suggestion suggestion = suggestionRepository.findById(suggestionId)
                 .orElseThrow(() -> new IllegalArgumentException("Suggestion not found"));
+
+        if (suggestion.getStatus() != SuggestionStatus.EXPERT_REVIEW) {
+            log.warn("Rejecting expert clarification for suggestion {} in state {}",
+                    suggestionId, suggestion.getStatus());
+            throw new IllegalStateException(
+                    "Expert reviews cannot be submitted when the suggestion is in " + suggestion.getStatus() + " state.");
+        }
 
         suggestion.setLastActivityAt(Instant.now());
         suggestion.setPendingClarificationQuestions(null);
@@ -1028,6 +1059,13 @@ public class SuggestionService {
         });
     }
 
+    private boolean isPlanLocked(SuggestionStatus status) {
+        return status == SuggestionStatus.APPROVED
+            || status == SuggestionStatus.IN_PROGRESS
+            || status == SuggestionStatus.TESTING
+            || status == SuggestionStatus.COMPLETED;
+    }
+
     private boolean isSubstantiveAnalysis(String analysis) {
         if (analysis == null || analysis.isBlank()) return false;
         return analysis.trim().length() >= MIN_EXPERT_ANALYSIS_LENGTH;
@@ -1088,6 +1126,12 @@ public class SuggestionService {
     }
 
     private void savePlanTasksFromNode(Long suggestionId, JsonNode tasksNode) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion != null && isPlanLocked(suggestion.getStatus())) {
+            log.warn("Blocking plan task changes for suggestion {} — plan is locked in {} state",
+                    suggestionId, suggestion.getStatus());
+            return;
+        }
         planTaskRepository.deleteBySuggestionId(suggestionId);
 
         int order = 1;
@@ -1107,31 +1151,44 @@ public class SuggestionService {
         broadcastTasks(suggestionId);
     }
 
-    private void broadcastExpertReviewStatus(Long suggestionId) {
+    public Map<String, Object> getExpertReviewStatus(Long suggestionId) {
         Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
-        if (suggestion == null) return;
+        if (suggestion == null || suggestion.getExpertReviewStep() == null) return null;
 
-        int currentStep = suggestion.getExpertReviewStep() != null ? suggestion.getExpertReviewStep() : 0;
+        int currentStep = suggestion.getExpertReviewStep();
         ExpertRole[] experts = ExpertRole.reviewOrder();
-
-        StringBuilder json = new StringBuilder();
         int currentRound = suggestion.getExpertReviewRound() != null ? suggestion.getExpertReviewRound() : 1;
-        json.append("{\"type\":\"expert_review_status\",\"currentStep\":").append(currentStep);
-        json.append(",\"totalSteps\":").append(experts.length);
-        json.append(",\"round\":").append(currentRound);
-        json.append(",\"maxRounds\":").append(MAX_EXPERT_REVIEW_ROUNDS);
-        json.append(",\"experts\":[");
+
+        List<Map<String, String>> expertList = new ArrayList<>();
         for (int i = 0; i < experts.length; i++) {
-            if (i > 0) json.append(",");
             String stepStatus;
             if (i < currentStep) stepStatus = "completed";
             else if (i == currentStep) stepStatus = "in_progress";
             else stepStatus = "pending";
-            json.append("{\"name\":\"").append(escapeJson(experts[i].getDisplayName()))
-                .append("\",\"status\":\"").append(stepStatus).append("\"}");
+            expertList.add(Map.of("name", experts[i].getDisplayName(), "status", stepStatus));
         }
-        json.append("]}");
-        webSocketHandler.sendToSuggestion(suggestionId, json.toString());
+
+        return Map.of(
+                "currentStep", currentStep,
+                "totalSteps", experts.length,
+                "round", currentRound,
+                "maxRounds", MAX_EXPERT_REVIEW_ROUNDS,
+                "experts", expertList
+        );
+    }
+
+    private void broadcastExpertReviewStatus(Long suggestionId) {
+        Map<String, Object> status = getExpertReviewStatus(suggestionId);
+        if (status == null) return;
+
+        try {
+            String json = objectMapper.writeValueAsString(status);
+            // Add the type field for WebSocket message routing
+            String wsJson = "{\"type\":\"expert_review_status\"," + json.substring(1);
+            webSocketHandler.sendToSuggestion(suggestionId, wsJson);
+        } catch (JsonProcessingException e) {
+            log.error("Failed to serialize expert review status", e);
+        }
     }
 
     private void broadcastExpertClarificationQuestions(Long suggestionId, List<String> questions,
@@ -1239,7 +1296,6 @@ public class SuggestionService {
                 addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
                         "Something went wrong while working on this suggestion. It can be retried.");
                 suggestion.setCurrentPhase("Failed — can retry");
-                suggestion.setStatus(SuggestionStatus.PLANNED);
                 suggestionRepository.save(suggestion);
                 broadcastUpdate(suggestion);
             }
@@ -1346,7 +1402,6 @@ public class SuggestionService {
             // Task failed — notify and halt
             addMessage(suggestionId, SenderType.AI, "Claude", result);
             suggestion.setCurrentPhase("Task " + taskOrder + " failed — can retry");
-            suggestion.setStatus(SuggestionStatus.PLANNED);
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
         } else {
@@ -1375,6 +1430,24 @@ public class SuggestionService {
         if (optTask.isEmpty()) return;
 
         PlanTask task = optTask.get();
+
+        // Block review if the task is already being reviewed or is not in COMPLETED state
+        if (task.getStatus() == TaskStatus.REVIEWING) {
+            log.warn("Task {} for suggestion {} is already being reviewed, skipping duplicate review",
+                    taskOrder, suggestionId);
+            return;
+        }
+        if (task.getStatus() != TaskStatus.COMPLETED) {
+            log.warn("Task {} for suggestion {} is in {} state, not eligible for expert review",
+                    taskOrder, suggestionId, task.getStatus());
+            return;
+        }
+
+        // Mark as REVIEWING to prevent re-entry
+        task.setStatus(TaskStatus.REVIEWING);
+        planTaskRepository.save(task);
+        broadcastTaskUpdate(suggestionId, task);
+
         List<PlanTask> allTasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
         int totalTasks = allTasks.size();
 
@@ -1399,7 +1472,11 @@ public class SuggestionService {
                                    String plan, String workDir,
                                    ExpertRole[] reviewers, int reviewerIndex) {
         if (reviewerIndex >= reviewers.length) {
-            // All reviewers approved — move to next task
+            // All reviewers approved — mark task as COMPLETED and move to next task
+            task.setStatus(TaskStatus.COMPLETED);
+            planTaskRepository.save(task);
+            broadcastTaskUpdate(suggestionId, task);
+
             Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
             if (suggestion == null) return;
 
@@ -1529,8 +1606,8 @@ public class SuggestionService {
 
             // APPROVED — record note and move to next reviewer
             broadcastExpertNote(suggestionId, reviewer.getDisplayName(),
-                    "Task " + taskOrder + " review: Approved. " + analysis);
-            addMessage(suggestionId, SenderType.AI, reviewer.getDisplayName(), message);
+                    "Task " + taskOrder + ": Approved.");
+            addMessage(suggestionId, SenderType.AI, reviewer.getDisplayName(), "Approved.");
             runTaskReviewer(suggestionId, taskOrder, task, plan, workDir, reviewers, reviewerIndex + 1);
 
         } catch (Exception e) {
@@ -1579,7 +1656,6 @@ public class SuggestionService {
             createPrAsync(suggestion.getId());
             return;
         } else if (result.contains("FAILED")) {
-            suggestion.setStatus(SuggestionStatus.PLANNED);
             suggestion.setCurrentPhase("Something went wrong — can retry");
         } else {
             suggestion.setStatus(SuggestionStatus.TESTING);
@@ -1722,6 +1798,12 @@ public class SuggestionService {
     // --- Plan Task management ---
 
     private void savePlanTasks(Long suggestionId, String response) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion != null && isPlanLocked(suggestion.getStatus())) {
+            log.warn("Blocking plan task changes for suggestion {} — plan is locked in {} state",
+                    suggestionId, suggestion.getStatus());
+            return;
+        }
         try {
             // Delete any existing tasks for this suggestion (re-plan scenario)
             planTaskRepository.deleteBySuggestionId(suggestionId);

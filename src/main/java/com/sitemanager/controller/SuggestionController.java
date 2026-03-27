@@ -7,6 +7,7 @@ import com.sitemanager.dto.VoteRequest;
 import com.sitemanager.model.PlanTask;
 import com.sitemanager.model.Suggestion;
 import com.sitemanager.model.SuggestionMessage;
+import com.sitemanager.model.enums.SuggestionStatus;
 import com.sitemanager.service.SiteSettingsService;
 import com.sitemanager.service.SuggestionService;
 import com.sitemanager.service.VoteService;
@@ -102,10 +103,29 @@ public class SuggestionController {
         return ResponseEntity.ok(suggestionService.getPlanTasks(id));
     }
 
+    @GetMapping("/{id}/expert-review-status")
+    public ResponseEntity<?> getExpertReviewStatus(@PathVariable Long id) {
+        var status = suggestionService.getExpertReviewStatus(id);
+        if (status == null) {
+            return ResponseEntity.ok(Map.of());
+        }
+        return ResponseEntity.ok(status);
+    }
+
     @PostMapping("/{id}/expert-clarifications")
     public ResponseEntity<?> submitExpertClarifications(@PathVariable Long id,
                                                           @Valid @RequestBody ClarificationRequest request,
                                                           HttpSession session) {
+        var suggestion = suggestionService.getSuggestion(id);
+        if (suggestion.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+        if (suggestion.get().getStatus() != SuggestionStatus.EXPERT_REVIEW) {
+            return ResponseEntity.status(409)
+                    .body(Map.of("error", "Expert reviews cannot be submitted when the suggestion is in "
+                            + suggestion.get().getStatus() + " state."));
+        }
+
         String username = (String) session.getAttribute("username");
         String senderName = username != null ? username :
                 (request.getSenderName() != null ? request.getSenderName() : "Anonymous");
