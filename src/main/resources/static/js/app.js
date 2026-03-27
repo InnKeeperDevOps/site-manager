@@ -229,9 +229,14 @@ const app = {
             planEl.style.display = 'none';
         }
 
-        // Expert review status — show if in EXPERT_REVIEW or if step data exists
+        // Expert review status — fetch current progress if in EXPERT_REVIEW
         if (suggestion.status === 'EXPERT_REVIEW' && suggestion.expertReviewStep != null) {
             this.state.expertReview.active = true;
+            this.api('/suggestions/' + id + '/expert-review-status').then(data => {
+                if (data && data.experts) {
+                    this.updateExpertReview(data);
+                }
+            });
         } else {
             this.state.expertReview.active = false;
         }

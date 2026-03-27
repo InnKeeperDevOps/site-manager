@@ -34,6 +34,7 @@ import java.util.ArrayList;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @Service
@@ -1150,31 +1151,44 @@ public class SuggestionService {
         broadcastTasks(suggestionId);
     }
 
-    private void broadcastExpertReviewStatus(Long suggestionId) {
+    public Map<String, Object> getExpertReviewStatus(Long suggestionId) {
         Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
-        if (suggestion == null) return;
+        if (suggestion == null || suggestion.getExpertReviewStep() == null) return null;
 
-        int currentStep = suggestion.getExpertReviewStep() != null ? suggestion.getExpertReviewStep() : 0;
+        int currentStep = suggestion.getExpertReviewStep();
         ExpertRole[] experts = ExpertRole.reviewOrder();
-
-        StringBuilder json = new StringBuilder();
         int currentRound = suggestion.getExpertReviewRound() != null ? suggestion.getExpertReviewRound() : 1;
-        json.append("{\"type\":\"expert_review_status\",\"currentStep\":").append(currentStep);
-        json.append(",\"totalSteps\":").append(experts.length);
-        json.append(",\"round\":").append(currentRound);
-        json.append(",\"maxRounds\":").append(MAX_EXPERT_REVIEW_ROUNDS);
-        json.append(",\"experts\":[");
+
+        List<Map<String, String>> expertList = new ArrayList<>();
         for (int i = 0; i < experts.length; i++) {
-            if (i > 0) json.append(",");
             String stepStatus;
             if (i < currentStep) stepStatus = "completed";
             else if (i == currentStep) stepStatus = "in_progress";
             else stepStatus = "pending";
-            json.append("{\"name\":\"").append(escapeJson(experts[i].getDisplayName()))
-                .append("\",\"status\":\"").append(stepStatus).append("\"}");
+            expertList.add(Map.of("name", experts[i].getDisplayName(), "status", stepStatus));
         }
-        json.append("]}");
-        webSocketHandler.sendToSuggestion(suggestionId, json.toString());
+
+        return Map.of(
+                "currentStep", currentStep,
+                "totalSteps", experts.length,
+                "round", currentRound,
+                "maxRounds", MAX_EXPERT_REVIEW_ROUNDS,
+                "experts", expertList
+        );
+    }
+
+    private void broadcastExpertReviewStatus(Long suggestionId) {
+        Map<String, Object> status = getExpertReviewStatus(suggestionId);
+        if (status == null) return;
+
+        try {
+            String json = objectMapper.writeValueAsString(status);
+            // Add the type field for WebSocket message routing
+            String wsJson = "{\"type\":\"expert_review_status\"," + json.substring(1);
+            webSocketHandler.sendToSuggestion(suggestionId, wsJson);
+        } catch (JsonProcessingException e) {
+            log.error("Failed to serialize expert review status", e);
+        }
     }
 
     private void broadcastExpertClarificationQuestions(Long suggestionId, List<String> questions,

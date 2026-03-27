@@ -103,6 +103,15 @@ public class SuggestionController {
         return ResponseEntity.ok(suggestionService.getPlanTasks(id));
     }
 
+    @GetMapping("/{id}/expert-review-status")
+    public ResponseEntity<?> getExpertReviewStatus(@PathVariable Long id) {
+        var status = suggestionService.getExpertReviewStatus(id);
+        if (status == null) {
+            return ResponseEntity.ok(Map.of());
+        }
+        return ResponseEntity.ok(status);
+    }
+
     @PostMapping("/{id}/expert-clarifications")
     public ResponseEntity<?> submitExpertClarifications(@PathVariable Long id,
                                                           @Valid @RequestBody ClarificationRequest request,
