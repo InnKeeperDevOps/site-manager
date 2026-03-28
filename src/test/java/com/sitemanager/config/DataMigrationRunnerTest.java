@@ -60,6 +60,23 @@ class DataMigrationRunnerTest {
     }
 
     @Test
+    void registrationsEnabledColumn_existsAfterStartup() {
+        String tableSql = jdbcTemplate.queryForObject(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='site_settings'",
+                String.class);
+        assertNotNull(tableSql, "site_settings table should exist");
+        assertTrue(tableSql.contains("registrations_enabled"),
+                "site_settings table should have registrations_enabled column after migration");
+    }
+
+    @Test
+    void ensureRegistrationsEnabledColumn_isIdempotent() {
+        // Running migration multiple times should not throw or create duplicate columns
+        assertDoesNotThrow(() -> dataMigrationRunner.run(),
+                "Running migration again should not throw when column already exists");
+    }
+
+    @Test
     void existingUserRoleUsers_areAssignedToRegisteredUserGroup_onMigration() {
         // Create a USER-role user with no group
         User user = new User("migration-test-user", "hash", UserRole.USER);

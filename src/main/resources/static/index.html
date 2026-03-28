@@ -67,10 +67,13 @@
                         Continue as guest
                     </a>
                 </p>
-                <p style="text-align:center;margin-top:0.5rem">
+                <p id="createAccountLink" style="text-align:center;margin-top:0.5rem">
                     <a href="#" onclick="app.navigate('register')" style="color:var(--text-muted);font-size:0.85rem">
                         Create an account
                     </a>
+                </p>
+                <p id="registrationsClosedMsg" style="text-align:center;margin-top:0.5rem;color:var(--text-muted);font-size:0.85rem;display:none">
+                    Registrations are currently closed.
                 </p>
             </div>
         </div>
@@ -322,6 +325,13 @@
                     </div>
                     <label class="toggle">
                         <input type="checkbox" id="autoMergePr">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">Allow new user registrations</span>
+                    <label class="toggle">
+                        <input type="checkbox" id="registrationsEnabled">
                         <span class="toggle-slider"></span>
                     </label>
                 </div>

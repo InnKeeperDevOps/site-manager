@@ -5,13 +5,16 @@ import com.sitemanager.dto.RegisterRequest;
 import com.sitemanager.dto.SetupRequest;
 import com.sitemanager.exception.AccountDeniedException;
 import com.sitemanager.exception.AccountPendingApprovalException;
+import com.sitemanager.model.SiteSettings;
 import com.sitemanager.model.User;
 import com.sitemanager.model.UserGroup;
 import com.sitemanager.model.enums.UserRole;
 import com.sitemanager.repository.UserGroupRepository;
 import com.sitemanager.repository.UserRepository;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.Optional;
 
@@ -70,6 +73,11 @@ public class AuthService {
     }
 
     public User register(RegisterRequest request) {
+        SiteSettings settings = siteSettingsService.getSettings();
+        if (!settings.isRegistrationsEnabled()) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Registrations are currently disabled");
+        }
+
         if (userRepository.findByUsername(request.getUsername()).isPresent()) {
             throw new IllegalArgumentException("Username already taken");
         }

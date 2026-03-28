@@ -16,7 +16,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.Optional;
 
@@ -47,10 +49,11 @@ class AuthServiceTest {
         if (userGroupRepository.findByName("Registered User").isEmpty()) {
             userGroupRepository.save(new UserGroup("Registered User", true, true, true, false, false, false));
         }
-        // Reset requireRegistrationApproval to false (default) before each test
+        // Reset settings to defaults before each test
         SiteSettings settings = siteSettingsRepository.findAll().stream()
                 .findFirst().orElseGet(SiteSettings::new);
         settings.setRequireRegistrationApproval(false);
+        settings.setRegistrationsEnabled(true);
         siteSettingsRepository.save(settings);
     }
 
@@ -208,6 +211,22 @@ class AuthServiceTest {
         assertFalse(user.isApproved());
         assertFalse(user.isDenied());
         assertEquals("Registered User", user.getGroup().getName());
+    }
+
+    @Test
+    void register_whenRegistrationsDisabled_throwsForbidden() {
+        SiteSettings settings = siteSettingsRepository.findAll().stream()
+                .findFirst().orElseGet(SiteSettings::new);
+        settings.setRegistrationsEnabled(false);
+        siteSettingsRepository.save(settings);
+
+        RegisterRequest request = new RegisterRequest();
+        request.setUsername("blockeduser");
+        request.setPassword("password123");
+
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+                () -> authService.register(request));
+        assertEquals(HttpStatus.FORBIDDEN, ex.getStatusCode());
     }
 
     @Test

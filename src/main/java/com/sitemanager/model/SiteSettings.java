@@ -49,6 +49,9 @@ public class SiteSettings {
     @Column(columnDefinition = "BOOLEAN DEFAULT 0")
     private boolean requireRegistrationApproval = false;
 
+    @Column(name = "registrations_enabled", nullable = false)
+    private boolean registrationsEnabled = true;
+
     public SiteSettings() {}
 
     public Long getId() { return id; }
@@ -79,4 +82,6 @@ public class SiteSettings {
     public void setAutoMergePr(boolean v) { this.autoMergePr = v; }
     public boolean isRequireRegistrationApproval() { return requireRegistrationApproval; }
     public void setRequireRegistrationApproval(boolean v) { this.requireRegistrationApproval = v; }
+    public boolean isRegistrationsEnabled() { return registrationsEnabled; }
+    public void setRegistrationsEnabled(boolean v) { this.registrationsEnabled = v; }
 }

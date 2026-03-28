@@ -150,4 +150,34 @@ class SiteSettingsServiceTest {
 
         assertFalse(result.isRequireRegistrationApproval());
     }
+
+    @Test
+    void getSettings_registrationsEnabled_trueByDefault() {
+        SiteSettings settings = settingsService.getSettings();
+
+        assertTrue(settings.isRegistrationsEnabled());
+    }
+
+    @Test
+    void updateSettings_registrationsEnabled_canBeDisabled() {
+        SiteSettings update = new SiteSettings();
+        update.setRegistrationsEnabled(false);
+
+        SiteSettings result = settingsService.updateSettings(update);
+
+        assertFalse(result.isRegistrationsEnabled());
+    }
+
+    @Test
+    void updateSettings_registrationsEnabled_canBeReEnabled() {
+        SiteSettings disable = new SiteSettings();
+        disable.setRegistrationsEnabled(false);
+        settingsService.updateSettings(disable);
+
+        SiteSettings enable = new SiteSettings();
+        enable.setRegistrationsEnabled(true);
+        SiteSettings result = settingsService.updateSettings(enable);
+
+        assertTrue(result.isRegistrationsEnabled());
+    }
 }
