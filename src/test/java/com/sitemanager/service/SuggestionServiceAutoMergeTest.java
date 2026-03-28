@@ -7,6 +7,7 @@ import com.sitemanager.model.enums.SuggestionStatus;
 import com.sitemanager.repository.PlanTaskRepository;
 import com.sitemanager.repository.SuggestionMessageRepository;
 import com.sitemanager.repository.SuggestionRepository;
+import com.sitemanager.repository.UserRepository;
 import com.sitemanager.websocket.SuggestionWebSocketHandler;
 import com.sitemanager.websocket.UserNotificationWebSocketHandler;
 import org.junit.jupiter.api.BeforeEach;
@@ -52,6 +53,11 @@ class SuggestionServiceAutoMergeTest {
 
         when(slackNotificationService.sendNotification(any(), any()))
                 .thenReturn(CompletableFuture.completedFuture(null));
+        when(slackNotificationService.sendApprovalNeededNotification(any()))
+                .thenReturn(CompletableFuture.completedFuture(null));
+
+        UserRepository userRepository = mock(UserRepository.class);
+        when(userRepository.findByRole(any())).thenReturn(java.util.List.of());
 
         SuggestionMessage savedMsg = mock(SuggestionMessage.class);
         when(savedMsg.getId()).thenReturn(0L);
@@ -67,7 +73,8 @@ class SuggestionServiceAutoMergeTest {
                 siteSettingsService,
                 webSocketHandler,
                 userNotificationHandler,
-                slackNotificationService
+                slackNotificationService,
+                userRepository
         );
     }
 

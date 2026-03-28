@@ -8,6 +8,7 @@ import com.sitemanager.model.PlanTask;
 import com.sitemanager.model.Suggestion;
 import com.sitemanager.model.SuggestionMessage;
 import com.sitemanager.model.enums.Permission;
+import com.sitemanager.model.enums.Priority;
 import com.sitemanager.model.enums.SuggestionStatus;
 import com.sitemanager.service.PermissionService;
 import com.sitemanager.service.SiteSettingsService;
@@ -39,8 +40,16 @@ public class SuggestionController {
     }
 
     @GetMapping
-    public ResponseEntity<List<Suggestion>> list() {
-        return ResponseEntity.ok(suggestionService.getAllSuggestions());
+    public ResponseEntity<List<Suggestion>> list(
+            @RequestParam(required = false) String search,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String sortBy,
+            @RequestParam(required = false) String sortDir,
+            @RequestParam(required = false) String priority) {
+        if (search == null && status == null && sortBy == null && sortDir == null && priority == null) {
+            return ResponseEntity.ok(suggestionService.getAllSuggestions());
+        }
+        return ResponseEntity.ok(suggestionService.getSuggestions(search, status, sortBy, sortDir, priority));
     }
 
     @GetMapping("/{id}")
@@ -81,7 +90,8 @@ public class SuggestionController {
                 request.getTitle(),
                 request.getDescription(),
                 userId,
-                authorName
+                authorName,
+                request.getPriority()
         );
 
         return ResponseEntity.ok(suggestion);
@@ -117,6 +127,18 @@ public class SuggestionController {
     @GetMapping("/{id}/tasks")
     public ResponseEntity<List<PlanTask>> getTasks(@PathVariable Long id) {
         return ResponseEntity.ok(suggestionService.getPlanTasks(id));
+    }
+
+    @GetMapping("/{id}/review-summary")
+    public ResponseEntity<?> getReviewSummary(@PathVariable Long id) {
+        if (suggestionService.getSuggestion(id).isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+        List<?> summary = suggestionService.getReviewSummary(id);
+        if (summary == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(summary);
     }
 
     @GetMapping("/{id}/expert-review-status")
@@ -183,6 +205,34 @@ public class SuggestionController {
             return ResponseEntity.status(403).body(Map.of("error", "Admin access required"));
         }
         return ResponseEntity.ok(suggestionService.retryPrCreation(id));
+    }
+
+    @PatchMapping("/{id}/priority")
+    public ResponseEntity<?> updatePriority(@PathVariable Long id,
+                                            @RequestBody Map<String, String> body,
+                                            HttpSession session) {
+        var suggestion = suggestionService.getSuggestion(id);
+        if (suggestion.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+
+        Long userId = (Long) session.getAttribute("userId");
+        boolean isAdmin = permissionService.hasPermission(session, Permission.APPROVE_DENY_SUGGESTIONS);
+        boolean isAuthor = userId != null && userId.equals(suggestion.get().getAuthorId());
+
+        if (!isAdmin && !isAuthor) {
+            return ResponseEntity.status(403).body(Map.of("error", "Only admins or the suggestion author can change priority."));
+        }
+
+        String priorityStr = body.get("priority");
+        Priority priority;
+        try {
+            priority = Priority.valueOf(priorityStr.toUpperCase());
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Invalid priority value. Must be HIGH, MEDIUM, or LOW."));
+        }
+
+        return ResponseEntity.ok(suggestionService.updatePriority(id, priority));
     }
 
     @PostMapping("/{id}/vote")

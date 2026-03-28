@@ -10,24 +10,31 @@ import com.sitemanager.dto.ClarificationRequest;
 import com.sitemanager.model.Suggestion;
 import com.sitemanager.model.SuggestionMessage;
 import com.sitemanager.model.enums.ExpertRole;
+import com.sitemanager.model.enums.Priority;
 import com.sitemanager.model.enums.SenderType;
 import com.sitemanager.model.enums.SuggestionStatus;
 import com.sitemanager.model.PlanTask;
 import com.sitemanager.model.enums.TaskStatus;
+import com.sitemanager.model.User;
+import com.sitemanager.model.enums.UserRole;
 import com.sitemanager.repository.PlanTaskRepository;
 import com.sitemanager.repository.SuggestionMessageRepository;
 import com.sitemanager.repository.SuggestionRepository;
+import com.sitemanager.repository.UserRepository;
 import com.sitemanager.websocket.SuggestionWebSocketHandler;
 import com.sitemanager.websocket.UserNotificationWebSocketHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import jakarta.persistence.criteria.Predicate;
 import java.io.File;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -59,6 +66,7 @@ public class SuggestionService {
     private final SuggestionWebSocketHandler webSocketHandler;
     private final UserNotificationWebSocketHandler userNotificationHandler;
     private final SlackNotificationService slackNotificationService;
+    private final UserRepository userRepository;
 
     public SuggestionService(SuggestionRepository suggestionRepository,
                              SuggestionMessageRepository messageRepository,
@@ -67,7 +75,8 @@ public class SuggestionService {
                              SiteSettingsService settingsService,
                              SuggestionWebSocketHandler webSocketHandler,
                              UserNotificationWebSocketHandler userNotificationHandler,
-                             SlackNotificationService slackNotificationService) {
+                             SlackNotificationService slackNotificationService,
+                             UserRepository userRepository) {
         this.suggestionRepository = suggestionRepository;
         this.messageRepository = messageRepository;
         this.planTaskRepository = planTaskRepository;
@@ -76,6 +85,7 @@ public class SuggestionService {
         this.webSocketHandler = webSocketHandler;
         this.userNotificationHandler = userNotificationHandler;
         this.slackNotificationService = slackNotificationService;
+        this.userRepository = userRepository;
     }
 
     /**
@@ -169,6 +179,72 @@ public class SuggestionService {
         return suggestionRepository.findAllByOrderByCreatedAtDesc();
     }
 
+    public List<Suggestion> getSuggestions(String search, String status, String sortBy, String sortDir,
+                                            String priority) {
+        Specification<Suggestion> spec = (root, query, cb) -> {
+            List<Predicate> predicates = new ArrayList<>();
+
+            if (search != null && !search.isBlank()) {
+                String pattern = "%" + search.toLowerCase() + "%";
+                predicates.add(cb.or(
+                        cb.like(cb.lower(root.get("title")), pattern),
+                        cb.like(cb.lower(root.get("description")), pattern)
+                ));
+            }
+
+            if (status != null && !status.isBlank()) {
+                try {
+                    SuggestionStatus s = SuggestionStatus.valueOf(status.toUpperCase());
+                    predicates.add(cb.equal(root.get("status"), s));
+                } catch (IllegalArgumentException ignored) {
+                    // unknown status — ignore filter
+                }
+            }
+
+            if (priority != null && !priority.isBlank()) {
+                try {
+                    Priority p = Priority.valueOf(priority.toUpperCase());
+                    predicates.add(cb.equal(root.get("priority"), p));
+                } catch (IllegalArgumentException ignored) {
+                    // unknown priority — ignore filter
+                }
+            }
+
+            return predicates.isEmpty() ? cb.conjunction() : cb.and(predicates.toArray(new Predicate[0]));
+        };
+
+        boolean sortByPriority = "priority".equalsIgnoreCase(sortBy);
+        Sort.Direction dir = "asc".equalsIgnoreCase(sortDir) ? Sort.Direction.ASC : Sort.Direction.DESC;
+
+        if (sortByPriority) {
+            // Priority has a meaningful order (HIGH > MEDIUM > LOW); sort in-memory.
+            // priorityOrder assigns 0=HIGH, 1=MEDIUM, 2=LOW, so ascending by priorityOrder = HIGH first.
+            // "desc" means highest priority first (HIGH, MEDIUM, LOW) → ascending by priorityOrder.
+            // "asc" means lowest priority first (LOW, MEDIUM, HIGH) → descending by priorityOrder.
+            List<Suggestion> results = suggestionRepository.findAll(spec, Sort.by(Sort.Direction.ASC, "createdAt"));
+            int multiplier = dir == Sort.Direction.DESC ? 1 : -1;
+            results.sort((a, b) -> multiplier * Integer.compare(priorityOrder(a.getPriority()), priorityOrder(b.getPriority())));
+            return results;
+        }
+
+        String sortField = switch (sortBy == null ? "" : sortBy.toLowerCase()) {
+            case "votes" -> "upVotes";
+            case "date" -> "updatedAt";
+            default -> "createdAt";
+        };
+
+        return suggestionRepository.findAll(spec, Sort.by(dir, sortField));
+    }
+
+    private static int priorityOrder(Priority p) {
+        if (p == null) return 1;
+        return switch (p) {
+            case HIGH -> 0;
+            case MEDIUM -> 1;
+            case LOW -> 2;
+        };
+    }
+
     public Optional<Suggestion> getSuggestion(Long id) {
         return suggestionRepository.findById(id);
     }
@@ -178,12 +254,22 @@ public class SuggestionService {
     }
 
     @Transactional
-    public Suggestion createSuggestion(String title, String description, Long authorId, String authorName) {
+    public Suggestion updatePriority(Long id, Priority priority) {
+        Suggestion suggestion = suggestionRepository.findById(id)
+                .orElseThrow(() -> new IllegalArgumentException("Suggestion not found: " + id));
+        suggestion.setPriority(priority);
+        return suggestionRepository.save(suggestion);
+    }
+
+    @Transactional
+    public Suggestion createSuggestion(String title, String description, Long authorId, String authorName,
+                                       Priority priority) {
         Suggestion suggestion = new Suggestion();
         suggestion.setTitle(title);
         suggestion.setDescription(description);
         suggestion.setAuthorId(authorId);
         suggestion.setAuthorName(authorName != null ? authorName : "Anonymous");
+        suggestion.setPriority(priority != null ? priority : Priority.MEDIUM);
         suggestion.setStatus(SuggestionStatus.DRAFT);
         suggestion.setClaudeSessionId(claudeService.generateSessionId());
         suggestion = suggestionRepository.save(suggestion);
@@ -480,6 +566,7 @@ public class SuggestionService {
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
             broadcastExpertReviewStatus(suggestionId);
+            notifyAdminsApprovalNeeded(suggestion);
             return;
         }
 
@@ -874,6 +961,7 @@ public class SuggestionService {
                 suggestionRepository.save(suggestion);
                 broadcastUpdate(suggestion);
                 broadcastExpertReviewStatus(suggestionId);
+                notifyAdminsApprovalNeeded(suggestion);
                 return;
             }
 
@@ -1212,6 +1300,54 @@ public class SuggestionService {
 
     public int getExpertReviewTotalSteps() {
         return ExpertRole.reviewOrder().length;
+    }
+
+    public List<Map<String, String>> getReviewSummary(Long suggestionId) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) return null;
+
+        List<Suggestion.ExpertReviewEntry> parsed = suggestion.getExpertReviewSummary();
+        java.util.Set<String> reviewedNames = new java.util.LinkedHashSet<>();
+        java.util.Map<String, Suggestion.ExpertReviewEntry> byName = new java.util.LinkedHashMap<>();
+        for (Suggestion.ExpertReviewEntry e : parsed) {
+            byName.put(e.getExpertName(), e);
+            reviewedNames.add(e.getExpertName());
+        }
+
+        List<Map<String, String>> result = new ArrayList<>();
+
+        // Include all known experts; mark unreviewed ones as PENDING
+        for (ExpertRole role : ExpertRole.reviewOrder()) {
+            String displayName = role.getDisplayName();
+            if (byName.containsKey(displayName)) {
+                Suggestion.ExpertReviewEntry entry = byName.get(displayName);
+                result.add(Map.of(
+                        "expertName", entry.getExpertName(),
+                        "status", entry.getStatus(),
+                        "keyPoint", entry.getKeyPoint()
+                ));
+            } else {
+                result.add(Map.of(
+                        "expertName", displayName,
+                        "status", "PENDING",
+                        "keyPoint", "No review yet"
+                ));
+            }
+        }
+
+        // Append any extra notes (e.g. user guidance) not matching a known expert role
+        for (Suggestion.ExpertReviewEntry entry : parsed) {
+            if (!java.util.Arrays.stream(ExpertRole.reviewOrder())
+                    .anyMatch(r -> r.getDisplayName().equals(entry.getExpertName()))) {
+                result.add(Map.of(
+                        "expertName", entry.getExpertName(),
+                        "status", entry.getStatus(),
+                        "keyPoint", entry.getKeyPoint()
+                ));
+            }
+        }
+
+        return result;
     }
 
     @Transactional
@@ -2539,5 +2675,32 @@ public class SuggestionService {
                 "\"message\": \"The plan has been updated to account for the recent project changes.\", " +
                 "\"plan\": \"<updated plan>\"}\n\n" +
                 "IMPORTANT: When status is NEEDS_CLARIFICATION, you MUST include a \"questions\" array.";
+    }
+
+    /**
+     * Notifies all admin users (via WebSocket) and sends a Slack message (async, fire-and-forget)
+     * when a suggestion transitions to PLANNED and is ready for admin approval.
+     * The Slack call is isolated so Slack downtime cannot affect the status transition.
+     */
+    private void notifyAdminsApprovalNeeded(Suggestion suggestion) {
+        // Fire-and-forget Slack notification — Slack downtime must not block anything
+        slackNotificationService.sendApprovalNeededNotification(suggestion);
+
+        // Notify all admin users via WebSocket
+        Map<String, Object> payload = Map.of(
+                "type", "approval_needed",
+                "suggestionId", suggestion.getId() != null ? suggestion.getId() : 0L,
+                "suggestionTitle", suggestion.getTitle() != null ? suggestion.getTitle() : ""
+        );
+
+        List<User> admins = new ArrayList<>();
+        admins.addAll(userRepository.findByRole(UserRole.ROOT_ADMIN));
+        admins.addAll(userRepository.findByRole(UserRole.ADMIN));
+
+        for (User admin : admins) {
+            if (admin.getUsername() != null) {
+                userNotificationHandler.sendNotificationToUser(admin.getUsername(), payload);
+            }
+        }
     }
 }

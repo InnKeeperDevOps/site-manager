@@ -3,11 +3,14 @@ package com.sitemanager.service;
 import com.sitemanager.model.Suggestion;
 import com.sitemanager.model.SuggestionMessage;
 import com.sitemanager.model.SiteSettings;
+import com.sitemanager.model.User;
 import com.sitemanager.model.enums.SenderType;
 import com.sitemanager.model.enums.SuggestionStatus;
+import com.sitemanager.model.enums.UserRole;
 import com.sitemanager.repository.PlanTaskRepository;
 import com.sitemanager.repository.SuggestionMessageRepository;
 import com.sitemanager.repository.SuggestionRepository;
+import com.sitemanager.repository.UserRepository;
 import com.sitemanager.websocket.SuggestionWebSocketHandler;
 import com.sitemanager.websocket.UserNotificationWebSocketHandler;
 import org.junit.jupiter.api.BeforeEach;
@@ -31,6 +34,7 @@ class SuggestionServiceNotificationTest {
     private UserNotificationWebSocketHandler userNotificationHandler;
     private SiteSettingsService siteSettingsService;
     private SlackNotificationService slackNotificationService;
+    private UserRepository userRepository;
     private SuggestionService service;
 
     @BeforeEach
@@ -41,13 +45,19 @@ class SuggestionServiceNotificationTest {
         userNotificationHandler = mock(UserNotificationWebSocketHandler.class);
         siteSettingsService = mock(SiteSettingsService.class);
         slackNotificationService = mock(SlackNotificationService.class);
+        userRepository = mock(UserRepository.class);
 
         // Return a completed future so async calls don't hang
         when(slackNotificationService.sendNotification(any(), any()))
                 .thenReturn(CompletableFuture.completedFuture(null));
+        when(slackNotificationService.sendApprovalNeededNotification(any()))
+                .thenReturn(CompletableFuture.completedFuture(null));
 
         // Return a real SiteSettings so getSettings().getXxx() doesn't NPE
         when(siteSettingsService.getSettings()).thenReturn(new SiteSettings());
+
+        // Return empty admin lists by default
+        when(userRepository.findByRole(any())).thenReturn(List.of());
 
         // Return a non-null message so addMessage's msg.getId() doesn't NPE
         SuggestionMessage savedMsg = mock(SuggestionMessage.class);
@@ -62,7 +72,8 @@ class SuggestionServiceNotificationTest {
                 siteSettingsService,
                 webSocketHandler,
                 userNotificationHandler,
-                slackNotificationService
+                slackNotificationService,
+                userRepository
         );
     }
 
@@ -252,10 +263,104 @@ class SuggestionServiceNotificationTest {
         verify(slackNotificationService, never()).sendNotification(any(), any());
     }
 
+    // --- notifyAdminsApprovalNeeded tests ---
+
+    @Test
+    void notifyAdminsApprovalNeeded_sendsSlackApprovalNotification() throws Exception {
+        Suggestion suggestion = new Suggestion();
+        suggestion.setTitle("Enable dark mode");
+
+        invokeNotifyAdminsApprovalNeeded(suggestion);
+
+        verify(slackNotificationService).sendApprovalNeededNotification(suggestion);
+    }
+
+    @Test
+    void notifyAdminsApprovalNeeded_sendsWebSocketToEachAdmin() throws Exception {
+        Suggestion suggestion = new Suggestion();
+        suggestion.setId(55L);
+        suggestion.setTitle("Feature request");
+
+        User rootAdmin = new User();
+        rootAdmin.setUsername("rootadmin");
+        User admin = new User();
+        admin.setUsername("adminuser");
+
+        when(userRepository.findByRole(UserRole.ROOT_ADMIN)).thenReturn(List.of(rootAdmin));
+        when(userRepository.findByRole(UserRole.ADMIN)).thenReturn(List.of(admin));
+
+        invokeNotifyAdminsApprovalNeeded(suggestion);
+
+        Map<String, Object> expectedPayload = Map.of(
+                "type", "approval_needed",
+                "suggestionId", 55L,
+                "suggestionTitle", "Feature request"
+        );
+        verify(userNotificationHandler).sendNotificationToUser(eq("rootadmin"), eq(expectedPayload));
+        verify(userNotificationHandler).sendNotificationToUser(eq("adminuser"), eq(expectedPayload));
+    }
+
+    @Test
+    void notifyAdminsApprovalNeeded_noAdmins_onlySendsSlack() throws Exception {
+        Suggestion suggestion = new Suggestion();
+        suggestion.setId(56L);
+        suggestion.setTitle("Another feature");
+
+        when(userRepository.findByRole(UserRole.ROOT_ADMIN)).thenReturn(List.of());
+        when(userRepository.findByRole(UserRole.ADMIN)).thenReturn(List.of());
+
+        invokeNotifyAdminsApprovalNeeded(suggestion);
+
+        verify(slackNotificationService).sendApprovalNeededNotification(suggestion);
+        verify(userNotificationHandler, never()).sendNotificationToUser(any(), any());
+    }
+
+    @Test
+    void notifyAdminsApprovalNeeded_nullTitle_usesEmptyString() throws Exception {
+        Suggestion suggestion = new Suggestion();
+        suggestion.setId(57L);
+        suggestion.setTitle(null);
+
+        User admin = new User();
+        admin.setUsername("adminuser");
+        when(userRepository.findByRole(UserRole.ADMIN)).thenReturn(List.of(admin));
+
+        invokeNotifyAdminsApprovalNeeded(suggestion);
+
+        Map<String, Object> expectedPayload = Map.of(
+                "type", "approval_needed",
+                "suggestionId", 57L,
+                "suggestionTitle", ""
+        );
+        verify(userNotificationHandler).sendNotificationToUser(eq("adminuser"), eq(expectedPayload));
+    }
+
+    @Test
+    void notifyAdminsApprovalNeeded_adminWithNullUsername_skipsNotification() throws Exception {
+        Suggestion suggestion = new Suggestion();
+        suggestion.setId(58L);
+        suggestion.setTitle("Some feature");
+
+        User adminWithNullUsername = new User();
+        adminWithNullUsername.setUsername(null);
+        when(userRepository.findByRole(UserRole.ADMIN)).thenReturn(List.of(adminWithNullUsername));
+
+        invokeNotifyAdminsApprovalNeeded(suggestion);
+
+        verify(userNotificationHandler, never()).sendNotificationToUser(any(), any());
+    }
+
     private void invokeBroadcastClarificationQuestions(Long suggestionId, List<String> questions) throws Exception {
         Method method = SuggestionService.class.getDeclaredMethod(
                 "broadcastClarificationQuestions", Long.class, List.class);
         method.setAccessible(true);
         method.invoke(service, suggestionId, questions);
+    }
+
+    private void invokeNotifyAdminsApprovalNeeded(Suggestion suggestion) throws Exception {
+        Method method = SuggestionService.class.getDeclaredMethod(
+                "notifyAdminsApprovalNeeded", Suggestion.class);
+        method.setAccessible(true);
+        method.invoke(service, suggestion);
     }
 }

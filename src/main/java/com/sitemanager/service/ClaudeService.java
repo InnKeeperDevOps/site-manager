@@ -259,6 +259,60 @@ public class ClaudeService {
     }
 
     /**
+     * Call the Anthropic Messages API directly with a hard 30-second timeout.
+     * Returns the text content of the first response message.
+     * Throws {@link java.net.http.HttpTimeoutException} when the 30-second limit is exceeded.
+     */
+    public String getRecommendations(String prompt) throws Exception {
+        String apiKey = System.getenv("ANTHROPIC_API_KEY");
+        if (apiKey == null || apiKey.isBlank()) {
+            throw new IllegalStateException("ANTHROPIC_API_KEY is not configured");
+        }
+
+        String model = resolveModel();
+        if (model == null || model.isBlank()) {
+            model = "claude-sonnet-4-6";
+        }
+
+        String requestBody = objectMapper.writeValueAsString(Map.of(
+                "model", model,
+                "max_tokens", 1024,
+                "messages", List.of(Map.of("role", "user", "content", prompt))
+        ));
+
+        HttpClient client = HttpClient.newBuilder()
+                .connectTimeout(java.time.Duration.ofSeconds(10))
+                .build();
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create("https://api.anthropic.com/v1/messages"))
+                .header("Content-Type", "application/json")
+                .header("x-api-key", apiKey)
+                .header("anthropic-version", "2023-06-01")
+                .timeout(java.time.Duration.ofSeconds(30))
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody, StandardCharsets.UTF_8))
+                .build();
+
+        log.info("[CLAUDE-RECOMMENDATIONS] Sending request, model={}", model);
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+
+        if (response.statusCode() != 200) {
+            log.error("[CLAUDE-RECOMMENDATIONS] API error: status={}, body={}",
+                    response.statusCode(), truncate(response.body(), 500));
+            throw new RuntimeException("Anthropic API returned status " + response.statusCode());
+        }
+
+        JsonNode root = objectMapper.readTree(response.body());
+        JsonNode contentArr = root.path("content");
+        if (!contentArr.isArray() || contentArr.size() == 0) {
+            throw new RuntimeException("Unexpected response structure from Anthropic API");
+        }
+        String text = contentArr.get(0).path("text").asText("");
+        log.info("[CLAUDE-RECOMMENDATIONS] Received response, length={}", text.length());
+        return text;
+    }
+
+    /**
      * Create a new branch from the current HEAD in the given repo directory.
      */
     public void createBranch(String repoDir, String branchName) throws Exception {
