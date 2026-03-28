@@ -1,7 +1,10 @@
 package com.sitemanager.controller;
 
 import com.sitemanager.dto.LoginRequest;
+import com.sitemanager.dto.RegisterRequest;
 import com.sitemanager.dto.SetupRequest;
+import com.sitemanager.exception.AccountDeniedException;
+import com.sitemanager.exception.AccountPendingApprovalException;
 import com.sitemanager.model.User;
 import com.sitemanager.service.AuthService;
 import jakarta.servlet.http.HttpSession;
@@ -55,18 +58,22 @@ public class AuthController {
 
     @PostMapping("/login")
     public ResponseEntity<?> login(@Valid @RequestBody LoginRequest request, HttpSession session) {
-        return authService.authenticate(request)
-                .map(user -> {
-                    session.setAttribute("username", user.getUsername());
-                    session.setAttribute("role", user.getRole().name());
-                    session.setAttribute("userId", user.getId());
-                    return ResponseEntity.ok(Map.of(
-                            "message", "Login successful",
-                            "username", user.getUsername(),
-                            "role", user.getRole().name()
-                    ));
-                })
-                .orElse(ResponseEntity.status(401).body(Map.of("error", "Invalid credentials")));
+        try {
+            return authService.authenticate(request)
+                    .map(user -> {
+                        session.setAttribute("username", user.getUsername());
+                        session.setAttribute("role", user.getRole().name());
+                        session.setAttribute("userId", user.getId());
+                        return ResponseEntity.ok(Map.of(
+                                "message", "Login successful",
+                                "username", user.getUsername(),
+                                "role", user.getRole().name()
+                        ));
+                    })
+                    .orElse(ResponseEntity.status(401).body(Map.of("error", "Invalid credentials")));
+        } catch (AccountPendingApprovalException | AccountDeniedException e) {
+            return ResponseEntity.status(401).body(Map.of("error", e.getMessage()));
+        }
     }
 
     @PostMapping("/logout")
@@ -89,6 +96,26 @@ public class AuthController {
             ));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @PostMapping("/register")
+    public ResponseEntity<?> register(@Valid @RequestBody RegisterRequest request) {
+        try {
+            User user = authService.register(request);
+            boolean pending = !user.isApproved();
+            String message = pending
+                    ? "Registration submitted and pending admin approval"
+                    : "Registration successful";
+            return ResponseEntity.ok(Map.of(
+                    "message", message,
+                    "username", user.getUsername(),
+                    "pending", pending
+            ));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
         }
     }
 }

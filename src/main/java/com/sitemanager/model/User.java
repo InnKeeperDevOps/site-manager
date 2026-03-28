@@ -25,6 +25,16 @@ public class User {
     @Column(nullable = false)
     private Instant createdAt;
 
+    @ManyToOne
+    @JoinColumn(name = "group_id")
+    private UserGroup group;
+
+    @Column(columnDefinition = "BOOLEAN DEFAULT 0")
+    private boolean approved = false;
+
+    @Column(columnDefinition = "BOOLEAN DEFAULT 0")
+    private boolean denied = false;
+
     public User() {}
 
     public User(String username, String passwordHash, UserRole role) {
@@ -49,4 +59,10 @@ public class User {
     public void setRole(UserRole role) { this.role = role; }
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
+    public UserGroup getGroup() { return group; }
+    public void setGroup(UserGroup group) { this.group = group; }
+    public boolean isApproved() { return approved; }
+    public void setApproved(boolean approved) { this.approved = approved; }
+    public boolean isDenied() { return denied; }
+    public void setDenied(boolean denied) { this.denied = denied; }
 }

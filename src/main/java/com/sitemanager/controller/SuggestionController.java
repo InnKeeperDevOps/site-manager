@@ -7,7 +7,9 @@ import com.sitemanager.dto.VoteRequest;
 import com.sitemanager.model.PlanTask;
 import com.sitemanager.model.Suggestion;
 import com.sitemanager.model.SuggestionMessage;
+import com.sitemanager.model.enums.Permission;
 import com.sitemanager.model.enums.SuggestionStatus;
+import com.sitemanager.service.PermissionService;
 import com.sitemanager.service.SiteSettingsService;
 import com.sitemanager.service.SuggestionService;
 import com.sitemanager.service.VoteService;
@@ -26,12 +28,14 @@ public class SuggestionController {
     private final SuggestionService suggestionService;
     private final VoteService voteService;
     private final SiteSettingsService settingsService;
+    private final PermissionService permissionService;
 
     public SuggestionController(SuggestionService suggestionService, VoteService voteService,
-                                SiteSettingsService settingsService) {
+                                SiteSettingsService settingsService, PermissionService permissionService) {
         this.suggestionService = suggestionService;
         this.voteService = voteService;
         this.settingsService = settingsService;
+        this.permissionService = permissionService;
     }
 
     @GetMapping
@@ -56,10 +60,18 @@ public class SuggestionController {
         String username = (String) session.getAttribute("username");
         Long userId = (Long) session.getAttribute("userId");
 
-        // Check if anonymous suggestions are allowed
-        if (username == null && !settingsService.getSettings().isAllowAnonymousSuggestions()) {
-            return ResponseEntity.status(403)
-                    .body(Map.of("error", "Anonymous suggestions are not allowed. Please log in."));
+        if (username == null) {
+            // Anonymous path: check if anonymous suggestions are allowed
+            if (!settingsService.getSettings().isAllowAnonymousSuggestions()) {
+                return ResponseEntity.status(403)
+                        .body(Map.of("error", "Anonymous suggestions are not allowed. Please log in."));
+            }
+        } else {
+            // Logged-in path: check CREATE_SUGGESTIONS permission
+            if (!permissionService.hasPermission(session, Permission.CREATE_SUGGESTIONS)) {
+                return ResponseEntity.status(403)
+                        .body(Map.of("error", "You do not have permission to create suggestions."));
+            }
         }
 
         String authorName = username != null ? username :
@@ -78,6 +90,10 @@ public class SuggestionController {
     @PostMapping("/{id}/messages")
     public ResponseEntity<?> reply(@PathVariable Long id, @Valid @RequestBody MessageRequest request,
                                    HttpSession session) {
+        if (!permissionService.hasPermission(session, Permission.REPLY)) {
+            return ResponseEntity.status(403).body(Map.of("error", "You do not have permission to reply."));
+        }
+
         String username = (String) session.getAttribute("username");
         String senderName = username != null ? username :
                 (request.getSenderName() != null ? request.getSenderName() : "Anonymous");
@@ -145,8 +161,7 @@ public class SuggestionController {
 
     @PostMapping("/{id}/approve")
     public ResponseEntity<?> approve(@PathVariable Long id, HttpSession session) {
-        String role = (String) session.getAttribute("role");
-        if (!isAdmin(role)) {
+        if (!permissionService.hasPermission(session, Permission.APPROVE_DENY_SUGGESTIONS)) {
             return ResponseEntity.status(403).body(Map.of("error", "Admin access required"));
         }
         return ResponseEntity.ok(suggestionService.approveSuggestion(id));
@@ -155,8 +170,7 @@ public class SuggestionController {
     @PostMapping("/{id}/deny")
     public ResponseEntity<?> deny(@PathVariable Long id, @RequestBody(required = false) Map<String, String> body,
                                   HttpSession session) {
-        String role = (String) session.getAttribute("role");
-        if (!isAdmin(role)) {
+        if (!permissionService.hasPermission(session, Permission.APPROVE_DENY_SUGGESTIONS)) {
             return ResponseEntity.status(403).body(Map.of("error", "Admin access required"));
         }
         String reason = body != null ? body.get("reason") : null;
@@ -165,8 +179,7 @@ public class SuggestionController {
 
     @PostMapping("/{id}/retry-pr")
     public ResponseEntity<?> retryPr(@PathVariable Long id, HttpSession session) {
-        String role = (String) session.getAttribute("role");
-        if (!isAdmin(role)) {
+        if (!permissionService.hasPermission(session, Permission.APPROVE_DENY_SUGGESTIONS)) {
             return ResponseEntity.status(403).body(Map.of("error", "Admin access required"));
         }
         return ResponseEntity.ok(suggestionService.retryPrCreation(id));
@@ -175,6 +188,10 @@ public class SuggestionController {
     @PostMapping("/{id}/vote")
     public ResponseEntity<?> vote(@PathVariable Long id, @Valid @RequestBody VoteRequest request,
                                   HttpSession session) {
+        if (!permissionService.hasPermission(session, Permission.VOTE)) {
+            return ResponseEntity.status(403).body(Map.of("error", "You do not have permission to vote."));
+        }
+
         String username = (String) session.getAttribute("username");
         String voter = username != null ? username :
                 (request.getVoterIdentifier() != null ? request.getVoterIdentifier() :
@@ -188,9 +205,5 @@ public class SuggestionController {
         } catch (IllegalStateException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
-    }
-
-    private boolean isAdmin(String role) {
-        return "ROOT_ADMIN".equals(role) || "ADMIN".equals(role);
     }
 }
