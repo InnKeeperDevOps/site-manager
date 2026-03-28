@@ -67,6 +67,40 @@
                         Continue as guest
                     </a>
                 </p>
+                <p style="text-align:center;margin-top:0.5rem">
+                    <a href="#" onclick="app.navigate('register')" style="color:var(--text-muted);font-size:0.85rem">
+                        Create an account
+                    </a>
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Register View -->
+    <div id="registerView" class="view" style="display:none">
+        <div class="setup-container">
+            <h2>Create Account</h2>
+            <div class="card">
+                <form id="registerForm" onsubmit="app.register(event)">
+                    <div class="form-group">
+                        <label>Username</label>
+                        <input type="text" id="registerUsername" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Password</label>
+                        <input type="password" id="registerPassword" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Confirm Password</label>
+                        <input type="password" id="registerConfirmPassword" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary" style="width:100%">Create Account</button>
+                </form>
+                <p style="text-align:center;margin-top:1rem">
+                    <a href="#" onclick="app.navigate('login')" style="color:var(--text-muted);font-size:0.85rem">
+                        Back to Login
+                    </a>
+                </p>
             </div>
         </div>
     </div>
@@ -317,6 +351,11 @@
                         </div>
                         <button type="submit" class="btn btn-outline">Create Admin</button>
                     </form>
+                </div>
+
+                <div id="pendingUsersSection" style="display:none;margin-top:2rem;padding-top:1rem;border-top:1px solid var(--border)">
+                    <h3>Pending Registrations</h3>
+                    <div id="pendingUsersContainer" style="margin-top:0.75rem">No pending registrations</div>
                 </div>
             </div>
         </div>
