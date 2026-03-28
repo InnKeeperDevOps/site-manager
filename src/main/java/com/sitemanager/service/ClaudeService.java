@@ -1313,6 +1313,57 @@ public class ClaudeService {
     }
 
     /**
+     * Merge a pull request on GitHub using the REST API.
+     * Returns true if the merge succeeded (HTTP 200), false otherwise.
+     * IMPORTANT: never log the githubToken parameter at any log level.
+     */
+    public boolean mergePullRequest(String repoUrl, int prNumber, String githubToken) {
+        return mergePullRequest(repoUrl, prNumber, githubToken, HttpClient.newHttpClient());
+    }
+
+    /**
+     * Package-private overload for testability — callers should use the public variant.
+     */
+    boolean mergePullRequest(String repoUrl, int prNumber, String githubToken, HttpClient client) {
+        if (githubToken == null || githubToken.isEmpty()) {
+            log.warn("mergePullRequest called with null or empty token, skipping merge");
+            return false;
+        }
+
+        String ownerRepo = extractOwnerRepo(repoUrl);
+        if (ownerRepo == null) {
+            log.warn("mergePullRequest: cannot extract owner/repo from URL: {}", repoUrl);
+            return false;
+        }
+
+        try {
+            String jsonBody = objectMapper.writeValueAsString(Map.of("merge_method", "merge"));
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("https://api.github.com/repos/" + ownerRepo + "/pulls/" + prNumber + "/merge"))
+                    .header("Authorization", "Bearer " + githubToken) // token is never logged
+                    .header("Accept", "application/vnd.github+json")
+                    .header("Content-Type", "application/json")
+                    .PUT(HttpRequest.BodyPublishers.ofString(jsonBody))
+                    .build();
+
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() == 200) {
+                log.info("Successfully merged PR #{} in {}", prNumber, ownerRepo);
+                return true;
+            }
+
+            log.warn("mergePullRequest: GitHub returned status={} body={} for PR #{} in {}",
+                    response.statusCode(), response.body(), prNumber, ownerRepo);
+            return false;
+        } catch (Exception e) {
+            log.warn("mergePullRequest: unexpected error for PR #{} in {}: {}", prNumber, ownerRepo, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
      * Fetch the default branch name for a GitHub repository via the REST API.
      * Falls back to "main" if the API call fails.
      */

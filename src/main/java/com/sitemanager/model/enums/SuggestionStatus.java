@@ -10,6 +10,7 @@ public enum SuggestionStatus {
     TESTING,
     DEV_COMPLETE,
     FINAL_REVIEW,
+    MERGED,
     DENIED,
     TIMED_OUT
 }

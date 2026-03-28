@@ -39,6 +39,7 @@ class SuggestionRepositoryTest {
         s1.setDescription("desc");
         s1.setStatus(SuggestionStatus.DRAFT);
         s1.setAuthorName("a");
+        s1.setCreatedAt(Instant.now().minusSeconds(10));
         suggestionRepository.save(s1);
 
         Suggestion s2 = new Suggestion();

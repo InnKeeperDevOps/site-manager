@@ -217,7 +217,7 @@ const app = {
 
         const phaseEl = document.getElementById('detailPhase');
         const phaseText = document.getElementById('detailPhaseText');
-        const phaseFinished = ['DENIED', 'TIMED_OUT'].includes(suggestion.status) ||
+        const phaseFinished = ['DENIED', 'TIMED_OUT', 'MERGED'].includes(suggestion.status) ||
             (suggestion.status === 'DEV_COMPLETE' && (!suggestion.currentPhase || suggestion.currentPhase.startsWith('Implementation completed')));
         if (suggestion.currentPhase && !phaseFinished) {
             phaseEl.style.display = '';
@@ -871,7 +871,7 @@ const app = {
 
                 const phaseEl = document.getElementById('detailPhase');
                 const phaseText = document.getElementById('detailPhaseText');
-                const phaseFinished = ['DENIED', 'TIMED_OUT'].includes(data.status) ||
+                const phaseFinished = ['DENIED', 'TIMED_OUT', 'MERGED'].includes(data.status) ||
                     (data.status === 'DEV_COMPLETE' && (!data.currentPhase || data.currentPhase.startsWith('Implementation completed')));
                 if (data.currentPhase && !phaseFinished) {
                     phaseEl.style.display = '';
@@ -986,6 +986,7 @@ const app = {
         document.getElementById('settingAnonymous').checked = settings.allowAnonymousSuggestions;
         document.getElementById('settingVoting').checked = settings.allowVoting;
         document.getElementById('settingApproval').checked = settings.requireApproval;
+        document.getElementById('autoMergePr').checked = settings.autoMergePr || false;
         const slackInput = document.getElementById('settingSlackWebhookUrl');
         slackInput.value = settings.slackWebhookUrl || '';
         slackInput.placeholder = settings.slackWebhookUrl
@@ -1007,6 +1008,7 @@ const app = {
                 allowAnonymousSuggestions: document.getElementById('settingAnonymous').checked,
                 allowVoting: document.getElementById('settingVoting').checked,
                 requireApproval: document.getElementById('settingApproval').checked,
+                autoMergePr: document.getElementById('autoMergePr').checked,
                 slackWebhookUrl: document.getElementById('settingSlackWebhookUrl').value || null
             })
         });
