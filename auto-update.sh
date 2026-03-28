@@ -1,5 +1,6 @@
 #!/bin/bash
 
+CLAUDE_RUN_AS_USER=claude
 AUTO_UPDATE_BRANCH="${AUTO_UPDATE_BRANCH:-main}"
 AUTO_UPDATE_INTERVAL="${AUTO_UPDATE_INTERVAL:-60}"
 PID_FILE="/tmp/site-manager-auto-update.pid"
