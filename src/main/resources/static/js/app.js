@@ -4,6 +4,7 @@ const app = {
         username: '',
         role: '',
         setupRequired: false,
+        permissions: [],
         currentSuggestion: null,
         currentStatus: null,
         settings: {},
@@ -57,6 +58,7 @@ const app = {
         this.state.loggedIn = data.loggedIn;
         this.state.username = data.username;
         this.state.role = data.role;
+        this.state.permissions = data.permissions || [];
         this.updateHeader();
 
         if (data.setupRequired) {
@@ -85,6 +87,30 @@ const app = {
             logoutBtn.style.display = 'none';
             settingsBtn.style.display = 'none';
         }
+        this.updateNewSuggestionBtn();
+    },
+
+    updateNewSuggestionBtn() {
+        const btn = document.getElementById('newSuggestionBtn');
+        if (!btn) return;
+        const allowAnon = this.state.settings.allowAnonymousSuggestions;
+        const hasPermission = this.state.permissions.includes('CREATE_SUGGESTIONS');
+        btn.style.display = (allowAnon || hasPermission) ? '' : 'none';
+    },
+
+    showToast(message) {
+        let container = document.getElementById('toastContainer');
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'toastContainer';
+            container.style.cssText = 'position:fixed;top:1rem;right:1rem;z-index:9999;display:flex;flex-direction:column;gap:0.5rem';
+            document.body.appendChild(container);
+        }
+        const toast = document.createElement('div');
+        toast.style.cssText = 'background:#1e293b;color:#fff;padding:0.75rem 1.25rem;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.2);font-size:0.9rem;max-width:320px';
+        toast.textContent = message;
+        container.appendChild(toast);
+        setTimeout(() => toast.remove(), 3500);
     },
 
     async setup(e) {
@@ -171,6 +197,21 @@ const app = {
 
     // --- Navigation ---
     navigate(view, data) {
+        // Guard: enforce suggestion creation permissions before showing the view
+        if (view === 'create') {
+            const allowAnon = this.state.settings.allowAnonymousSuggestions;
+            const hasPermission = this.state.permissions.includes('CREATE_SUGGESTIONS');
+            if (!this.state.loggedIn && !allowAnon) {
+                this.showToast('Please log in to create a suggestion');
+                this.navigate('login');
+                return;
+            }
+            if (this.state.loggedIn && !hasPermission && !allowAnon) {
+                this.showToast('You do not have permission to create suggestions');
+                return;
+            }
+        }
+
         document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
         const el = document.getElementById(view + 'View');
         if (el) {
@@ -201,6 +242,7 @@ const app = {
             const suggestions = await this.api('/suggestions');
             const settings = await this.api('/settings');
             this.state.settings = settings;
+            this.updateNewSuggestionBtn();
 
             if (suggestions.length === 0) {
                 list.innerHTML = '<div class="card" style="text-align:center;color:var(--text-muted)">No suggestions yet. Be the first to suggest a change!</div>';
@@ -251,6 +293,12 @@ const app = {
         document.getElementById('detailDownVotes').textContent = suggestion.downVotes;
         document.getElementById('detailVoteSection').style.display =
             this.state.settings.allowVoting ? '' : 'none';
+        if (this.state.settings.allowVoting) {
+            const isAdminForVote = this.state.role === 'ROOT_ADMIN' || this.state.role === 'ADMIN';
+            const canVote = isAdminForVote || this.state.permissions.includes('VOTE');
+            document.getElementById('voteUpBtn').style.display = canVote ? '' : 'none';
+            document.getElementById('voteDownBtn').style.display = canVote ? '' : 'none';
+        }
 
         const phaseEl = document.getElementById('detailPhase');
         const phaseText = document.getElementById('detailPhaseText');
@@ -320,8 +368,14 @@ const app = {
         document.getElementById('retryPrActions').style.display = canRetryPr ? '' : 'none';
 
         // Reply box visibility
-        const canReply = ['DRAFT', 'DISCUSSING', 'PLANNED'].includes(suggestion.status);
+        const statusAllowsReply = ['DRAFT', 'DISCUSSING', 'PLANNED'].includes(suggestion.status);
+        const hasReplyPermission = isAdmin || this.state.permissions.includes('REPLY');
+        const canReply = statusAllowsReply && hasReplyPermission;
         document.getElementById('replyBox').style.display = canReply ? '' : 'none';
+        const noReplyMsg = document.getElementById('noReplyMsg');
+        if (noReplyMsg) {
+            noReplyMsg.style.display = (statusAllowsReply && !hasReplyPermission) ? '' : 'none';
+        }
 
         // Render messages
         this.renderMessages(messages);
@@ -801,7 +855,10 @@ const app = {
                 authorName: document.getElementById('createAuthorName').value || undefined
             })
         });
-        if (data.error) { alert(data.error); return; }
+        if (data.error) {
+            this.showToast(data.error);
+            return;
+        }
         document.getElementById('createForm').reset();
         this.navigate('detail', data.id);
     },
@@ -939,16 +996,25 @@ const app = {
                 const canRetryPr2 = isAdmin && data.currentPhase === 'Done — review request failed';
                 document.getElementById('retryPrActions').style.display = canRetryPr2 ? '' : 'none';
 
-                const canReply = ['DRAFT', 'DISCUSSING', 'PLANNED'].includes(data.status);
+                const wsStatusAllowsReply = ['DRAFT', 'DISCUSSING', 'PLANNED'].includes(data.status);
+                const wsHasReplyPermission = isAdmin || this.state.permissions.includes('REPLY');
+                const canReply = wsStatusAllowsReply && wsHasReplyPermission;
+                const wsNoReplyMsg = document.getElementById('noReplyMsg');
                 // Only show reply box if not in clarification wizard mode
                 if (!this.state.clarification.active) {
                     document.getElementById('replyBox').style.display = canReply ? '' : 'none';
+                    if (wsNoReplyMsg) {
+                        wsNoReplyMsg.style.display = (wsStatusAllowsReply && !wsHasReplyPermission) ? '' : 'none';
+                    }
                 }
 
                 // Hide clarification wizard if status moved past DISCUSSING/EXPERT_REVIEW
                 if (!['DISCUSSING', 'EXPERT_REVIEW'].includes(data.status)) {
                     this.hideClarificationWizard();
                     document.getElementById('replyBox').style.display = canReply ? '' : 'none';
+                    if (wsNoReplyMsg) {
+                        wsNoReplyMsg.style.display = (wsStatusAllowsReply && !wsHasReplyPermission) ? '' : 'none';
+                    }
                 }
                 break;
             }
@@ -1030,13 +1096,176 @@ const app = {
             ? 'Currently configured — enter new URL to replace'
             : 'https://hooks.slack.com/services/...';
         await this.loadPendingUsers();
+        await this.loadGroups();
+        await this.loadAllUsers();
+    },
+
+    async loadGroups() {
+        const section = document.getElementById('groupsSection');
+        if (!section) return;
+
+        const canManage = this.state.role === 'ROOT_ADMIN' || this.state.role === 'ADMIN';
+        section.style.display = canManage ? '' : 'none';
+        if (!canManage) return;
+
+        const container = document.getElementById('groupsContainer');
+        try {
+            const groups = await this.api('/groups');
+            if (groups.error) {
+                container.textContent = 'Failed to load groups.';
+                return;
+            }
+            this.state.groups = groups;
+            this._renderGroupsTable(groups);
+        } catch (err) {
+            container.textContent = 'Failed to load groups.';
+        }
+    },
+
+    _renderGroupsTable(groups) {
+        const container = document.getElementById('groupsContainer');
+        if (!groups || groups.length === 0) {
+            container.textContent = 'No groups found.';
+            return;
+        }
+
+        const table = document.createElement('table');
+        table.style.cssText = 'width:100%;border-collapse:collapse';
+
+        const thead = document.createElement('thead');
+        thead.innerHTML = '<tr>' +
+            '<th style="text-align:left;padding:0.5rem;border-bottom:1px solid var(--border)">Name</th>' +
+            '<th style="text-align:left;padding:0.5rem;border-bottom:1px solid var(--border)">Permissions</th>' +
+            '<th style="text-align:left;padding:0.5rem;border-bottom:1px solid var(--border)">Actions</th>' +
+            '</tr>';
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+        groups.forEach(group => {
+            const tr = document.createElement('tr');
+
+            const tdName = document.createElement('td');
+            tdName.style.padding = '0.5rem';
+            tdName.textContent = group.name;
+
+            const tdPerms = document.createElement('td');
+            tdPerms.style.padding = '0.5rem';
+            const permLabels = [];
+            if (group.canCreateSuggestions) permLabels.push('Create');
+            if (group.canVote) permLabels.push('Vote');
+            if (group.canReply) permLabels.push('Reply');
+            if (group.canApproveDenySuggestions) permLabels.push('Approve/Deny');
+            if (group.canManageSettings) permLabels.push('Settings');
+            if (group.canManageUsers) permLabels.push('Users');
+            tdPerms.textContent = permLabels.length > 0 ? permLabels.join(', ') : 'None';
+
+            const tdActions = document.createElement('td');
+            tdActions.style.padding = '0.5rem';
+
+            const editBtn = document.createElement('button');
+            editBtn.className = 'btn btn-outline btn-sm';
+            editBtn.textContent = 'Edit';
+            editBtn.style.marginRight = '0.5rem';
+            editBtn.onclick = () => app.editGroup(group.id);
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'btn btn-danger btn-sm';
+            deleteBtn.textContent = 'Delete';
+            deleteBtn.onclick = () => app.deleteGroup(group.id);
+
+            tdActions.appendChild(editBtn);
+            tdActions.appendChild(deleteBtn);
+
+            tr.appendChild(tdName);
+            tr.appendChild(tdPerms);
+            tr.appendChild(tdActions);
+            tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+
+        container.innerHTML = '';
+        container.appendChild(table);
+    },
+
+    editGroup(id) {
+        const group = (this.state.groups || []).find(g => g.id === id);
+        if (!group) return;
+
+        document.getElementById('groupEditId').value = id;
+        document.getElementById('groupName').value = group.name;
+        document.getElementById('groupCanCreateSuggestions').checked = group.canCreateSuggestions;
+        document.getElementById('groupCanVote').checked = group.canVote;
+        document.getElementById('groupCanReply').checked = group.canReply;
+        document.getElementById('groupCanApproveDenySuggestions').checked = group.canApproveDenySuggestions;
+        document.getElementById('groupCanManageSettings').checked = group.canManageSettings;
+        document.getElementById('groupCanManageUsers').checked = group.canManageUsers;
+
+        document.getElementById('groupFormTitle').textContent = 'Edit Group';
+        document.getElementById('groupSaveBtn').textContent = 'Save Changes';
+        document.getElementById('groupCancelBtn').style.display = '';
+    },
+
+    cancelGroupEdit() {
+        document.getElementById('groupForm').reset();
+        document.getElementById('groupEditId').value = '';
+        document.getElementById('groupFormTitle').textContent = 'Create New Group';
+        document.getElementById('groupSaveBtn').textContent = 'Create Group';
+        document.getElementById('groupCancelBtn').style.display = 'none';
+    },
+
+    async saveGroup(e) {
+        e.preventDefault();
+        const editId = document.getElementById('groupEditId').value;
+        const payload = {
+            name: document.getElementById('groupName').value,
+            canCreateSuggestions: document.getElementById('groupCanCreateSuggestions').checked,
+            canVote: document.getElementById('groupCanVote').checked,
+            canReply: document.getElementById('groupCanReply').checked,
+            canApproveDenySuggestions: document.getElementById('groupCanApproveDenySuggestions').checked,
+            canManageSettings: document.getElementById('groupCanManageSettings').checked,
+            canManageUsers: document.getElementById('groupCanManageUsers').checked
+        };
+
+        const path = editId ? '/groups/' + editId : '/groups';
+        const method = editId ? 'PUT' : 'POST';
+        const data = await this.api(path, { method, body: JSON.stringify(payload) });
+        if (data.error) { alert(data.error); return; }
+
+        this.cancelGroupEdit();
+        await this.loadGroups();
+    },
+
+    async deleteGroup(id) {
+        if (!window.confirm('Are you sure you want to delete this group?')) return;
+        const data = await this.api('/groups/' + id, { method: 'DELETE' });
+        if (data.error) { alert(data.error); return; }
+        await this.loadGroups();
+    },
+
+    showUserTab(tab) {
+        const pendingContainer = document.getElementById('pendingUsersContainer');
+        const allContainer = document.getElementById('allUsersContainer');
+        const pendingBtn = document.getElementById('tabPendingBtn');
+        const allBtn = document.getElementById('tabAllBtn');
+        if (!pendingContainer || !allContainer) return;
+        if (tab === 'all') {
+            pendingContainer.style.display = 'none';
+            allContainer.style.display = '';
+            if (pendingBtn) { pendingBtn.className = 'btn btn-outline btn-sm'; }
+            if (allBtn) { allBtn.className = 'btn btn-primary btn-sm'; }
+        } else {
+            pendingContainer.style.display = '';
+            allContainer.style.display = 'none';
+            if (pendingBtn) { pendingBtn.className = 'btn btn-primary btn-sm'; }
+            if (allBtn) { allBtn.className = 'btn btn-outline btn-sm'; }
+        }
     },
 
     async loadPendingUsers() {
         const container = document.getElementById('pendingUsersContainer');
         if (!container) return;
 
-        const section = document.getElementById('pendingUsersSection');
+        const section = document.getElementById('allUsersSection');
         const canManage = this.state.role === 'ROOT_ADMIN' || this.state.role === 'ADMIN';
         if (section) section.style.display = canManage ? '' : 'none';
         if (!canManage) return;
@@ -1112,6 +1341,113 @@ const app = {
         const data = await this.api('/users/' + userId + '/deny', { method: 'POST' });
         if (data.error) { alert(data.error); return; }
         await this.loadPendingUsers();
+    },
+
+    async loadAllUsers() {
+        const container = document.getElementById('allUsersContainer');
+        if (!container) return;
+
+        const canManage = this.state.role === 'ROOT_ADMIN' || this.state.role === 'ADMIN';
+        if (!canManage) return;
+
+        try {
+            const users = await this.api('/users');
+            if (users.error) {
+                container.textContent = 'Failed to load users.';
+                return;
+            }
+            this._renderAllUsersTable(users);
+        } catch (err) {
+            container.textContent = 'Failed to load users.';
+        }
+    },
+
+    _renderAllUsersTable(users) {
+        const container = document.getElementById('allUsersContainer');
+        const groups = this.state.groups || [];
+
+        if (!users || users.length === 0) {
+            container.textContent = 'No users found.';
+            return;
+        }
+
+        const table = document.createElement('table');
+        table.style.cssText = 'width:100%;border-collapse:collapse';
+
+        const thead = document.createElement('thead');
+        thead.innerHTML = '<tr>' +
+            '<th style="text-align:left;padding:0.5rem;border-bottom:1px solid var(--border)">Username</th>' +
+            '<th style="text-align:left;padding:0.5rem;border-bottom:1px solid var(--border)">Role</th>' +
+            '<th style="text-align:left;padding:0.5rem;border-bottom:1px solid var(--border)">Group</th>' +
+            '<th style="text-align:left;padding:0.5rem;border-bottom:1px solid var(--border)">Status</th>' +
+            '</tr>';
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+        users.forEach(user => {
+            const tr = document.createElement('tr');
+
+            const tdUser = document.createElement('td');
+            tdUser.style.padding = '0.5rem';
+            tdUser.textContent = user.username;
+
+            const tdRole = document.createElement('td');
+            tdRole.style.padding = '0.5rem';
+            const roleBadge = document.createElement('span');
+            const roleLabel = user.role === 'ROOT_ADMIN' ? 'Root Admin'
+                : user.role === 'ADMIN' ? 'Admin'
+                : 'User';
+            roleBadge.textContent = roleLabel;
+            roleBadge.style.cssText = 'padding:0.15rem 0.4rem;border-radius:3px;font-size:0.8em;background:var(--border);';
+            tdRole.appendChild(roleBadge);
+
+            const tdGroup = document.createElement('td');
+            tdGroup.style.padding = '0.5rem';
+            const select = document.createElement('select');
+            select.className = 'form-control';
+            select.style.cssText = 'padding:0.2rem 0.4rem;font-size:0.9em;';
+            const noGroupOpt = document.createElement('option');
+            noGroupOpt.value = '';
+            noGroupOpt.textContent = '— No group —';
+            select.appendChild(noGroupOpt);
+            groups.forEach(g => {
+                const opt = document.createElement('option');
+                opt.value = g.id;
+                opt.textContent = g.name;
+                if (user.groupId && user.groupId === g.id) opt.selected = true;
+                select.appendChild(opt);
+            });
+            select.onchange = () => {
+                const gid = select.value ? parseInt(select.value, 10) : null;
+                app.assignUserGroup(user.id, gid);
+            };
+            tdGroup.appendChild(select);
+
+            const tdStatus = document.createElement('td');
+            tdStatus.style.padding = '0.5rem';
+            const statusText = user.denied ? 'Denied'
+                : user.approved ? 'Active'
+                : 'Pending';
+            tdStatus.textContent = statusText;
+
+            tr.appendChild(tdUser);
+            tr.appendChild(tdRole);
+            tr.appendChild(tdGroup);
+            tr.appendChild(tdStatus);
+            tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+
+        container.innerHTML = '';
+        container.appendChild(table);
+    },
+
+    async assignUserGroup(userId, groupId) {
+        const data = await this.api('/users/' + userId + '/group', {
+            method: 'PUT',
+            body: JSON.stringify({ groupId: groupId })
+        });
+        if (data.error) { alert(data.error); }
     },
 
     async saveSettings() {

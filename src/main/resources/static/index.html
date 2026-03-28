@@ -109,7 +109,7 @@
     <div id="listView" class="view">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
             <h2>Suggestions</h2>
-            <button class="btn btn-primary" onclick="app.navigate('create')">+ New Suggestion</button>
+            <button id="newSuggestionBtn" class="btn btn-primary" onclick="app.navigate('create')">+ New Suggestion</button>
         </div>
         <div id="suggestionList">
             <div class="loading">Loading suggestions...</div>
@@ -157,9 +157,9 @@
 
             <div id="detailVoteSection" style="margin-top:1rem">
                 <div class="vote-controls">
-                    <button class="vote-btn" onclick="app.vote(1)">&#9650;</button>
+                    <button id="voteUpBtn" class="vote-btn" onclick="app.vote(1)">&#9650;</button>
                     <span class="vote-count" id="detailUpVotes">0</span>
-                    <button class="vote-btn" onclick="app.vote(-1)">&#9660;</button>
+                    <button id="voteDownBtn" class="vote-btn" onclick="app.vote(-1)">&#9660;</button>
                     <span class="vote-count" id="detailDownVotes">0</span>
                 </div>
             </div>
@@ -248,6 +248,9 @@
             <input type="text" id="replyInput" placeholder="Type your reply..."
                    onkeydown="if(event.key==='Enter')app.reply()">
             <button class="btn btn-primary btn-sm" onclick="app.reply()">Send</button>
+        </div>
+        <div id="noReplyMsg" style="display:none;margin-top:0.75rem;color:var(--text-muted);font-size:0.85rem;text-align:center">
+            Register and get approved to join the discussion.
         </div>
     </div>
 
@@ -353,9 +356,58 @@
                     </form>
                 </div>
 
-                <div id="pendingUsersSection" style="display:none;margin-top:2rem;padding-top:1rem;border-top:1px solid var(--border)">
-                    <h3>Pending Registrations</h3>
+                <div id="allUsersSection" style="display:none;margin-top:2rem;padding-top:1rem;border-top:1px solid var(--border)">
+                    <h3>User Management</h3>
+                    <div style="display:flex;gap:0.5rem;margin-top:0.75rem;margin-bottom:1rem">
+                        <button id="tabPendingBtn" class="btn btn-primary btn-sm" onclick="app.showUserTab('pending')">Pending Approval</button>
+                        <button id="tabAllBtn" class="btn btn-outline btn-sm" onclick="app.showUserTab('all')">All Users</button>
+                    </div>
                     <div id="pendingUsersContainer" style="margin-top:0.75rem">No pending registrations</div>
+                    <div id="allUsersContainer" style="display:none;margin-top:0.75rem">Loading users...</div>
+                </div>
+
+                <div id="groupsSection" style="display:none;margin-top:2rem;padding-top:1rem;border-top:1px solid var(--border)">
+                    <h3>User Groups</h3>
+                    <div id="groupsContainer" style="margin-top:0.75rem">Loading groups...</div>
+
+                    <div style="margin-top:1.5rem">
+                        <h4 id="groupFormTitle" style="margin-bottom:0.75rem">Create New Group</h4>
+                        <form id="groupForm" onsubmit="app.saveGroup(event)">
+                            <input type="hidden" id="groupEditId">
+                            <div class="form-group">
+                                <label>Group Name</label>
+                                <input type="text" id="groupName" required maxlength="100">
+                            </div>
+                            <div class="form-group">
+                                <label>Permissions</label>
+                                <div style="display:flex;flex-direction:column;gap:0.5rem;margin-top:0.5rem">
+                                    <label style="display:flex;align-items:center;gap:0.5rem;font-weight:normal">
+                                        <input type="checkbox" id="groupCanCreateSuggestions"> Create Suggestions
+                                    </label>
+                                    <label style="display:flex;align-items:center;gap:0.5rem;font-weight:normal">
+                                        <input type="checkbox" id="groupCanVote"> Vote
+                                    </label>
+                                    <label style="display:flex;align-items:center;gap:0.5rem;font-weight:normal">
+                                        <input type="checkbox" id="groupCanReply"> Reply
+                                    </label>
+                                    <label style="display:flex;align-items:center;gap:0.5rem;font-weight:normal">
+                                        <input type="checkbox" id="groupCanApproveDenySuggestions"> Approve/Deny Suggestions
+                                    </label>
+                                    <label style="display:flex;align-items:center;gap:0.5rem;font-weight:normal">
+                                        <input type="checkbox" id="groupCanManageSettings"> Manage Settings
+                                    </label>
+                                    <label style="display:flex;align-items:center;gap:0.5rem;font-weight:normal">
+                                        <input type="checkbox" id="groupCanManageUsers"> Manage Users
+                                    </label>
+                                </div>
+                            </div>
+                            <div style="display:flex;gap:0.5rem">
+                                <button type="submit" class="btn btn-primary btn-sm" id="groupSaveBtn">Create Group</button>
+                                <button type="button" class="btn btn-outline btn-sm" id="groupCancelBtn"
+                                        style="display:none" onclick="app.cancelGroupEdit()">Cancel</button>
+                            </div>
+                        </form>
+                    </div>
                 </div>
             </div>
         </div>

@@ -28,8 +28,9 @@ function makeApp(overrides = {}) {
 
 function setupSettingsDOM() {
     document.body.innerHTML = `
-        <div id="pendingUsersSection" style="display:none">
+        <div id="allUsersSection" style="display:none">
             <div id="pendingUsersContainer">No pending registrations</div>
+            <div id="allUsersContainer" style="display:none">Loading users...</div>
         </div>
         <input id="settingSiteName" />
         <input id="settingRepoUrl" />
@@ -48,8 +49,9 @@ function setupSettingsDOM() {
 
 function setupPendingDOM() {
     document.body.innerHTML = `
-        <div id="pendingUsersSection" style="display:none">
+        <div id="allUsersSection" style="display:none">
             <div id="pendingUsersContainer">No pending registrations</div>
+            <div id="allUsersContainer" style="display:none">Loading users...</div>
         </div>
     `;
 }
@@ -66,7 +68,7 @@ afterEach(() => {
 // --- loadPendingUsers() ---
 
 describe('loadPendingUsers() — visibility gating', () => {
-    test('shows pendingUsersSection for ROOT_ADMIN', async () => {
+    test('shows allUsersSection for ROOT_ADMIN', async () => {
         setupPendingDOM();
         const app = makeApp({
             state: { role: 'ROOT_ADMIN' },
@@ -79,7 +81,7 @@ describe('loadPendingUsers() — visibility gating', () => {
         const loadPendingUsersImpl = async function() {
             const container = document.getElementById('pendingUsersContainer');
             if (!container) return;
-            const section = document.getElementById('pendingUsersSection');
+            const section = document.getElementById('allUsersSection');
             const canManage = this.state.role === 'ROOT_ADMIN' || this.state.role === 'ADMIN';
             if (section) section.style.display = canManage ? '' : 'none';
             if (!canManage) return;
@@ -89,10 +91,10 @@ describe('loadPendingUsers() — visibility gating', () => {
             }
         };
         await loadPendingUsersImpl.call(app);
-        expect(document.getElementById('pendingUsersSection').style.display).toBe('');
+        expect(document.getElementById('allUsersSection').style.display).toBe('');
     });
 
-    test('shows pendingUsersSection for ADMIN', async () => {
+    test('shows allUsersSection for ADMIN', async () => {
         setupPendingDOM();
         const app = makeApp({
             state: { role: 'ADMIN' },
@@ -101,7 +103,7 @@ describe('loadPendingUsers() — visibility gating', () => {
         await (async function() {
             const container = document.getElementById('pendingUsersContainer');
             if (!container) return;
-            const section = document.getElementById('pendingUsersSection');
+            const section = document.getElementById('allUsersSection');
             const canManage = app.state.role === 'ROOT_ADMIN' || app.state.role === 'ADMIN';
             if (section) section.style.display = canManage ? '' : 'none';
             if (!canManage) return;
@@ -110,20 +112,20 @@ describe('loadPendingUsers() — visibility gating', () => {
                 container.textContent = 'No pending registrations';
             }
         })();
-        expect(document.getElementById('pendingUsersSection').style.display).toBe('');
+        expect(document.getElementById('allUsersSection').style.display).toBe('');
     });
 
-    test('hides pendingUsersSection for USER role', async () => {
+    test('hides allUsersSection for USER role', async () => {
         setupPendingDOM();
         const app = makeApp({ state: { role: 'USER' }, async api() { return []; } });
         await (async function() {
             const container = document.getElementById('pendingUsersContainer');
             if (!container) return;
-            const section = document.getElementById('pendingUsersSection');
+            const section = document.getElementById('allUsersSection');
             const canManage = app.state.role === 'ROOT_ADMIN' || app.state.role === 'ADMIN';
             if (section) section.style.display = canManage ? '' : 'none';
         })();
-        expect(document.getElementById('pendingUsersSection').style.display).toBe('none');
+        expect(document.getElementById('allUsersSection').style.display).toBe('none');
     });
 });
 
@@ -143,7 +145,7 @@ function makeRealApp(overrides = {}) {
         async loadPendingUsers() {
             const container = document.getElementById('pendingUsersContainer');
             if (!container) return;
-            const section = document.getElementById('pendingUsersSection');
+            const section = document.getElementById('allUsersSection');
             const canManage = this.state.role === 'ROOT_ADMIN' || this.state.role === 'ADMIN';
             if (section) section.style.display = canManage ? '' : 'none';
             if (!canManage) return;
