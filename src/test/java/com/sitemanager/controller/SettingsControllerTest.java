@@ -104,4 +104,67 @@ class SettingsControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.slackWebhookUrl").doesNotExist());
     }
+
+    @Test
+    void getSettings_requireRegistrationApproval_falseByDefault() throws Exception {
+        mockMvc.perform(get("/api/settings"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.requireRegistrationApproval").value(false));
+    }
+
+    @Test
+    void updateSettings_requireRegistrationApproval_persistedAndReturnedInResponse() throws Exception {
+        MockHttpSession session = new MockHttpSession();
+        session.setAttribute("username", "admin");
+        session.setAttribute("role", "ROOT_ADMIN");
+
+        mockMvc.perform(put("/api/settings")
+                        .session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"allowAnonymousSuggestions\":true,\"allowVoting\":true," +
+                                "\"suggestionTimeoutMinutes\":1440,\"requireApproval\":true," +
+                                "\"siteName\":\"Test\",\"requireRegistrationApproval\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.requireRegistrationApproval").value(true));
+    }
+
+    @Test
+    void updateSettings_requireRegistrationApproval_canBeDisabledAfterEnabled() throws Exception {
+        MockHttpSession session = new MockHttpSession();
+        session.setAttribute("username", "admin");
+        session.setAttribute("role", "ROOT_ADMIN");
+
+        String enableBody = "{\"allowAnonymousSuggestions\":true,\"allowVoting\":true," +
+                "\"suggestionTimeoutMinutes\":1440,\"requireApproval\":true," +
+                "\"siteName\":\"Test\",\"requireRegistrationApproval\":true}";
+        mockMvc.perform(put("/api/settings").session(session)
+                        .contentType(MediaType.APPLICATION_JSON).content(enableBody))
+                .andExpect(status().isOk());
+
+        String disableBody = "{\"allowAnonymousSuggestions\":true,\"allowVoting\":true," +
+                "\"suggestionTimeoutMinutes\":1440,\"requireApproval\":true," +
+                "\"siteName\":\"Test\",\"requireRegistrationApproval\":false}";
+        mockMvc.perform(put("/api/settings").session(session)
+                        .contentType(MediaType.APPLICATION_JSON).content(disableBody))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.requireRegistrationApproval").value(false));
+    }
+
+    @Test
+    void getSettings_requireRegistrationApproval_reflectsPersistedValue() throws Exception {
+        MockHttpSession session = new MockHttpSession();
+        session.setAttribute("username", "admin");
+        session.setAttribute("role", "ROOT_ADMIN");
+
+        mockMvc.perform(put("/api/settings").session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"allowAnonymousSuggestions\":true,\"allowVoting\":true," +
+                                "\"suggestionTimeoutMinutes\":1440,\"requireApproval\":true," +
+                                "\"siteName\":\"Test\",\"requireRegistrationApproval\":true}"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(get("/api/settings"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.requireRegistrationApproval").value(true));
+    }
 }

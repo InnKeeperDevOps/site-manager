@@ -52,6 +52,92 @@ public class SlackNotificationService {
         return CompletableFuture.runAsync(() -> doSend(suggestion, eventLabel));
     }
 
+    public CompletableFuture<Void> sendRegistrationPendingNotification(String username) {
+        return CompletableFuture.runAsync(() -> doSendRegistrationPending(username));
+    }
+
+    public CompletableFuture<Void> sendUserApprovedNotification(String username) {
+        return CompletableFuture.runAsync(() -> doSendUserStatusChange(username,
+                ":white_check_mark: Registration Approved",
+                "*" + escapeJson(username) + "* has been approved and can now log in."));
+    }
+
+    public CompletableFuture<Void> sendUserDeniedNotification(String username) {
+        return CompletableFuture.runAsync(() -> doSendUserStatusChange(username,
+                ":x: Registration Denied",
+                "*" + escapeJson(username) + "* has been denied access."));
+    }
+
+    private void doSendUserStatusChange(String username, String header, String body) {
+        String webhookUrl = siteSettingsService.getSettings().getSlackWebhookUrl();
+
+        if (webhookUrl == null || webhookUrl.isBlank()) {
+            return;
+        }
+
+        if (!webhookUrl.startsWith(ALLOWED_WEBHOOK_PREFIX)) {
+            log.warn("Slack webhook URL does not start with '{}' — skipping notification to prevent SSRF", ALLOWED_WEBHOOK_PREFIX);
+            return;
+        }
+
+        String safeHeader = escapeJson(header);
+        String payload = "{\"blocks\":["
+                + "{\"type\":\"header\",\"text\":{\"type\":\"plain_text\",\"text\":\"" + safeHeader + "\",\"emoji\":true}},"
+                + "{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"" + body + "\"}}"
+                + "]}";
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(webhookUrl))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(payload))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                log.warn("Slack webhook returned non-success status {}: {}", response.statusCode(), response.body());
+            }
+        } catch (Exception e) {
+            log.warn("Failed to send Slack user status notification for user {}: {}", username, e.getMessage());
+        }
+    }
+
+    private void doSendRegistrationPending(String username) {
+        String webhookUrl = siteSettingsService.getSettings().getSlackWebhookUrl();
+
+        if (webhookUrl == null || webhookUrl.isBlank()) {
+            return;
+        }
+
+        if (!webhookUrl.startsWith(ALLOWED_WEBHOOK_PREFIX)) {
+            log.warn("Slack webhook URL does not start with '{}' — skipping notification to prevent SSRF", ALLOWED_WEBHOOK_PREFIX);
+            return;
+        }
+
+        String safeUsername = escapeJson(username);
+        String payload = "{\"blocks\":["
+                + "{\"type\":\"header\",\"text\":{\"type\":\"plain_text\",\"text\":\":busts_in_silhouette: New Registration Pending\",\"emoji\":true}},"
+                + "{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"*" + safeUsername + "* has registered and is awaiting admin approval.\"}}"
+                + "]}";
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(webhookUrl))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(payload))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                log.warn("Slack webhook returned non-success status {}: {}", response.statusCode(), response.body());
+            }
+        } catch (Exception e) {
+            log.warn("Failed to send Slack registration notification for user {}: {}", username, e.getMessage());
+        }
+    }
+
     private void doSend(Suggestion suggestion, String eventLabel) {
         String webhookUrl = siteSettingsService.getSettings().getSlackWebhookUrl();
 

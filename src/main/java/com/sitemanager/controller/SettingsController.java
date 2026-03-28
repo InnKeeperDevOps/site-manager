@@ -1,6 +1,8 @@
 package com.sitemanager.controller;
 
 import com.sitemanager.model.SiteSettings;
+import com.sitemanager.model.enums.Permission;
+import com.sitemanager.service.PermissionService;
 import com.sitemanager.service.SiteSettingsService;
 import jakarta.servlet.http.HttpSession;
 import org.springframework.http.ResponseEntity;
@@ -13,9 +15,11 @@ import java.util.Map;
 public class SettingsController {
 
     private final SiteSettingsService settingsService;
+    private final PermissionService permissionService;
 
-    public SettingsController(SiteSettingsService settingsService) {
+    public SettingsController(SiteSettingsService settingsService, PermissionService permissionService) {
         this.settingsService = settingsService;
+        this.permissionService = permissionService;
     }
 
     @GetMapping
@@ -25,8 +29,7 @@ public class SettingsController {
 
     @PutMapping
     public ResponseEntity<?> update(@RequestBody SiteSettings settings, HttpSession session) {
-        String role = (String) session.getAttribute("role");
-        if (!"ROOT_ADMIN".equals(role) && !"ADMIN".equals(role)) {
+        if (!permissionService.hasPermission(session, Permission.MANAGE_SETTINGS)) {
             return ResponseEntity.status(403).body(Map.of("error", "Admin access required"));
         }
         return ResponseEntity.ok(settingsService.updateSettings(settings));

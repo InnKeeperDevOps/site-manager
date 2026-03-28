@@ -1,6 +1,7 @@
 package com.sitemanager.repository;
 
 import com.sitemanager.model.User;
+import com.sitemanager.model.UserGroup;
 import com.sitemanager.model.enums.UserRole;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -17,6 +18,9 @@ class UserRepositoryTest {
 
     @Autowired
     private UserRepository userRepository;
+
+    @Autowired
+    private UserGroupRepository userGroupRepository;
 
     @BeforeEach
     void setUp() {
@@ -64,5 +68,38 @@ class UserRepositoryTest {
         User user = new User("test", "hash", UserRole.USER);
         User saved = userRepository.save(user);
         assertNotNull(saved.getCreatedAt());
+    }
+
+    @Test
+    void save_approvedAndDenied_defaultToFalse() {
+        User user = userRepository.save(new User("newuser", "hash", UserRole.USER));
+
+        assertFalse(user.isApproved());
+        assertFalse(user.isDenied());
+    }
+
+    @Test
+    void save_approvedAndDenied_canBeSet() {
+        User user = new User("approveduser", "hash", UserRole.USER);
+        user.setApproved(true);
+        user.setDenied(false);
+        User saved = userRepository.save(user);
+
+        assertTrue(saved.isApproved());
+        assertFalse(saved.isDenied());
+    }
+
+    @Test
+    void save_groupAssociation_persistsAndLoads() {
+        UserGroup group = userGroupRepository.save(
+                new UserGroup("Members", true, true, true, false, false, false));
+
+        User user = new User("groupuser", "hash", UserRole.USER);
+        user.setGroup(group);
+        User saved = userRepository.save(user);
+
+        User reloaded = userRepository.findById(saved.getId()).orElseThrow();
+        assertNotNull(reloaded.getGroup());
+        assertEquals("Members", reloaded.getGroup().getName());
     }
 }

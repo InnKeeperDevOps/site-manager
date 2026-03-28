@@ -4,8 +4,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sitemanager.dto.SuggestionRequest;
 import com.sitemanager.dto.VoteRequest;
 import com.sitemanager.model.SiteSettings;
+import com.sitemanager.model.User;
+import com.sitemanager.model.UserGroup;
+import com.sitemanager.model.enums.UserRole;
 import com.sitemanager.repository.*;
 import com.sitemanager.service.SiteSettingsService;
+import com.sitemanager.service.UserGroupService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -44,12 +48,28 @@ class SuggestionControllerTest {
     @Autowired
     private SiteSettingsService settingsService;
 
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private UserGroupRepository userGroupRepository;
+
+    private UserGroup defaultGroup;
+
     @BeforeEach
     void setUp() {
         voteRepository.deleteAll();
         messageRepository.deleteAll();
         suggestionRepository.deleteAll();
         settingsRepository.deleteAll();
+        userRepository.deleteAll();
+        userGroupRepository.findAll().stream()
+                .filter(g -> !UserGroupService.DEFAULT_GROUP_NAME.equals(g.getName()))
+                .forEach(userGroupRepository::delete);
+
+        defaultGroup = userGroupRepository.findByName(UserGroupService.DEFAULT_GROUP_NAME)
+                .orElseGet(() -> userGroupRepository.save(
+                        new UserGroup(UserGroupService.DEFAULT_GROUP_NAME, true, true, true, false, false, false)));
     }
 
     @Test
@@ -98,9 +118,10 @@ class SuggestionControllerTest {
 
     @Test
     void createSuggestion_asLoggedInUser_succeeds() throws Exception {
+        User user = createApprovedUser("testuser", true, false, false, false, false);
         MockHttpSession session = new MockHttpSession();
-        session.setAttribute("username", "testuser");
-        session.setAttribute("userId", 1L);
+        session.setAttribute("username", user.getUsername());
+        session.setAttribute("userId", user.getId());
         session.setAttribute("role", "USER");
 
         SuggestionRequest request = new SuggestionRequest();
@@ -113,6 +134,32 @@ class SuggestionControllerTest {
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.authorName").value("testuser"));
+    }
+
+    @Test
+    void createSuggestion_asLoggedInUser_withoutPermission_returns403() throws Exception {
+        // User in a group with canCreateSuggestions=false
+        UserGroup restrictedGroup = userGroupRepository.save(
+                new UserGroup("Restricted", false, false, false, false, false, false));
+        User user = new User("restricteduser", "hash", UserRole.USER);
+        user.setGroup(restrictedGroup);
+        user.setApproved(true);
+        user = userRepository.save(user);
+
+        MockHttpSession session = new MockHttpSession();
+        session.setAttribute("username", user.getUsername());
+        session.setAttribute("userId", user.getId());
+        session.setAttribute("role", "USER");
+
+        SuggestionRequest request = new SuggestionRequest();
+        request.setTitle("Cannot create");
+        request.setDescription("This should be blocked.");
+
+        mockMvc.perform(post("/api/suggestions")
+                        .session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isForbidden());
     }
 
     @Test
@@ -229,15 +276,51 @@ class SuggestionControllerTest {
         String id = objectMapper.readTree(result.getResponse().getContentAsString())
                 .get("id").asText();
 
+        User voter = createApprovedUser("voter1", false, true, false, false, false);
+        MockHttpSession voterSession = new MockHttpSession();
+        voterSession.setAttribute("username", voter.getUsername());
+        voterSession.setAttribute("userId", voter.getId());
+        voterSession.setAttribute("role", "USER");
+
         VoteRequest voteReq = new VoteRequest();
         voteReq.setValue(1);
         voteReq.setVoterIdentifier("voter1");
 
         mockMvc.perform(post("/api/suggestions/" + id + "/vote")
+                        .session(voterSession)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(voteReq)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.upVotes").value(1));
+    }
+
+    @Test
+    void vote_onSuggestion_withoutPermission_returns403() throws Exception {
+        SiteSettings settings = settingsService.getSettings();
+        settings.setAllowAnonymousSuggestions(true);
+        settings.setAllowVoting(true);
+        settingsRepository.save(settings);
+
+        SuggestionRequest request = new SuggestionRequest();
+        request.setTitle("Vote test");
+        request.setDescription("Test voting");
+
+        MvcResult result = mockMvc.perform(post("/api/suggestions")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andReturn();
+
+        String id = objectMapper.readTree(result.getResponse().getContentAsString())
+                .get("id").asText();
+
+        VoteRequest voteReq = new VoteRequest();
+        voteReq.setValue(1);
+
+        // No session = unauthenticated
+        mockMvc.perform(post("/api/suggestions/" + id + "/vote")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(voteReq)))
+                .andExpect(status().isForbidden());
     }
 
     @Test
@@ -262,5 +345,20 @@ class SuggestionControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$").isArray())
                 .andExpect(jsonPath("$.length()").isNumber());
+    }
+
+    // --- helpers ---
+
+    /**
+     * Creates a user in the default group with the given permissions, approved=true.
+     */
+    private User createApprovedUser(String username, boolean canCreate, boolean canVote,
+                                    boolean canReply, boolean canApproveDeny, boolean canManageUsers) {
+        UserGroup group = userGroupRepository.save(new UserGroup(
+                "Group-" + username, canCreate, canVote, canReply, canApproveDeny, false, canManageUsers));
+        User user = new User(username, "hash", UserRole.USER);
+        user.setGroup(group);
+        user.setApproved(true);
+        return userRepository.save(user);
     }
 }
