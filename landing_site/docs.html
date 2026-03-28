@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aibe.app — Documentation</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+
+  <!-- Sticky in-page nav -->
+  <nav class="docs-nav" aria-label="Documentation sections">
+    <ul>
+      <li><a href="#prerequisites">Prerequisites</a></li>
+      <li><a href="#installation">Installation</a></li>
+      <li><a href="#auto-update">Auto-Update</a></li>
+      <li><a href="#user-signups">User Signups</a></li>
+      <li><a href="#reviewing-suggestions">Reviewing Suggestions</a></li>
+      <li><a href="#slack-notifications">Slack Notifications</a></li>
+    </ul>
+  </nav>
+
+  <main style="max-width: 860px; margin: 0 auto; padding: 48px 24px 80px;">
+
+    <h1 style="font-size: clamp(2rem, 5vw, 3rem); font-weight: 800; margin-bottom: 8px;">Aibe.app Documentation</h1>
+    <p style="color: var(--color-text-muted); margin-bottom: 48px;">Self-hosted AI suggestion management — installation and configuration guide.</p>
+
+    <!-- ===== Prerequisites ===== -->
+    <section id="prerequisites" style="margin-bottom: 56px;">
+      <h2 style="font-size: 1.5rem; font-weight: 700; margin-bottom: 20px; padding-top: 16px; border-top: 1px solid var(--color-border);">Prerequisites</h2>
+
+      <h3 style="font-size: 1.1rem; font-weight: 600; margin: 24px 0 10px;">JDK 17</h3>
+      <p style="color: var(--color-text-muted); margin-bottom: 12px;">Install JDK 17 for your platform:</p>
+      <pre><code># Debian / Ubuntu
+sudo apt install openjdk-17-jdk
+
+# Fedora / RHEL / Rocky
+sudo dnf install java-17-openjdk-devel
+
+# macOS (Homebrew)
+brew install openjdk@17</code></pre>
+      <p style="color: var(--color-text-muted); margin-bottom: 4px;">Verify the installation:</p>
+      <pre><code>java -version</code></pre>
+
+      <h3 style="font-size: 1.1rem; font-weight: 600; margin: 28px 0 10px;">Node.js 18+</h3>
+      <p style="color: var(--color-text-muted); margin-bottom: 12px;">Node.js 18 or later is required as a dependency for the Claude CLI. Install it via your package manager or from <code>nodejs.org</code>.</p>
+      <pre><code># Verify
+node --version   # should print v18.x.x or higher</code></pre>
+
+      <h3 style="font-size: 1.1rem; font-weight: 600; margin: 28px 0 10px;">Claude CLI</h3>
+      <p style="color: var(--color-text-muted); margin-bottom: 12px;">Install the Claude CLI globally with npm:</p>
+      <pre><code>npm install -g @anthropic-ai/claude-code</code></pre>
+      <p style="color: var(--color-text-muted); margin-bottom: 12px;">Set your Anthropic API key as an environment variable:</p>
+      <pre><code>export ANTHROPIC_API_KEY=your_api_key_here</code></pre>
+      <p style="color: var(--color-text-muted); margin-bottom: 12px;">Add that line to your shell profile (<code>~/.bashrc</code>, <code>~/.zshrc</code>, etc.) to make it permanent. Verify the CLI is working:</p>
+      <pre><code>claude --version</code></pre>
+    </section>
+
+    <!-- ===== Installation ===== -->
+    <section id="installation" style="margin-bottom: 56px;">
+      <h2 style="font-size: 1.5rem; font-weight: 700; margin-bottom: 20px; padding-top: 16px; border-top: 1px solid var(--color-border);">Installation</h2>
+
+      <h3 style="font-size: 1.1rem; font-weight: 600; margin: 0 0 12px;">Clone the repository</h3>
+      <pre><code>git clone https://github.com/InnKeeperDevOps/suggestion-manager.git
+cd suggestion-manager</code></pre>
+
+      <h3 style="font-size: 1.1rem; font-weight: 600; margin: 24px 0 12px;">Build</h3>
+      <p style="color: var(--color-text-muted); margin-bottom: 8px;">Using Gradle (default):</p>
+      <pre><code>./gradlew build</code></pre>
+      <p style="color: var(--color-text-muted); margin-bottom: 8px;">Or using Maven:</p>
+      <pre><code>mvn package -DskipTests</code></pre>
+
+      <h3 style="font-size: 1.1rem; font-weight: 600; margin: 24px 0 12px;">Run</h3>
+      <pre><code>java -jar build/libs/site-manager-*.jar</code></pre>
+      <p style="color: var(--color-text-muted); margin-top: 12px;">The application starts on port <code>8080</code> by default. Open <code>http://localhost:8080</code> in your browser.</p>
+
+      <div class="callout" style="margin-top: 24px;">
+        <strong>&#9888; WARNING — Do not run as root</strong><br />
+        Running this application as the <code>root</code> user gives the AI agent unrestricted filesystem access across your entire machine. This defeats OS-level process isolation and means a misbehaving or adversarial suggestion could read, modify, or delete any file on the system. Always run as a dedicated, unprivileged user account.
+      </div>
+    </section>
+
+    <!-- ===== Auto-Update ===== -->
+    <section id="auto-update" style="margin-bottom: 56px;">
+      <h2 style="font-size: 1.5rem; font-weight: 700; margin-bottom: 20px; padding-top: 16px; border-top: 1px solid var(--color-border);">Starting with Auto-Update</h2>
+
+      <p style="color: var(--color-text-muted); margin-bottom: 16px;">The included <code>auto-update.sh</code> script monitors the git upstream for new commits, polls at a configurable interval, and gracefully restarts the application when an update is detected.</p>
+
+      <pre><code>chmod +x auto-update.sh
+./auto-update.sh</code></pre>
+
+      <h3 style="font-size: 1.1rem; font-weight: 600; margin: 28px 0 12px;">Environment variables</h3>
+      <table style="width:100%; border-collapse: collapse; font-size: 0.9rem;">
+        <thead>
+          <tr style="border-bottom: 1px solid var(--color-border);">
+            <th style="text-align:left; padding: 8px 12px; color: var(--color-text);">Variable</th>
+            <th style="text-align:left; padding: 8px 12px; color: var(--color-text);">Default</th>
+            <th style="text-align:left; padding: 8px 12px; color: var(--color-text);">Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom: 1px solid var(--color-border);">
+            <td style="padding: 8px 12px;"><code>BRANCH</code></td>
+            <td style="padding: 8px 12px; color: var(--color-text-muted);">main</td>
+            <td style="padding: 8px 12px; color: var(--color-text-muted);">Git branch to track for updates</td>
+          </tr>
+          <tr style="border-bottom: 1px solid var(--color-border);">
+            <td style="padding: 8px 12px;"><code>POLL_INTERVAL</code></td>
+            <td style="padding: 8px 12px; color: var(--color-text-muted);">60</td>
+            <td style="padding: 8px 12px; color: var(--color-text-muted);">Seconds between upstream checks</td>
+          </tr>
+          <tr>
+            <td style="padding: 8px 12px;"><code>JAR_ARGS</code></td>
+            <td style="padding: 8px 12px; color: var(--color-text-muted);"></td>
+            <td style="padding: 8px 12px; color: var(--color-text-muted);">Extra arguments passed to the JAR on startup</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p style="color: var(--color-text-muted); margin-top: 20px;">Example with custom settings:</p>
+      <pre><code>BRANCH=production POLL_INTERVAL=120 ./auto-update.sh</code></pre>
+    </section>
+
+    <!-- ===== User Signups ===== -->
+    <section id="user-signups" style="margin-bottom: 56px;">
+      <h2 style="font-size: 1.5rem; font-weight: 700; margin-bottom: 20px; padding-top: 16px; border-top: 1px solid var(--color-border);">Configuring User Signups</h2>
+
+      <ol style="color: var(--color-text-muted); padding-left: 24px; line-height: 2;">
+        <li>Log in as an admin account.</li>
+        <li>Navigate to the <strong style="color: var(--color-text);">Settings</strong> tab.</li>
+        <li>Toggle <strong style="color: var(--color-text);">Allow User Registrations</strong> to enable or disable new account creation.</li>
+      </ol>
+
+      <h3 style="font-size: 1.1rem; font-weight: 600; margin: 28px 0 12px;">User groups</h3>
+      <ul style="color: var(--color-text-muted); padding-left: 24px; line-height: 2;">
+        <li><strong style="color: var(--color-text);">Admin</strong> — full access: manage users, review suggestions, change settings.</li>
+        <li><strong style="color: var(--color-text);">Regular users</strong> — can submit suggestions and vote; cannot administer the instance.</li>
+      </ul>
+
+      <h3 style="font-size: 1.1rem; font-weight: 600; margin: 28px 0 12px;">Invite-only workflow</h3>
+      <p style="color: var(--color-text-muted);">When registration is disabled, only admin-created accounts can log in. Share credentials directly with trusted users to keep your instance invite-only.</p>
+    </section>
+
+    <!-- ===== Reviewing Suggestions ===== -->
+    <section id="reviewing-suggestions" style="margin-bottom: 56px;">
+      <h2 style="font-size: 1.5rem; font-weight: 700; margin-bottom: 20px; padding-top: 16px; border-top: 1px solid var(--color-border);">Reviewing Suggestions</h2>
+
+      <ol style="color: var(--color-text-muted); padding-left: 24px; line-height: 2.2;">
+        <li>Incoming suggestions appear in the <strong style="color: var(--color-text);">suggestion list</strong> on the main dashboard.</li>
+        <li>Each suggestion is automatically evaluated by <strong style="color: var(--color-text);">Claude AI</strong> for technical feasibility and priority.</li>
+        <li>An admin can <strong style="color: var(--color-text);">approve</strong> a suggestion — this triggers an automated git clone and GitHub pull request — or <strong style="color: var(--color-text);">reject</strong> it with an optional reason.</li>
+        <li><strong style="color: var(--color-text);">Expert review mode</strong> adds an extra human-oversight step before any code execution begins.</li>
+        <li><strong style="color: var(--color-text);">Real-time status updates</strong> are pushed to all connected browsers via WebSocket — no page refresh needed.</li>
+      </ol>
+    </section>
+
+    <!-- ===== Slack Notifications ===== -->
+    <section id="slack-notifications" style="margin-bottom: 56px;">
+      <h2 style="font-size: 1.5rem; font-weight: 700; margin-bottom: 20px; padding-top: 16px; border-top: 1px solid var(--color-border);">Setting Up Slack Notifications</h2>
+
+      <ol style="color: var(--color-text-muted); padding-left: 24px; line-height: 2;">
+        <li>In your Slack workspace, create an <strong style="color: var(--color-text);">Incoming Webhook</strong> at <code>api.slack.com/messaging/webhooks</code>.</li>
+        <li>Copy the webhook URL provided by Slack.</li>
+        <li>In Aibe.app, go to <strong style="color: var(--color-text);">Settings → Slack Webhook URL</strong>, paste the URL, and save.</li>
+      </ol>
+
+      <h3 style="font-size: 1.1rem; font-weight: 600; margin: 28px 0 12px;">Notifications sent for</h3>
+      <ul style="color: var(--color-text-muted); padding-left: 24px; line-height: 2;">
+        <li>New suggestion submitted</li>
+        <li>Suggestion approved or rejected</li>
+        <li>GitHub pull request created</li>
+        <li>Execution complete</li>
+      </ul>
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="site-footer">
+    <p>
+      <a href="https://suggest.aibe.app" class="footer-link">suggest.aibe.app</a>
+      &nbsp;&bull;&nbsp;
+      <a href="index.html" class="footer-link">Home</a>
+    </p>
+    <p class="footer-copy">&copy; 2026 Aibe.app</p>
+  </footer>
+
+</body>
+</html>
