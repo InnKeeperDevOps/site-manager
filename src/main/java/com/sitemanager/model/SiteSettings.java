@@ -40,6 +40,9 @@ public class SiteSettings {
     @Column
     private Integer claudeMaxTurnsExpert;
 
+    @Column
+    private String slackWebhookUrl;
+
     public SiteSettings() {}
 
     public Long getId() { return id; }
@@ -64,4 +67,6 @@ public class SiteSettings {
     public void setClaudeModelExpert(String v) { this.claudeModelExpert = v; }
     public Integer getClaudeMaxTurnsExpert() { return claudeMaxTurnsExpert; }
     public void setClaudeMaxTurnsExpert(Integer v) { this.claudeMaxTurnsExpert = v; }
+    public String getSlackWebhookUrl() { return slackWebhookUrl; }
+    public void setSlackWebhookUrl(String v) { this.slackWebhookUrl = v; }
 }

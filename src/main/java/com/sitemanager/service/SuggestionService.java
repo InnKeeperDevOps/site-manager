@@ -58,6 +58,7 @@ public class SuggestionService {
     private final SiteSettingsService settingsService;
     private final SuggestionWebSocketHandler webSocketHandler;
     private final UserNotificationWebSocketHandler userNotificationHandler;
+    private final SlackNotificationService slackNotificationService;
 
     public SuggestionService(SuggestionRepository suggestionRepository,
                              SuggestionMessageRepository messageRepository,
@@ -65,7 +66,8 @@ public class SuggestionService {
                              ClaudeService claudeService,
                              SiteSettingsService settingsService,
                              SuggestionWebSocketHandler webSocketHandler,
-                             UserNotificationWebSocketHandler userNotificationHandler) {
+                             UserNotificationWebSocketHandler userNotificationHandler,
+                             SlackNotificationService slackNotificationService) {
         this.suggestionRepository = suggestionRepository;
         this.messageRepository = messageRepository;
         this.planTaskRepository = planTaskRepository;
@@ -73,6 +75,7 @@ public class SuggestionService {
         this.settingsService = settingsService;
         this.webSocketHandler = webSocketHandler;
         this.userNotificationHandler = userNotificationHandler;
+        this.slackNotificationService = slackNotificationService;
     }
 
     /**
@@ -1253,6 +1256,7 @@ public class SuggestionService {
 
         addMessage(suggestionId, SenderType.SYSTEM, "System", "This suggestion has been **approved** and work will begin shortly.");
         broadcastUpdate(suggestion);
+        slackNotificationService.sendNotification(suggestion, "APPROVED");
 
         // Begin execution
         executeApprovedSuggestion(suggestion);
@@ -1276,6 +1280,7 @@ public class SuggestionService {
         suggestion.setCurrentPhase("Setting up a workspace for this suggestion...");
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
+        slackNotificationService.sendNotification(suggestion, "IN_PROGRESS");
 
         // Clone repo into suggestion-{id}-repo/ and execute in background
         new Thread(() -> {
@@ -1346,6 +1351,7 @@ public class SuggestionService {
             suggestion.setCurrentPhase("Work completed — submitting changes...");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
+            slackNotificationService.sendNotification(suggestion, "DEV_COMPLETE");
 
             addMessage(suggestionId, SenderType.SYSTEM, "System",
                     "All tasks have been completed and verified by expert review. Submitting changes...");
@@ -1655,6 +1661,7 @@ public class SuggestionService {
             suggestion.setCurrentPhase("Work completed — submitting changes...");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
+            slackNotificationService.sendNotification(suggestion, "DEV_COMPLETE");
 
             // Push branch and create PR in background
             createPrAsync(suggestion.getId());
@@ -1779,6 +1786,7 @@ public class SuggestionService {
                     "Changes are ready for review: " + prUrl);
 
             broadcastUpdate(suggestion);
+            slackNotificationService.sendNotification(suggestion, "PR_CREATED");
             // Send PR URL via WebSocket so frontend can display it immediately
             webSocketHandler.sendToSuggestion(suggestion.getId(),
                     "{\"type\":\"pr_created\",\"prUrl\":\"" + escapeJson(prUrl) +
@@ -1835,6 +1843,7 @@ public class SuggestionService {
                     "Changes are ready for review: " + prUrl);
 
             broadcastUpdate(suggestion);
+            slackNotificationService.sendNotification(suggestion, "PR_CREATED");
             webSocketHandler.sendToSuggestion(suggestion.getId(),
                     "{\"type\":\"pr_created\",\"prUrl\":\"" + escapeJson(prUrl) +
                     "\",\"prNumber\":" + prNumber + "}");
@@ -2101,6 +2110,7 @@ public class SuggestionService {
         }
         addMessage(suggestionId, SenderType.SYSTEM, "System", msg);
         broadcastUpdate(suggestion);
+        slackNotificationService.sendNotification(suggestion, "DENIED");
 
         return suggestion;
     }

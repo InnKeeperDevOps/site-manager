@@ -1,6 +1,10 @@
 package com.sitemanager.service;
 
 import com.sitemanager.model.Suggestion;
+import com.sitemanager.model.SuggestionMessage;
+import com.sitemanager.model.SiteSettings;
+import com.sitemanager.model.enums.SenderType;
+import com.sitemanager.model.enums.SuggestionStatus;
 import com.sitemanager.repository.PlanTaskRepository;
 import com.sitemanager.repository.SuggestionMessageRepository;
 import com.sitemanager.repository.SuggestionRepository;
@@ -13,33 +17,56 @@ import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 class SuggestionServiceNotificationTest {
 
     private SuggestionRepository suggestionRepository;
+    private SuggestionMessageRepository messageRepository;
     private SuggestionWebSocketHandler webSocketHandler;
     private UserNotificationWebSocketHandler userNotificationHandler;
+    private SiteSettingsService siteSettingsService;
+    private SlackNotificationService slackNotificationService;
     private SuggestionService service;
 
     @BeforeEach
     void setUp() {
         suggestionRepository = mock(SuggestionRepository.class);
+        messageRepository = mock(SuggestionMessageRepository.class);
         webSocketHandler = mock(SuggestionWebSocketHandler.class);
         userNotificationHandler = mock(UserNotificationWebSocketHandler.class);
+        siteSettingsService = mock(SiteSettingsService.class);
+        slackNotificationService = mock(SlackNotificationService.class);
+
+        // Return a completed future so async calls don't hang
+        when(slackNotificationService.sendNotification(any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(null));
+
+        // Return a real SiteSettings so getSettings().getXxx() doesn't NPE
+        when(siteSettingsService.getSettings()).thenReturn(new SiteSettings());
+
+        // Return a non-null message so addMessage's msg.getId() doesn't NPE
+        SuggestionMessage savedMsg = mock(SuggestionMessage.class);
+        when(savedMsg.getId()).thenReturn(0L);
+        when(messageRepository.save(any())).thenReturn(savedMsg);
 
         service = new SuggestionService(
                 suggestionRepository,
-                mock(SuggestionMessageRepository.class),
+                messageRepository,
                 mock(PlanTaskRepository.class),
                 mock(ClaudeService.class),
-                mock(SiteSettingsService.class),
+                siteSettingsService,
                 webSocketHandler,
-                userNotificationHandler
+                userNotificationHandler,
+                slackNotificationService
         );
     }
+
+    // --- Existing broadcastClarificationQuestions tests ---
 
     @Test
     void broadcastClarificationQuestions_sendsUserNotificationToAuthor() throws Exception {
@@ -124,6 +151,105 @@ class SuggestionServiceNotificationTest {
                         "questionCount", 3
                 ))
         );
+    }
+
+    // --- Slack notification trigger tests ---
+
+    @Test
+    void approveSuggestion_sendsApprovedSlackNotification() {
+        Suggestion suggestion = new Suggestion();
+        suggestion.setTitle("My feature");
+        when(suggestionRepository.findById(10L)).thenReturn(Optional.of(suggestion));
+        when(suggestionRepository.save(any())).thenReturn(suggestion);
+
+        service.approveSuggestion(10L);
+
+        verify(slackNotificationService).sendNotification(suggestion, "APPROVED");
+    }
+
+    @Test
+    void denySuggestion_sendsDeniedSlackNotification() {
+        Suggestion suggestion = new Suggestion();
+        suggestion.setTitle("My feature");
+        when(suggestionRepository.findById(20L)).thenReturn(Optional.of(suggestion));
+        when(suggestionRepository.save(any())).thenReturn(suggestion);
+
+        service.denySuggestion(20L, "Not aligned with goals");
+
+        verify(slackNotificationService).sendNotification(suggestion, "DENIED");
+    }
+
+    @Test
+    void denySuggestion_nullReason_sendsDeniedSlackNotification() {
+        Suggestion suggestion = new Suggestion();
+        suggestion.setTitle("My feature");
+        when(suggestionRepository.findById(21L)).thenReturn(Optional.of(suggestion));
+        when(suggestionRepository.save(any())).thenReturn(suggestion);
+
+        service.denySuggestion(21L, null);
+
+        verify(slackNotificationService).sendNotification(suggestion, "DENIED");
+    }
+
+    @Test
+    void handleExecutionResult_completedResult_sendsDevCompleteSlackNotification() {
+        Suggestion suggestion = new Suggestion();
+        suggestion.setTitle("My feature");
+        when(suggestionRepository.findById(30L)).thenReturn(Optional.of(suggestion));
+        when(suggestionRepository.save(any())).thenReturn(suggestion);
+
+        // Use a spy so we can stub createPrAsync and avoid its complex dependencies
+        SuggestionService spyService = spy(service);
+        doNothing().when(spyService).createPrAsync(any());
+
+        spyService.handleExecutionResult(30L, "COMPLETED — all done");
+
+        verify(slackNotificationService).sendNotification(suggestion, "DEV_COMPLETE");
+    }
+
+    @Test
+    void handleExecutionResult_failedResult_doesNotSendDevCompleteNotification() {
+        Suggestion suggestion = new Suggestion();
+        suggestion.setTitle("My feature");
+        when(suggestionRepository.findById(31L)).thenReturn(Optional.of(suggestion));
+        when(suggestionRepository.save(any())).thenReturn(suggestion);
+
+        service.handleExecutionResult(31L, "FAILED — something went wrong");
+
+        verify(slackNotificationService, never()).sendNotification(any(), eq("DEV_COMPLETE"));
+    }
+
+    @Test
+    void handleExecutionResult_suggestionNotFound_doesNotSendAnyNotification() {
+        when(suggestionRepository.findById(99L)).thenReturn(Optional.empty());
+
+        service.handleExecutionResult(99L, "COMPLETED");
+
+        verify(slackNotificationService, never()).sendNotification(any(), any());
+    }
+
+    @Test
+    void approveSuggestion_suggestionNotFound_throwsAndDoesNotSendNotification() {
+        when(suggestionRepository.findById(50L)).thenReturn(Optional.empty());
+
+        try {
+            service.approveSuggestion(50L);
+        } catch (IllegalArgumentException ignored) {
+        }
+
+        verify(slackNotificationService, never()).sendNotification(any(), any());
+    }
+
+    @Test
+    void denySuggestion_suggestionNotFound_throwsAndDoesNotSendNotification() {
+        when(suggestionRepository.findById(51L)).thenReturn(Optional.empty());
+
+        try {
+            service.denySuggestion(51L, "reason");
+        } catch (IllegalArgumentException ignored) {
+        }
+
+        verify(slackNotificationService, never()).sendNotification(any(), any());
     }
 
     private void invokeBroadcastClarificationQuestions(Long suggestionId, List<String> questions) throws Exception {
