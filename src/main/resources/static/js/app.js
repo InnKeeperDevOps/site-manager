@@ -124,6 +124,40 @@ const app = {
         this.navigate('list');
     },
 
+    async register(e) {
+        e.preventDefault();
+        const username = document.getElementById('registerUsername').value;
+        const password = document.getElementById('registerPassword').value;
+        const confirmPassword = document.getElementById('registerConfirmPassword').value;
+
+        if (password !== confirmPassword) {
+            alert('Passwords do not match');
+            return;
+        }
+
+        const data = await this.api('/auth/register', {
+            method: 'POST',
+            body: JSON.stringify({ username, password })
+        });
+
+        if (data.error) { alert(data.error); return; }
+
+        if (data.pending) {
+            alert('Your account has been created and is pending approval.');
+            this.navigate('login');
+        } else {
+            this.state.loggedIn = true;
+            this.state.username = data.username;
+            this.state.role = 'USER';
+            this.updateHeader();
+            this.navigate('list');
+        }
+
+        document.getElementById('registerUsername').value = '';
+        document.getElementById('registerPassword').value = '';
+        document.getElementById('registerConfirmPassword').value = '';
+    },
+
     async logout() {
         await this.api('/auth/logout', { method: 'POST' });
         this.state.loggedIn = false;
@@ -139,7 +173,10 @@ const app = {
     navigate(view, data) {
         document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
         const el = document.getElementById(view + 'View');
-        if (el) el.classList.add('active');
+        if (el) {
+            el.style.display = '';
+            el.classList.add('active');
+        }
 
         // Disconnect existing WebSocket
         this.disconnectWs();
@@ -992,6 +1029,89 @@ const app = {
         slackInput.placeholder = settings.slackWebhookUrl
             ? 'Currently configured — enter new URL to replace'
             : 'https://hooks.slack.com/services/...';
+        await this.loadPendingUsers();
+    },
+
+    async loadPendingUsers() {
+        const container = document.getElementById('pendingUsersContainer');
+        if (!container) return;
+
+        const section = document.getElementById('pendingUsersSection');
+        const canManage = this.state.role === 'ROOT_ADMIN' || this.state.role === 'ADMIN';
+        if (section) section.style.display = canManage ? '' : 'none';
+        if (!canManage) return;
+
+        try {
+            const users = await this.api('/users/pending');
+            if (!users || users.length === 0) {
+                container.textContent = 'No pending registrations';
+                return;
+            }
+
+            const table = document.createElement('table');
+            table.style.cssText = 'width:100%;border-collapse:collapse';
+
+            const thead = document.createElement('thead');
+            thead.innerHTML = '<tr>' +
+                '<th style="text-align:left;padding:0.5rem;border-bottom:1px solid var(--border)">Username</th>' +
+                '<th style="text-align:left;padding:0.5rem;border-bottom:1px solid var(--border)">Registered</th>' +
+                '<th style="text-align:left;padding:0.5rem;border-bottom:1px solid var(--border)">Actions</th>' +
+                '</tr>';
+            table.appendChild(thead);
+
+            const tbody = document.createElement('tbody');
+            users.forEach(user => {
+                const tr = document.createElement('tr');
+
+                const tdUser = document.createElement('td');
+                tdUser.style.padding = '0.5rem';
+                tdUser.textContent = user.username;
+
+                const tdDate = document.createElement('td');
+                tdDate.style.padding = '0.5rem';
+                tdDate.textContent = this.timeAgo(user.createdAt);
+
+                const tdActions = document.createElement('td');
+                tdActions.style.padding = '0.5rem';
+
+                const approveBtn = document.createElement('button');
+                approveBtn.className = 'btn btn-success btn-sm';
+                approveBtn.textContent = 'Approve';
+                approveBtn.style.marginRight = '0.5rem';
+                approveBtn.onclick = () => app.approveUser(user.id);
+
+                const denyBtn = document.createElement('button');
+                denyBtn.className = 'btn btn-danger btn-sm';
+                denyBtn.textContent = 'Deny';
+                denyBtn.onclick = () => app.denyUser(user.id);
+
+                tdActions.appendChild(approveBtn);
+                tdActions.appendChild(denyBtn);
+
+                tr.appendChild(tdUser);
+                tr.appendChild(tdDate);
+                tr.appendChild(tdActions);
+                tbody.appendChild(tr);
+            });
+            table.appendChild(tbody);
+
+            container.innerHTML = '';
+            container.appendChild(table);
+        } catch (err) {
+            container.textContent = 'Failed to load pending registrations.';
+        }
+    },
+
+    async approveUser(userId) {
+        const data = await this.api('/users/' + userId + '/approve', { method: 'POST' });
+        if (data.error) { alert(data.error); return; }
+        await this.loadPendingUsers();
+    },
+
+    async denyUser(userId) {
+        const data = await this.api('/users/' + userId + '/deny', { method: 'POST' });
+        if (data.error) { alert(data.error); return; }
+        await this.loadPendingUsers();
     },
 
     async saveSettings() {
