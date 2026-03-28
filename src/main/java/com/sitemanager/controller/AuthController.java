@@ -1,40 +1,54 @@
 package com.sitemanager.controller;
 
+import com.sitemanager.dto.AuthStatusResponse;
 import com.sitemanager.dto.LoginRequest;
 import com.sitemanager.dto.RegisterRequest;
 import com.sitemanager.dto.SetupRequest;
 import com.sitemanager.exception.AccountDeniedException;
 import com.sitemanager.exception.AccountPendingApprovalException;
 import com.sitemanager.model.User;
+import com.sitemanager.model.enums.Permission;
 import com.sitemanager.service.AuthService;
+import com.sitemanager.service.PermissionService;
 import jakarta.servlet.http.HttpSession;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/auth")
 public class AuthController {
 
     private final AuthService authService;
+    private final PermissionService permissionService;
 
-    public AuthController(AuthService authService) {
+    public AuthController(AuthService authService, PermissionService permissionService) {
         this.authService = authService;
+        this.permissionService = permissionService;
     }
 
     @GetMapping("/status")
-    public ResponseEntity<Map<String, Object>> status(HttpSession session) {
+    public ResponseEntity<AuthStatusResponse> status(HttpSession session) {
         boolean setupRequired = authService.isSetupRequired();
         String currentUser = (String) session.getAttribute("username");
         String role = (String) session.getAttribute("role");
 
-        return ResponseEntity.ok(Map.of(
-                "setupRequired", setupRequired,
-                "loggedIn", currentUser != null,
-                "username", currentUser != null ? currentUser : "",
-                "role", role != null ? role : ""
+        List<String> permissions = Arrays.stream(Permission.values())
+                .filter(p -> permissionService.hasPermission(session, p))
+                .map(Permission::name)
+                .collect(Collectors.toList());
+
+        return ResponseEntity.ok(new AuthStatusResponse(
+                setupRequired,
+                currentUser != null,
+                currentUser != null ? currentUser : "",
+                role != null ? role : "",
+                permissions
         ));
     }
 

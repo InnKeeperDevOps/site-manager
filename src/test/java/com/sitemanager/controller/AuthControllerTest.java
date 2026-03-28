@@ -21,6 +21,7 @@ import org.springframework.mock.web.MockHttpSession;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.MockMvc;
 
+import static org.hamcrest.Matchers.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -284,5 +285,85 @@ class AuthControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void status_unauthenticated_returnsEmptyPermissions() throws Exception {
+        // Create a root admin so setup is not required
+        SetupRequest setup = new SetupRequest();
+        setup.setUsername("admin");
+        setup.setPassword("password123");
+        mockMvc.perform(post("/api/auth/setup")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(setup)));
+
+        mockMvc.perform(get("/api/auth/status"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.permissions").isArray())
+                .andExpect(jsonPath("$.permissions").isEmpty());
+    }
+
+    @Test
+    void status_asRootAdmin_returnsAllPermissions() throws Exception {
+        SetupRequest setup = new SetupRequest();
+        setup.setUsername("admin");
+        setup.setPassword("password123");
+        mockMvc.perform(post("/api/auth/setup")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(setup)));
+
+        MockHttpSession session = new MockHttpSession();
+        LoginRequest login = new LoginRequest();
+        login.setUsername("admin");
+        login.setPassword("password123");
+        mockMvc.perform(post("/api/auth/login")
+                .session(session)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(login)));
+
+        mockMvc.perform(get("/api/auth/status").session(session))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.permissions").isArray())
+                .andExpect(jsonPath("$.permissions", hasItems(
+                        "CREATE_SUGGESTIONS", "VOTE", "REPLY",
+                        "APPROVE_DENY_SUGGESTIONS", "MANAGE_SETTINGS", "MANAGE_USERS"
+                )));
+    }
+
+    @Test
+    void status_asRegularUser_returnsGroupPermissions() throws Exception {
+        // Create root admin so setup is done
+        SetupRequest setup = new SetupRequest();
+        setup.setUsername("admin");
+        setup.setPassword("password123");
+        mockMvc.perform(post("/api/auth/setup")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(setup)));
+
+        // Create a group that only allows voting
+        UserGroup group = new UserGroup("VotersOnly", false, true, false, false, false, false);
+        group = userGroupRepository.save(group);
+
+        // Create an approved user in that group
+        User user = new User("voter", passwordEncoder.encode("password123"), UserRole.USER);
+        user.setApproved(true);
+        user.setGroup(group);
+        userRepository.save(user);
+
+        MockHttpSession session = new MockHttpSession();
+        LoginRequest login = new LoginRequest();
+        login.setUsername("voter");
+        login.setPassword("password123");
+        mockMvc.perform(post("/api/auth/login")
+                .session(session)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(login)));
+
+        mockMvc.perform(get("/api/auth/status").session(session))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.permissions").isArray())
+                .andExpect(jsonPath("$.permissions", contains("VOTE")))
+                .andExpect(jsonPath("$.permissions", not(hasItem("CREATE_SUGGESTIONS"))))
+                .andExpect(jsonPath("$.permissions", not(hasItem("MANAGE_SETTINGS"))));
     }
 }
