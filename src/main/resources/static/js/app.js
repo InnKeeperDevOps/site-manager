@@ -166,6 +166,11 @@ const app = {
             body: JSON.stringify({ username, password })
         });
 
+        if (data.status === 403 || (data.error && data.error.toLowerCase().includes('disabled'))) {
+            alert('Registrations are currently closed. Please contact an administrator.');
+            this.navigate('login');
+            return;
+        }
         if (data.error) { alert(data.error); return; }
 
         if (data.pending) {
@@ -197,6 +202,13 @@ const app = {
 
     // --- Navigation ---
     navigate(view, data) {
+        // Guard: block registration when it is disabled
+        if (view === 'register' && this.state.settings.registrationsEnabled === false) {
+            this.showToast('Registrations are currently closed.');
+            this.navigate('login');
+            return;
+        }
+
         // Guard: enforce suggestion creation permissions before showing the view
         if (view === 'create') {
             const allowAnon = this.state.settings.allowAnonymousSuggestions;
@@ -226,6 +238,14 @@ const app = {
             case 'list': this.loadSuggestions(); break;
             case 'detail': this.loadDetail(data); break;
             case 'settings': this.loadSettings(); break;
+            case 'login': {
+                const regDisabled = this.state.settings.registrationsEnabled === false;
+                const createLink = document.getElementById('createAccountLink');
+                const closedMsg = document.getElementById('registrationsClosedMsg');
+                if (createLink) createLink.style.display = regDisabled ? 'none' : '';
+                if (closedMsg) closedMsg.style.display = regDisabled ? '' : 'none';
+                break;
+            }
             case 'create':
                 const nameGroup = document.getElementById('anonNameGroup');
                 nameGroup.style.display = this.state.loggedIn ? 'none' : '';
@@ -1090,6 +1110,7 @@ const app = {
         document.getElementById('settingVoting').checked = settings.allowVoting;
         document.getElementById('settingApproval').checked = settings.requireApproval;
         document.getElementById('autoMergePr').checked = settings.autoMergePr || false;
+        document.getElementById('registrationsEnabled').checked = settings.registrationsEnabled ?? true;
         const slackInput = document.getElementById('settingSlackWebhookUrl');
         slackInput.value = settings.slackWebhookUrl || '';
         slackInput.placeholder = settings.slackWebhookUrl
@@ -1465,7 +1486,8 @@ const app = {
                 allowVoting: document.getElementById('settingVoting').checked,
                 requireApproval: document.getElementById('settingApproval').checked,
                 autoMergePr: document.getElementById('autoMergePr').checked,
-                slackWebhookUrl: document.getElementById('settingSlackWebhookUrl').value || null
+                slackWebhookUrl: document.getElementById('settingSlackWebhookUrl').value || null,
+                registrationsEnabled: document.getElementById('registrationsEnabled').checked
             })
         });
         if (data.error) { alert(data.error); return; }
