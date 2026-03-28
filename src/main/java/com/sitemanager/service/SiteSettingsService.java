@@ -43,6 +43,7 @@ public class SiteSettingsService {
         current.setClaudeModelExpert(updated.getClaudeModelExpert());
         current.setClaudeMaxTurnsExpert(updated.getClaudeMaxTurnsExpert());
         current.setSlackWebhookUrl(updated.getSlackWebhookUrl());
+        current.setAutoMergePr(updated.isAutoMergePr());
         SiteSettings saved = settingsRepository.save(current);
 
         // Re-clone the target repository into main-repo/ so files are up to date

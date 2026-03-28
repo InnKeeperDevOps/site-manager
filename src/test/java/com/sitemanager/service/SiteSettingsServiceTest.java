@@ -90,4 +90,34 @@ class SiteSettingsServiceTest {
 
         assertNull(settings.getSlackWebhookUrl());
     }
+
+    @Test
+    void getSettings_autoMergePr_falseByDefault() {
+        SiteSettings settings = settingsService.getSettings();
+
+        assertFalse(settings.isAutoMergePr());
+    }
+
+    @Test
+    void updateSettings_autoMergePr_canBeEnabled() {
+        SiteSettings update = new SiteSettings();
+        update.setAutoMergePr(true);
+
+        SiteSettings result = settingsService.updateSettings(update);
+
+        assertTrue(result.isAutoMergePr());
+    }
+
+    @Test
+    void updateSettings_autoMergePr_canBeDisabledAfterEnabled() {
+        SiteSettings enable = new SiteSettings();
+        enable.setAutoMergePr(true);
+        settingsService.updateSettings(enable);
+
+        SiteSettings disable = new SiteSettings();
+        disable.setAutoMergePr(false);
+        SiteSettings result = settingsService.updateSettings(disable);
+
+        assertFalse(result.isAutoMergePr());
+    }
 }

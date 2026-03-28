@@ -255,6 +255,16 @@ class SlackNotificationServiceTest {
     }
 
     @Test
+    void buildPayload_includesMergedEmoji() {
+        Suggestion s = buildSuggestion();
+        s.setStatus(SuggestionStatus.MERGED);
+
+        String payload = service.buildPayload(s, "PR merged automatically");
+
+        assertTrue(payload.contains(":merged:"), "MERGED status should show merged emoji");
+    }
+
+    @Test
     void allowedWebhookPrefix_isHttpsSlackServicesPrefix() {
         assertEquals("https://hooks.slack.com/services/", service.getAllowedWebhookPrefix());
     }

@@ -1792,6 +1792,25 @@ public class SuggestionService {
                     "{\"type\":\"pr_created\",\"prUrl\":\"" + escapeJson(prUrl) +
                     "\",\"prNumber\":" + prNumber + "}");
 
+            // Auto-merge if enabled in settings
+            if (settingsService.getSettings().isAutoMergePr()) {
+                boolean merged = claudeService.mergePullRequest(repoUrl, prNumber, githubToken);
+                if (merged) {
+                    suggestion.setStatus(SuggestionStatus.MERGED);
+                    suggestion.setCurrentPhase("PR automatically merged into main");
+                    suggestionRepository.save(suggestion);
+                    addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                            "The review request was automatically merged into the main branch.");
+                    broadcastUpdate(suggestion);
+                    slackNotificationService.sendNotification(suggestion, "PR automatically merged");
+                } else {
+                    log.warn("Auto-merge failed for suggestion {}, staying in FINAL_REVIEW", suggestion.getId());
+                    addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                            "Automatic merge wasn't possible — an admin will need to review and merge manually.");
+                    slackNotificationService.sendNotification(suggestion, "Auto-merge failed — manual review needed");
+                }
+            }
+
         } catch (Exception e) {
             log.error("Failed to create PR for suggestion {}: {}", suggestion.getId(), e.getMessage(), e);
             addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
@@ -1847,6 +1866,25 @@ public class SuggestionService {
             webSocketHandler.sendToSuggestion(suggestion.getId(),
                     "{\"type\":\"pr_created\",\"prUrl\":\"" + escapeJson(prUrl) +
                     "\",\"prNumber\":" + prNumber + "}");
+
+            // Auto-merge if enabled in settings
+            if (settingsService.getSettings().isAutoMergePr()) {
+                boolean merged = claudeService.mergePullRequest(repoUrl, prNumber, githubToken);
+                if (merged) {
+                    suggestion.setStatus(SuggestionStatus.MERGED);
+                    suggestion.setCurrentPhase("PR automatically merged into main");
+                    suggestionRepository.save(suggestion);
+                    addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                            "The review request was automatically merged into the main branch.");
+                    broadcastUpdate(suggestion);
+                    slackNotificationService.sendNotification(suggestion, "PR automatically merged");
+                } else {
+                    log.warn("Auto-merge failed for suggestion {}, staying in FINAL_REVIEW", suggestion.getId());
+                    addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                            "Automatic merge wasn't possible — an admin will need to review and merge manually.");
+                    slackNotificationService.sendNotification(suggestion, "Auto-merge failed — manual review needed");
+                }
+            }
 
             return Map.of("success", true, "prUrl", prUrl);
 

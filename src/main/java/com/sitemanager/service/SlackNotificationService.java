@@ -31,6 +31,7 @@ public class SlackNotificationService {
             Map.entry(SuggestionStatus.TESTING, ":test_tube:"),
             Map.entry(SuggestionStatus.DEV_COMPLETE, ":rocket:"),
             Map.entry(SuggestionStatus.FINAL_REVIEW, ":eyes:"),
+            Map.entry(SuggestionStatus.MERGED, ":merged:"),
             Map.entry(SuggestionStatus.DENIED, ":x:"),
             Map.entry(SuggestionStatus.TIMED_OUT, ":hourglass_flowing_sand:")
     );

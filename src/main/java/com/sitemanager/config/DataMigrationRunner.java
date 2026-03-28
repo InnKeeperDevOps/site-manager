@@ -26,12 +26,29 @@ public class DataMigrationRunner implements CommandLineRunner {
     @Override
     public void run(String... args) {
         migrateStatusCheckConstraint();
+        ensureAutoMergePrColumn();
 
         int updated = jdbcTemplate.update(
                 "UPDATE suggestions SET status = 'DEV_COMPLETE' WHERE status = 'COMPLETED'");
         if (updated > 0) {
             log.info("Data migration: updated {} suggestion(s) from COMPLETED to DEV_COMPLETE", updated);
         }
+    }
+
+    /**
+     * Adds the auto_merge_pr column to site_settings if it does not already exist.
+     * Hibernate ddl-auto:update handles this on a fresh schema, but this guard
+     * ensures existing databases are also migrated safely.
+     */
+    private void ensureAutoMergePrColumn() {
+        String tableSql = jdbcTemplate.queryForObject(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='site_settings'",
+                String.class);
+        if (tableSql == null || tableSql.contains("auto_merge_pr")) {
+            return;
+        }
+        jdbcTemplate.execute("ALTER TABLE site_settings ADD COLUMN auto_merge_pr INTEGER NOT NULL DEFAULT 0");
+        log.info("Data migration: added auto_merge_pr column to site_settings");
     }
 
     /**
