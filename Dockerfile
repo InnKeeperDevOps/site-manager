@@ -19,8 +19,11 @@ RUN npm install -g @anthropic-ai/claude-code
 
 COPY --from=build /app/build/libs/*.jar app.jar
 
+# Create a non-root user for running Claude CLI subprocesses
+RUN useradd -m -s /bin/bash claudeuser
+
 # Create workspace directory for cloning repos
-RUN mkdir -p /workspace
+RUN mkdir -p /workspace && chown claudeuser:claudeuser /workspace
 
 EXPOSE 8080
 

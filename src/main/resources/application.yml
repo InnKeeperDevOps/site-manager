@@ -43,3 +43,6 @@ app:
   # Enable verbose CLI logging: logs full command, real-time stdout, and response at INFO level.
   # Also passes --verbose to the Claude CLI subprocess for turn-by-turn output.
   claude-verbose: ${CLAUDE_VERBOSE:false}
+  # When running as root, run Claude CLI and git subprocesses as this user instead.
+  # The user must exist in the container. Leave empty to disable (run as current user).
+  claude-run-as-user: ${CLAUDE_RUN_AS_USER:}

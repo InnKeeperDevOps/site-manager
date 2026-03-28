@@ -63,6 +63,9 @@ public class ClaudeService {
     @Value("${app.claude-verbose:false}")
     private boolean claudeVerbose;
 
+    @Value("${app.claude-run-as-user:}")
+    private String claudeRunAsUser;
+
     @Value("${app.claude-model:}")
     private String claudeModelDefault;
 
@@ -95,6 +98,36 @@ public class ClaudeService {
         this.timestampHead = 0;
         log.info("Claude CLI rate limiter initialized: maxConcurrent={}, maxCallsPerMinute={}, fifo=true",
                 claudeMaxConcurrent, claudeMaxCallsPerMinute);
+        if (shouldRunAsDifferentUser()) {
+            log.info("Claude CLI subprocesses will run as user '{}' (current user is root)", claudeRunAsUser);
+        }
+    }
+
+    /**
+     * Check whether subprocesses should be run as a different user.
+     * This is true when running as root and claude-run-as-user is configured.
+     */
+    private boolean shouldRunAsDifferentUser() {
+        return claudeRunAsUser != null && !claudeRunAsUser.isBlank()
+                && "root".equals(System.getProperty("user.name"));
+    }
+
+    /**
+     * Wrap a command list with "runuser -u &lt;user&gt; --" so it executes as the
+     * configured non-root user. Returns the original command unchanged if not running as root
+     * or no run-as user is configured.
+     */
+    private List<String> wrapCommandForUser(List<String> command) {
+        if (!shouldRunAsDifferentUser()) {
+            return command;
+        }
+        List<String> wrapped = new java.util.ArrayList<>();
+        wrapped.add("runuser");
+        wrapped.add("-u");
+        wrapped.add(claudeRunAsUser);
+        wrapped.add("--");
+        wrapped.addAll(command);
+        return wrapped;
     }
 
     /**
@@ -186,7 +219,8 @@ public class ClaudeService {
      * Create a new branch from the current HEAD in the given repo directory.
      */
     public void createBranch(String repoDir, String branchName) throws Exception {
-        ProcessBuilder pb = new ProcessBuilder("git", "checkout", "-b", branchName);
+        ProcessBuilder pb = new ProcessBuilder(wrapCommandForUser(
+                java.util.List.of("git", "checkout", "-b", branchName)));
         pb.directory(new File(repoDir));
         pb.redirectErrorStream(true);
         pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
@@ -608,7 +642,7 @@ public class ClaudeService {
         }
         command.add("--dangerously-skip-permissions");
 
-        ProcessBuilder pb = new ProcessBuilder(command);
+        ProcessBuilder pb = new ProcessBuilder(wrapCommandForUser(command));
 
         if (workingDir != null) {
             pb.directory(new File(workingDir));
@@ -846,7 +880,8 @@ public class ClaudeService {
         // Get HEAD before pull
         String headBefore = getHeadCommit(targetDir);
 
-        ProcessBuilder pb = new ProcessBuilder("git", "pull");
+        ProcessBuilder pb = new ProcessBuilder(wrapCommandForUser(
+                java.util.List.of("git", "pull")));
         pb.directory(dir);
         pb.redirectErrorStream(true);
         pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
@@ -894,7 +929,8 @@ public class ClaudeService {
             return;
         }
 
-        ProcessBuilder fetchPb = new ProcessBuilder("git", "fetch", "origin");
+        ProcessBuilder fetchPb = new ProcessBuilder(wrapCommandForUser(
+                java.util.List.of("git", "fetch", "origin")));
         fetchPb.directory(dir);
         fetchPb.redirectErrorStream(true);
         fetchPb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
@@ -951,7 +987,8 @@ public class ClaudeService {
     }
 
     private String getHeadCommit(String repoDir) throws Exception {
-        ProcessBuilder pb = new ProcessBuilder("git", "rev-parse", "HEAD");
+        ProcessBuilder pb = new ProcessBuilder(wrapCommandForUser(
+                java.util.List.of("git", "rev-parse", "HEAD")));
         pb.directory(new File(repoDir));
         pb.redirectErrorStream(true);
         Process process = pb.start();
@@ -962,7 +999,8 @@ public class ClaudeService {
 
     private String detectDefaultBranch(String repoDir) throws Exception {
         // Check if origin/main exists
-        ProcessBuilder pb = new ProcessBuilder("git", "rev-parse", "--verify", "origin/main");
+        ProcessBuilder pb = new ProcessBuilder(wrapCommandForUser(
+                java.util.List.of("git", "rev-parse", "--verify", "origin/main")));
         pb.directory(new File(repoDir));
         pb.redirectErrorStream(true);
         Process process = pb.start();
@@ -993,7 +1031,8 @@ public class ClaudeService {
         }
 
         String sshRepoUrl = toSshUrl(repoUrl);
-        ProcessBuilder pb = new ProcessBuilder("git", "clone", sshRepoUrl, targetDir);
+        ProcessBuilder pb = new ProcessBuilder(wrapCommandForUser(
+                java.util.List.of("git", "clone", sshRepoUrl, targetDir)));
         pb.redirectErrorStream(true);
         pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
 
@@ -1056,7 +1095,8 @@ public class ClaudeService {
 
         // Check if git config has a key configured
         try {
-            ProcessBuilder pb = new ProcessBuilder("git", "config", "--get", "core.sshCommand");
+            ProcessBuilder pb = new ProcessBuilder(wrapCommandForUser(
+                    java.util.List.of("git", "config", "--get", "core.sshCommand")));
             pb.redirectErrorStream(true);
             Process p = pb.start();
             String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
@@ -1102,7 +1142,8 @@ public class ClaudeService {
      * Push a branch to the remote origin.
      */
     public void pushBranch(String repoDir, String branchName) throws Exception {
-        ProcessBuilder pb = new ProcessBuilder("git", "push", "-u", "origin", branchName);
+        ProcessBuilder pb = new ProcessBuilder(wrapCommandForUser(
+                java.util.List.of("git", "push", "-u", "origin", branchName)));
         pb.directory(new File(repoDir));
         pb.redirectErrorStream(true);
         pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
@@ -1142,7 +1183,8 @@ public class ClaudeService {
 
     public void stageAllChanges(String repoDir) throws Exception {
         File dir = new File(repoDir);
-        ProcessBuilder addPb = new ProcessBuilder("git", "add", "-A");
+        ProcessBuilder addPb = new ProcessBuilder(wrapCommandForUser(
+                java.util.List.of("git", "add", "-A")));
         addPb.directory(dir);
         addPb.redirectErrorStream(true);
         addPb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
@@ -1158,7 +1200,8 @@ public class ClaudeService {
         File dir = new File(repoDir);
 
         // Check if there are staged changes (exit 0 = no changes, exit 1 = changes exist)
-        ProcessBuilder diffPb = new ProcessBuilder("git", "diff", "--cached", "--quiet");
+        ProcessBuilder diffPb = new ProcessBuilder(wrapCommandForUser(
+                java.util.List.of("git", "diff", "--cached", "--quiet")));
         diffPb.directory(dir);
         diffPb.redirectErrorStream(true);
         diffPb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
@@ -1171,9 +1214,9 @@ public class ClaudeService {
         }
 
         // Commit with embedded author identity (avoids needing global git config)
-        ProcessBuilder commitPb = new ProcessBuilder(
-                "git", "-c", "user.name=Site Manager", "-c", "user.email=site-manager@noreply",
-                "commit", "-m", message);
+        ProcessBuilder commitPb = new ProcessBuilder(wrapCommandForUser(
+                java.util.List.of("git", "-c", "user.name=Site Manager", "-c", "user.email=site-manager@noreply",
+                "commit", "-m", message)));
         commitPb.directory(dir);
         commitPb.redirectErrorStream(true);
         commitPb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
@@ -1199,7 +1242,8 @@ public class ClaudeService {
         File dir = new File(repoDir);
 
         // Get the stat summary
-        ProcessBuilder statPb = new ProcessBuilder("git", "diff", "--cached", "--stat");
+        ProcessBuilder statPb = new ProcessBuilder(wrapCommandForUser(
+                java.util.List.of("git", "diff", "--cached", "--stat")));
         statPb.directory(dir);
         statPb.redirectErrorStream(true);
         statPb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
@@ -1208,7 +1252,8 @@ public class ClaudeService {
         statProcess.waitFor();
 
         // Get the actual diff (truncated)
-        ProcessBuilder diffPb = new ProcessBuilder("git", "diff", "--cached");
+        ProcessBuilder diffPb = new ProcessBuilder(wrapCommandForUser(
+                java.util.List.of("git", "diff", "--cached")));
         diffPb.directory(dir);
         diffPb.redirectErrorStream(true);
         diffPb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
@@ -1256,8 +1301,9 @@ public class ClaudeService {
      */
     public String getCommitLog(String repoDir) throws Exception {
         String defaultBranch = detectDefaultBranch(repoDir);
-        ProcessBuilder pb = new ProcessBuilder("git", "log",
-                "origin/" + defaultBranch + "..HEAD", "--pretty=format:%s");
+        ProcessBuilder pb = new ProcessBuilder(wrapCommandForUser(
+                java.util.List.of("git", "log",
+                "origin/" + defaultBranch + "..HEAD", "--pretty=format:%s")));
         pb.directory(new File(repoDir));
         pb.redirectErrorStream(true);
         Process process = pb.start();
