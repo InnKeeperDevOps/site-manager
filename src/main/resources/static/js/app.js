@@ -11,6 +11,7 @@ const app = {
         ws: null,
         notificationWs: null,
         notificationWsReconnectTimeout: null,
+        recommendations: [],
         clarification: {
             questions: [],
             answers: [],
@@ -32,7 +33,16 @@ const app = {
             currentIndex: 0,
             active: false,
             expertName: ''
-        }
+        },
+        approvalPendingCount: 0,
+        listFilters: {
+            search: '',
+            status: '',
+            priority: '',
+            sortBy: 'created',
+            sortDir: 'desc'
+        },
+        searchDebounceTimer: null
     },
 
     async init() {
@@ -88,6 +98,14 @@ const app = {
             settingsBtn.style.display = 'none';
         }
         this.updateNewSuggestionBtn();
+        this.updateAiRecommendationsBtn();
+    },
+
+    updateAiRecommendationsBtn() {
+        const btn = document.getElementById('aiRecommendationsBtn');
+        if (!btn) return;
+        const { loggedIn, role } = this.state;
+        btn.style.display = (loggedIn && (role === 'ROOT_ADMIN' || role === 'ADMIN')) ? '' : 'none';
     },
 
     updateNewSuggestionBtn() {
@@ -254,12 +272,69 @@ const app = {
     },
 
     // --- Suggestions ---
+    onSearchInput() {
+        clearTimeout(this.state.searchDebounceTimer);
+        this.state.searchDebounceTimer = setTimeout(() => this.applyFilters(), 300);
+    },
+
+    applyFilters() {
+        const search = document.getElementById('searchInput')?.value ?? '';
+        const status = document.getElementById('statusFilter')?.value ?? '';
+        const priority = document.getElementById('priorityFilter')?.value ?? '';
+        const sortBy = document.getElementById('sortByFilter')?.value ?? 'created';
+        const sortDir = document.getElementById('sortDirFilter')?.value ?? 'desc';
+
+        this.state.listFilters = { search, status, priority, sortBy, sortDir };
+
+        const params = new URLSearchParams();
+        if (search) params.set('search', search);
+        if (status) params.set('status', status);
+        if (priority) params.set('priority', priority);
+        if (sortBy !== 'created') params.set('sortBy', sortBy);
+        if (sortDir !== 'desc') params.set('sortDir', sortDir);
+        const qs = params.toString();
+        history.replaceState(null, '', qs ? '?' + qs : window.location.pathname);
+
+        this.loadSuggestions();
+    },
+
+    restoreFiltersFromUrl() {
+        const params = new URLSearchParams(window.location.search);
+        const search = params.get('search') || '';
+        const status = params.get('status') || '';
+        const priority = params.get('priority') || '';
+        const sortBy = params.get('sortBy') || 'created';
+        const sortDir = params.get('sortDir') || 'desc';
+        this.state.listFilters = { search, status, priority, sortBy, sortDir };
+
+        const searchEl = document.getElementById('searchInput');
+        const statusEl = document.getElementById('statusFilter');
+        const priorityEl = document.getElementById('priorityFilter');
+        const sortByEl = document.getElementById('sortByFilter');
+        const sortDirEl = document.getElementById('sortDirFilter');
+        if (searchEl) searchEl.value = search;
+        if (statusEl) statusEl.value = status;
+        if (priorityEl) priorityEl.value = priority;
+        if (sortByEl) sortByEl.value = sortBy;
+        if (sortDirEl) sortDirEl.value = sortDir;
+    },
+
     async loadSuggestions() {
+        this.restoreFiltersFromUrl();
         const list = document.getElementById('suggestionList');
         list.innerHTML = '<div class="loading">Loading...</div>';
 
+        const { search, status, priority, sortBy, sortDir } = this.state.listFilters;
+        const params = new URLSearchParams();
+        if (search) params.set('search', search);
+        if (status) params.set('status', status);
+        if (priority) params.set('priority', priority);
+        if (sortBy && sortBy !== 'created') params.set('sortBy', sortBy);
+        if (sortDir && sortDir !== 'desc') params.set('sortDir', sortDir);
+        const qs = params.toString();
+
         try {
-            const suggestions = await this.api('/suggestions');
+            const suggestions = await this.api('/suggestions' + (qs ? '?' + qs : ''));
             const settings = await this.api('/settings');
             this.state.settings = settings;
             this.updateNewSuggestionBtn();
@@ -269,8 +344,13 @@ const app = {
                 return;
             }
 
-            list.innerHTML = suggestions.map(s => `
-                <div class="card suggestion-item" onclick="app.navigate('detail', ${s.id})">
+            const canQuickApprove = this.state.permissions.includes('APPROVE_DENY_SUGGESTIONS');
+
+            list.innerHTML = suggestions.map(s => {
+                const showApproveActions = canQuickApprove && ['PLANNED', 'DISCUSSING'].includes(s.status);
+                const priorityLabel = s.priority || 'MEDIUM';
+                return `
+                <div class="card suggestion-item" data-suggestion-id="${s.id}" onclick="app.navigate('detail', ${s.id})">
                     <div class="suggestion-header">
                         <div>
                             <div class="suggestion-title">${this.esc(s.title)}</div>
@@ -280,11 +360,18 @@ const app = {
                                 ${settings.allowVoting ? `<span>&#9650; ${s.upVotes} &#9660; ${s.downVotes}</span>` : ''}
                             </div>
                         </div>
-                        <span class="status-badge status-${s.status}">${s.status.replace('_', ' ')}</span>
+                        <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap">
+                            <span class="priority-badge priority-${priorityLabel}">${priorityLabel}</span>
+                            <span class="status-badge status-${s.status}">${s.status.replace('_', ' ')}</span>
+                        </div>
                     </div>
                     ${s.currentPhase ? `<div style="font-size:0.8rem;color:${['IN_PROGRESS','EXPERT_REVIEW'].includes(s.status) ? 'var(--primary)' : 'var(--text-muted)'};margin-top:0.5rem">${['IN_PROGRESS','EXPERT_REVIEW'].includes(s.status) ? '<span class="spinner" style="display:inline-block;width:12px;height:12px;margin-right:4px;vertical-align:middle"></span>' : ''}${this.esc(s.currentPhase)}</div>` : ''}
-                </div>
-            `).join('');
+                    ${showApproveActions ? `<div class="suggestion-quick-actions" onclick="event.stopPropagation()">
+                        <button class="btn btn-success btn-sm" onclick="app.approveSuggestion(${s.id})">Approve</button>
+                        <button class="btn btn-danger btn-sm" onclick="app.denySuggestion(${s.id})">Deny</button>
+                    </div>` : ''}
+                </div>`;
+            }).join('');
         } catch (err) {
             list.innerHTML = '<div class="card" style="color:var(--danger)">Failed to load suggestions.</div>';
         }
@@ -308,6 +395,21 @@ const app = {
         const statusEl = document.getElementById('detailStatus');
         statusEl.textContent = suggestion.status.replace('_', ' ');
         statusEl.className = 'status-badge status-' + suggestion.status;
+
+        const priorityLabel = suggestion.priority || 'MEDIUM';
+        const priorityBadge = document.getElementById('detailPriorityBadge');
+        if (priorityBadge) {
+            priorityBadge.textContent = priorityLabel;
+            priorityBadge.className = 'priority-badge priority-' + priorityLabel;
+        }
+
+        const isAdmin = this.state.role === 'ROOT_ADMIN' || this.state.role === 'ADMIN';
+        const priorityAdminEl = document.getElementById('detailPriorityAdmin');
+        const prioritySelectEl = document.getElementById('detailPrioritySelect');
+        if (priorityAdminEl && prioritySelectEl) {
+            priorityAdminEl.style.display = isAdmin ? '' : 'none';
+            prioritySelectEl.value = priorityLabel;
+        }
 
         document.getElementById('detailUpVotes').textContent = suggestion.upVotes;
         document.getElementById('detailDownVotes').textContent = suggestion.downVotes;
@@ -352,6 +454,9 @@ const app = {
             this.state.expertReview.active = false;
         }
         this.renderExpertReview();
+
+        // Expert review summary panel
+        this.loadReviewSummary(id, suggestion.expertReviewNotes);
 
         // Tasks
         this.renderTasks();
@@ -602,6 +707,73 @@ const app = {
         ).join('');
     },
 
+    // --- Expert Review Summary Panel ---
+    async loadReviewSummary(id, expertReviewNotes) {
+        const panel = document.getElementById('reviewSummaryPanel');
+        if (!panel) return;
+        // Only show if there are any notes stored
+        if (!expertReviewNotes) {
+            panel.style.display = 'none';
+            return;
+        }
+        try {
+            const summary = await this.api('/suggestions/' + id + '/review-summary');
+            if (!Array.isArray(summary) || summary.length === 0) {
+                panel.style.display = 'none';
+                return;
+            }
+            this.renderReviewSummary(summary);
+        } catch (e) {
+            panel.style.display = 'none';
+        }
+    },
+
+    renderReviewSummary(summary) {
+        const panel = document.getElementById('reviewSummaryPanel');
+        const grid = document.getElementById('reviewSummaryGrid');
+        if (!panel || !grid) return;
+
+        const dotColor = { APPROVED: '#16a34a', FLAGGED: '#d97706', PENDING: '#94a3b8' };
+        const dotTitle = { APPROVED: 'Approved', FLAGGED: 'Concerns raised', PENDING: 'Not yet reviewed' };
+
+        grid.innerHTML = summary.map(e => `
+            <div style="display:flex;align-items:flex-start;gap:0.5rem;padding:0.4rem 0.6rem;background:#fff;border-radius:6px;border:1px solid #e2e8f0">
+                <span title="${dotTitle[e.status] || e.status}"
+                      style="flex-shrink:0;width:10px;height:10px;border-radius:50%;background:${dotColor[e.status] || '#94a3b8'};margin-top:4px"></span>
+                <div style="min-width:0">
+                    <div style="font-size:0.82rem;font-weight:600;color:#1e293b">${this.esc(e.expertName)}</div>
+                    <div style="font-size:0.78rem;color:#64748b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px"
+                         title="${this.esc(e.keyPoint)}">${this.esc(e.keyPoint)}</div>
+                </div>
+            </div>`).join('');
+
+        panel.style.display = '';
+    },
+
+    toggleReviewSummary() {
+        const content = document.getElementById('reviewSummaryContent');
+        const toggle = document.getElementById('reviewSummaryToggle');
+        if (!content || !toggle) return;
+        if (content.style.display === 'none') {
+            content.style.display = '';
+            toggle.innerHTML = '&#9660; Hide';
+        } else {
+            content.style.display = 'none';
+            toggle.innerHTML = '&#9654; Show';
+        }
+    },
+
+    showFullReviews(e) {
+        e.preventDefault();
+        const fullReviews = document.getElementById('detailExpertReview');
+        if (fullReviews) {
+            fullReviews.style.display = '';
+            fullReviews.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+        const link = document.getElementById('viewFullReviewsLink');
+        if (link) link.style.display = 'none';
+    },
+
     // --- Expert Clarification Wizard ---
     showExpertClarificationWizard(questions, expertName) {
         if (this.state.currentStatus && this.state.currentStatus !== 'EXPERT_REVIEW') {
@@ -835,6 +1007,70 @@ const app = {
         });
     },
 
+    async changePriority(newPriority) {
+        const id = this.state.currentSuggestion;
+        if (!id) return;
+        const data = await this.api('/suggestions/' + id + '/priority', {
+            method: 'PATCH',
+            body: JSON.stringify({ priority: newPriority })
+        });
+        if (data && data.error) {
+            this.showToast(data.error);
+            return;
+        }
+        const priorityLabel = data.priority || newPriority;
+        const badge = document.getElementById('detailPriorityBadge');
+        if (badge) {
+            badge.textContent = priorityLabel;
+            badge.className = 'priority-badge priority-' + priorityLabel;
+        }
+    },
+
+    async approveSuggestion(id) {
+        if (!confirm('Approve this suggestion and begin implementation?')) return;
+        const data = await this.api('/suggestions/' + id + '/approve', { method: 'POST' });
+        if (data && data.error) { this.showToast(data.error); return; }
+        if (this.state.approvalPendingCount > 0) {
+            this.state.approvalPendingCount--;
+            this.updateApprovalBanner();
+        }
+        await this.loadSuggestions();
+    },
+
+    async denySuggestion(id) {
+        const card = document.querySelector(`.suggestion-item[data-suggestion-id="${id}"]`);
+        if (!card) return;
+        const existing = card.querySelector('.deny-inline-form');
+        if (existing) { existing.remove(); return; }
+        const form = document.createElement('div');
+        form.className = 'deny-inline-form';
+        form.onclick = e => e.stopPropagation();
+        form.innerHTML = `
+            <textarea class="deny-reason-input" placeholder="Reason for denial (optional)" rows="2"
+                style="width:100%;margin-top:0.5rem;padding:0.4rem;border:1px solid var(--border);border-radius:4px;resize:vertical;font-size:0.85rem;box-sizing:border-box"></textarea>
+            <div style="margin-top:0.4rem;display:flex;gap:0.5rem">
+                <button class="btn btn-danger btn-sm" onclick="app.submitDenySuggestion(${id})">Confirm Deny</button>
+                <button class="btn btn-outline btn-sm" onclick="this.closest('.deny-inline-form').remove()">Cancel</button>
+            </div>`;
+        card.appendChild(form);
+        form.querySelector('.deny-reason-input').focus();
+    },
+
+    async submitDenySuggestion(id) {
+        const card = document.querySelector(`.suggestion-item[data-suggestion-id="${id}"]`);
+        const reason = card ? (card.querySelector('.deny-reason-input').value || null) : null;
+        const data = await this.api('/suggestions/' + id + '/deny', {
+            method: 'POST',
+            body: JSON.stringify({ reason })
+        });
+        if (data && data.error) { this.showToast(data.error); return; }
+        if (this.state.approvalPendingCount > 0) {
+            this.state.approvalPendingCount--;
+            this.updateApprovalBanner();
+        }
+        await this.loadSuggestions();
+    },
+
     async retryPr() {
         const btn = document.querySelector('#retryPrActions button');
         btn.disabled = true;
@@ -872,7 +1108,8 @@ const app = {
             body: JSON.stringify({
                 title: document.getElementById('createTitle').value,
                 description: document.getElementById('createDescription').value,
-                authorName: document.getElementById('createAuthorName').value || undefined
+                authorName: document.getElementById('createAuthorName').value || undefined,
+                priority: document.getElementById('createPriority').value || 'MEDIUM'
             })
         });
         if (data.error) {
@@ -881,6 +1118,78 @@ const app = {
         }
         document.getElementById('createForm').reset();
         this.navigate('detail', data.id);
+    },
+
+    // --- AI Recommendations ---
+    async fetchRecommendations() {
+        const modal = document.getElementById('recommendationsModal');
+        const content = document.getElementById('recommendationsContent');
+        modal.style.display = '';
+        content.innerHTML = '<div class="loading" style="padding:2rem;text-align:center">Getting suggestions from AI...</div>';
+
+        try {
+            const res = await fetch('/api/recommendations', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            if (res.status === 504) {
+                content.innerHTML = this.renderRecommendationsError(
+                    'The AI took too long to respond. Please try again in a moment.'
+                );
+                return;
+            }
+
+            const data = await res.json();
+
+            if (!res.ok) {
+                content.innerHTML = this.renderRecommendationsError(
+                    (data && data.error) ? data.error : 'Unable to get recommendations right now.'
+                );
+                return;
+            }
+
+            if (!Array.isArray(data) || data.length === 0) {
+                content.innerHTML = this.renderRecommendationsError(
+                    'The AI returned an unexpected response. Please try again.'
+                );
+                return;
+            }
+
+            this.state.recommendations = data;
+            content.innerHTML = data.map((rec, i) => `
+                <div class="card" style="margin-bottom:0.75rem">
+                    <div style="font-weight:600;margin-bottom:0.25rem">${this.esc(rec.title)}</div>
+                    <div style="font-size:0.9rem;color:var(--text-muted);margin-bottom:0.75rem">${this.esc(rec.description)}</div>
+                    <button class="btn btn-outline btn-sm" onclick="app.prefillFromRecommendation(${i})">Create Suggestion</button>
+                </div>
+            `).join('');
+        } catch (err) {
+            content.innerHTML = this.renderRecommendationsError(
+                'Unable to connect. Please check your connection and try again.'
+            );
+        }
+    },
+
+    renderRecommendationsError(message) {
+        return `<div class="card" style="background:#fef2f2;border-color:#fecaca;color:var(--danger)">
+            <strong>Could not load recommendations</strong>
+            <p style="margin-top:0.5rem;font-size:0.9rem;color:var(--danger)">${this.esc(message)}</p>
+        </div>`;
+    },
+
+    closeRecommendationsModal() {
+        document.getElementById('recommendationsModal').style.display = 'none';
+        this.state.recommendations = [];
+    },
+
+    prefillFromRecommendation(index) {
+        const rec = this.state.recommendations && this.state.recommendations[index];
+        if (!rec) return;
+        this.closeRecommendationsModal();
+        this.navigate('create');
+        document.getElementById('createTitle').value = rec.title;
+        document.getElementById('createDescription').value = rec.description;
     },
 
     // --- WebSocket ---
@@ -963,7 +1272,24 @@ const app = {
                 tag: 'suggestion-clarification-' + data.suggestionId
             });
             n.onclick = () => { window.focus(); loadDetail(data.suggestionId); n.close(); };
+        } else if (data.type === 'approval_needed') {
+            this.state.approvalPendingCount++;
+            this.updateApprovalBanner();
         }
+    },
+
+    updateApprovalBanner() {
+        const isAdmin = this.state.role === 'ROOT_ADMIN' || this.state.role === 'ADMIN';
+        const banner = document.getElementById('approvalPendingBanner');
+        if (!banner) return;
+        if (!isAdmin || this.state.approvalPendingCount === 0) {
+            banner.style.display = 'none';
+            return;
+        }
+        const count = this.state.approvalPendingCount;
+        const label = count === 1 ? '1 suggestion is waiting for your approval' : count + ' suggestions are waiting for your approval';
+        banner.querySelector('.approval-banner-text').textContent = label;
+        banner.style.display = '';
     },
 
     handleWsMessage(data) {

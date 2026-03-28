@@ -22,6 +22,11 @@
     </div>
 </header>
 
+<div id="approvalPendingBanner" style="display:none;background:#1e40af;color:#fff;padding:0.6rem 1rem;text-align:center;font-size:0.9rem">
+    <span class="approval-banner-text"></span>
+    &mdash; <a href="#" onclick="app.navigate('list')" style="color:#bfdbfe;text-decoration:underline">View suggestions</a>
+</div>
+
 <div class="container">
 
     <!-- Setup View (first-time root admin creation) -->
@@ -112,10 +117,67 @@
     <div id="listView" class="view">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
             <h2>Suggestions</h2>
-            <button id="newSuggestionBtn" class="btn btn-primary" onclick="app.navigate('create')">+ New Suggestion</button>
+            <div style="display:flex;gap:0.5rem;align-items:center">
+                <button id="aiRecommendationsBtn" class="btn btn-outline btn-sm" style="display:none"
+                        onclick="app.fetchRecommendations()">Get AI Recommendations</button>
+                <button id="newSuggestionBtn" class="btn btn-primary" onclick="app.navigate('create')">+ New Suggestion</button>
+            </div>
+        </div>
+        <!-- Search and filter toolbar -->
+        <div class="filter-toolbar">
+            <input type="search" id="searchInput" class="filter-search" placeholder="Search suggestions..."
+                   oninput="app.onSearchInput()" autocomplete="off">
+            <select id="statusFilter" class="filter-select" onchange="app.applyFilters()">
+                <option value="">All Statuses</option>
+                <optgroup label="Pending Review">
+                    <option value="DRAFT">Draft</option>
+                    <option value="DISCUSSING">In Discussion</option>
+                    <option value="EXPERT_REVIEW">Expert Review</option>
+                    <option value="PLANNED">Planned</option>
+                    <option value="APPROVED">Approved</option>
+                </optgroup>
+                <optgroup label="In Progress">
+                    <option value="IN_PROGRESS">In Progress</option>
+                    <option value="TESTING">Testing</option>
+                    <option value="DEV_COMPLETE">Development Complete</option>
+                    <option value="FINAL_REVIEW">Final Review</option>
+                </optgroup>
+                <optgroup label="Completed">
+                    <option value="MERGED">Merged</option>
+                    <option value="DENIED">Denied</option>
+                    <option value="TIMED_OUT">Timed Out</option>
+                </optgroup>
+            </select>
+            <select id="priorityFilter" class="filter-select" onchange="app.applyFilters()">
+                <option value="">All Priorities</option>
+                <option value="HIGH">High</option>
+                <option value="MEDIUM">Medium</option>
+                <option value="LOW">Low</option>
+            </select>
+            <select id="sortByFilter" class="filter-select" onchange="app.applyFilters()">
+                <option value="created">Newest First</option>
+                <option value="date">Recently Updated</option>
+                <option value="votes">Most Votes</option>
+                <option value="priority">Priority</option>
+            </select>
+            <select id="sortDirFilter" class="filter-select" onchange="app.applyFilters()">
+                <option value="desc">Descending</option>
+                <option value="asc">Ascending</option>
+            </select>
         </div>
         <div id="suggestionList">
             <div class="loading">Loading suggestions...</div>
+        </div>
+    </div>
+
+    <!-- AI Recommendations Modal -->
+    <div id="recommendationsModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:200;overflow-y:auto;padding:2rem 1rem;">
+        <div style="background:var(--card-bg);border-radius:0.5rem;box-shadow:0 20px 60px rgba(0,0,0,0.3);max-width:680px;width:100%;margin:0 auto;padding:1.5rem;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;padding-bottom:0.75rem;border-bottom:1px solid var(--border)">
+                <h3 style="margin:0">AI Recommendations</h3>
+                <button onclick="app.closeRecommendationsModal()" style="background:none;border:none;cursor:pointer;font-size:1.5rem;color:var(--text-muted);line-height:1;padding:0">&times;</button>
+            </div>
+            <div id="recommendationsContent"></div>
         </div>
     </div>
 
@@ -139,6 +201,14 @@
                     <textarea id="createDescription" required rows="5"
                               placeholder="Describe the change you'd like to see. Be as specific as possible - what should change, why, and how it should work."></textarea>
                 </div>
+                <div class="form-group">
+                    <label>Priority</label>
+                    <select id="createPriority">
+                        <option value="MEDIUM">Medium (default)</option>
+                        <option value="HIGH">High</option>
+                        <option value="LOW">Low</option>
+                    </select>
+                </div>
                 <button type="submit" class="btn btn-primary">Submit Suggestion</button>
             </form>
         </div>
@@ -154,7 +224,19 @@
                     <div class="suggestion-title" id="detailTitle"></div>
                     <div class="suggestion-meta" id="detailMeta"></div>
                 </div>
-                <span class="status-badge" id="detailStatus"></span>
+                <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
+                    <span class="priority-badge" id="detailPriorityBadge"></span>
+                    <span class="status-badge" id="detailStatus"></span>
+                </div>
+            </div>
+            <div id="detailPriorityAdmin" style="display:none;margin-top:0.5rem">
+                <label style="font-size:0.85rem;color:var(--text-muted);margin-right:0.5rem">Priority:</label>
+                <select id="detailPrioritySelect" onchange="app.changePriority(this.value)"
+                        style="font-size:0.85rem;padding:0.2rem 0.5rem;border:1px solid var(--border);border-radius:0.25rem">
+                    <option value="HIGH">High</option>
+                    <option value="MEDIUM">Medium</option>
+                    <option value="LOW">Low</option>
+                </select>
             </div>
             <p id="detailDescription" style="margin-top:0.75rem;white-space:pre-wrap"></p>
 
@@ -175,6 +257,22 @@
             <div id="detailPlan" class="card" style="display:none;margin-top:1rem;background:#f0fdf4">
                 <strong>Plan:</strong>
                 <pre id="detailPlanText" style="white-space:pre-wrap;margin-top:0.5rem;font-size:0.85rem"></pre>
+            </div>
+
+            <!-- Expert Review Summary Panel (compact, collapsible) -->
+            <div id="reviewSummaryPanel" class="card" style="display:none;margin-top:1rem;background:#f0f9ff">
+                <div style="display:flex;justify-content:space-between;align-items:center;cursor:pointer"
+                     onclick="app.toggleReviewSummary()">
+                    <strong>Expert Review Summary</strong>
+                    <span id="reviewSummaryToggle" style="font-size:0.85rem;color:#2563eb">&#9660; Hide</span>
+                </div>
+                <div id="reviewSummaryContent" style="margin-top:0.75rem">
+                    <div id="reviewSummaryGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:0.5rem"></div>
+                    <div style="margin-top:0.5rem;text-align:right">
+                        <a href="#" id="viewFullReviewsLink" onclick="app.showFullReviews(event)"
+                           style="font-size:0.82rem;color:#2563eb">View full reviews &#9660;</a>
+                    </div>
+                </div>
             </div>
 
             <div id="detailExpertReview" class="card" style="display:none;margin-top:1rem;background:#faf5ff">

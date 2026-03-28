@@ -268,4 +268,98 @@ class SlackNotificationServiceTest {
     void allowedWebhookPrefix_isHttpsSlackServicesPrefix() {
         assertEquals("https://hooks.slack.com/services/", service.getAllowedWebhookPrefix());
     }
+
+    // ── sendApprovalNeededNotification tests ────────────────────────────────
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void sendApprovalNeededNotification_postsToWebhookWhenConfigured() throws Exception {
+        settings.setSlackWebhookUrl("https://hooks.slack.com/services/T00/B00/xxx");
+        stubSuccessfulHttpResponse();
+
+        Suggestion s = buildSuggestion();
+        s.setTitle("Add dark mode");
+
+        service.sendApprovalNeededNotification(s).join();
+
+        ArgumentCaptor<HttpRequest> captor = ArgumentCaptor.forClass(HttpRequest.class);
+        verify(httpClient).send(captor.capture(), any(HttpResponse.BodyHandler.class));
+        assertEquals("https://hooks.slack.com/services/T00/B00/xxx", captor.getValue().uri().toString());
+        assertEquals("POST", captor.getValue().method());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void sendApprovalNeededNotification_payloadContainsTitleAndId() throws Exception {
+        settings.setSlackWebhookUrl("https://hooks.slack.com/services/T00/B00/xxx");
+        stubSuccessfulHttpResponse();
+
+        Suggestion s = new Suggestion();
+        s.setId(42L);
+        s.setTitle("Add dark mode");
+
+        service.sendApprovalNeededNotification(s).join();
+
+        ArgumentCaptor<HttpRequest> captor = ArgumentCaptor.forClass(HttpRequest.class);
+        verify(httpClient).send(captor.capture(), any(HttpResponse.BodyHandler.class));
+        String body = captor.getValue().bodyPublisher()
+                .map(bp -> {
+                    java.util.concurrent.Flow.Subscriber<java.nio.ByteBuffer>[] holder = new java.util.concurrent.Flow.Subscriber[1];
+                    java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+                    bp.subscribe(new java.util.concurrent.Flow.Subscriber<>() {
+                        public void onSubscribe(java.util.concurrent.Flow.Subscription s) { s.request(Long.MAX_VALUE); }
+                        public void onNext(java.nio.ByteBuffer item) { baos.write(item.array(), item.position(), item.remaining()); }
+                        public void onError(Throwable t) {}
+                        public void onComplete() {}
+                    });
+                    return baos.toString(java.nio.charset.StandardCharsets.UTF_8);
+                }).orElse("");
+        assertTrue(body.contains("Add dark mode"), "Payload should contain suggestion title");
+        assertTrue(body.contains("42"), "Payload should contain suggestion ID");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void sendApprovalNeededNotification_skipsWhenWebhookUrlIsNull() throws Exception {
+        settings.setSlackWebhookUrl(null);
+
+        service.sendApprovalNeededNotification(buildSuggestion()).join();
+
+        verify(httpClient, never()).send(any(), any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void sendApprovalNeededNotification_skipsWhenWebhookUrlIsBlank() throws Exception {
+        settings.setSlackWebhookUrl("  ");
+
+        service.sendApprovalNeededNotification(buildSuggestion()).join();
+
+        verify(httpClient, never()).send(any(), any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void sendApprovalNeededNotification_skipsWhenWebhookUrlIsNotAllowed() throws Exception {
+        settings.setSlackWebhookUrl("https://evil.com/webhook");
+
+        service.sendApprovalNeededNotification(buildSuggestion()).join();
+
+        verify(httpClient, never()).send(any(), any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void sendApprovalNeededNotification_handlesNullTitle() throws Exception {
+        settings.setSlackWebhookUrl("https://hooks.slack.com/services/T00/B00/xxx");
+        stubSuccessfulHttpResponse();
+
+        Suggestion s = new Suggestion();
+        s.setId(1L);
+        s.setTitle(null);
+
+        service.sendApprovalNeededNotification(s).join();
+
+        verify(httpClient).send(any(), any());
+    }
 }

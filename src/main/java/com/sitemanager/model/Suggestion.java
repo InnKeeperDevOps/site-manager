@@ -1,8 +1,11 @@
 package com.sitemanager.model;
 
+import com.sitemanager.model.enums.Priority;
 import com.sitemanager.model.enums.SuggestionStatus;
 import jakarta.persistence.*;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 @Entity
 @Table(name = "suggestions")
@@ -88,6 +91,10 @@ public class Suggestion {
     @Column
     private Instant lastActivityAt;
 
+    @Enumerated(EnumType.STRING)
+    @Column(length = 10, nullable = false)
+    private Priority priority = Priority.MEDIUM;
+
     public Suggestion() {}
 
     @PrePersist
@@ -155,4 +162,76 @@ public class Suggestion {
     public void setTotalExpertReviewRounds(Integer totalExpertReviewRounds) { this.totalExpertReviewRounds = totalExpertReviewRounds; }
     public String getExpertReviewChangedDomains() { return expertReviewChangedDomains; }
     public void setExpertReviewChangedDomains(String expertReviewChangedDomains) { this.expertReviewChangedDomains = expertReviewChangedDomains; }
+    public Priority getPriority() { return priority; }
+    public void setPriority(Priority priority) { this.priority = priority; }
+
+    // --- Expert Review Summary ---
+
+    public static class ExpertReviewEntry {
+        private final String expertName;
+        private final String status; // APPROVED, FLAGGED, PENDING
+        private final String keyPoint;
+
+        public ExpertReviewEntry(String expertName, String status, String keyPoint) {
+            this.expertName = expertName;
+            this.status = status;
+            this.keyPoint = keyPoint;
+        }
+
+        public String getExpertName() { return expertName; }
+        public String getStatus() { return status; }
+        public String getKeyPoint() { return keyPoint; }
+    }
+
+    /**
+     * Parses expertReviewNotes (format: "**ExpertName**: note\n\n**ExpertName2**: note")
+     * and returns a summary of reviewed experts. PENDING entries are not included here;
+     * callers should add PENDING for experts not present in the returned list.
+     */
+    public List<ExpertReviewEntry> getExpertReviewSummary() {
+        String notes = this.expertReviewNotes;
+        if (notes == null || notes.isBlank()) {
+            return new ArrayList<>();
+        }
+
+        List<ExpertReviewEntry> result = new ArrayList<>();
+        String[] entries = notes.split("\n\n");
+
+        for (String entry : entries) {
+            entry = entry.trim();
+            if (!entry.startsWith("**")) continue;
+
+            int nameEnd = entry.indexOf("**", 2);
+            if (nameEnd < 0) continue;
+
+            String expertName = entry.substring(2, nameEnd).trim();
+            String note = entry.substring(nameEnd + 2).trim();
+            if (note.startsWith(":")) {
+                note = note.substring(1).trim();
+            }
+
+            if (expertName.isBlank() || note.isBlank()) continue;
+
+            String lower = note.toLowerCase();
+            boolean flagged = lower.contains("concern") || lower.contains("risk") ||
+                    lower.contains("vulnerab") || lower.contains("problem") ||
+                    lower.contains("issue") || lower.contains("flag");
+            String status = flagged ? "FLAGGED" : "APPROVED";
+
+            // Key point: first sentence (up to 150 chars), or truncated note
+            String keyPoint;
+            int sentenceEnd = note.indexOf(". ");
+            if (sentenceEnd > 0 && sentenceEnd < 150) {
+                keyPoint = note.substring(0, sentenceEnd + 1);
+            } else if (note.length() > 150) {
+                keyPoint = note.substring(0, 150) + "...";
+            } else {
+                keyPoint = note;
+            }
+
+            result.add(new ExpertReviewEntry(expertName, status, keyPoint));
+        }
+
+        return result;
+    }
 }

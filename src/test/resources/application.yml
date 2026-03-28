@@ -4,6 +4,8 @@ spring:
     driver-class-name: org.sqlite.JDBC
     hikari:
       maximum-pool-size: 1
+  flyway:
+    enabled: false
   jpa:
     hibernate:
       ddl-auto: create-drop

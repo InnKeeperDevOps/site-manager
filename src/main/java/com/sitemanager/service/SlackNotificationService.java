@@ -69,6 +69,46 @@ public class SlackNotificationService {
                 "*" + escapeJson(username) + "* has been denied access."));
     }
 
+    public CompletableFuture<Void> sendApprovalNeededNotification(Suggestion suggestion) {
+        return CompletableFuture.runAsync(() -> doSendApprovalNeeded(suggestion));
+    }
+
+    private void doSendApprovalNeeded(Suggestion suggestion) {
+        String webhookUrl = siteSettingsService.getSettings().getSlackWebhookUrl();
+
+        if (webhookUrl == null || webhookUrl.isBlank()) {
+            return;
+        }
+
+        if (!webhookUrl.startsWith(ALLOWED_WEBHOOK_PREFIX)) {
+            log.warn("Slack webhook URL does not start with '{}' — skipping notification to prevent SSRF", ALLOWED_WEBHOOK_PREFIX);
+            return;
+        }
+
+        String title = escapeJson(suggestion.getTitle() != null ? suggestion.getTitle() : "");
+        String idStr = suggestion.getId() != null ? String.valueOf(suggestion.getId()) : "?";
+        String payload = "{\"blocks\":["
+                + "{\"type\":\"header\",\"text\":{\"type\":\"plain_text\",\"text\":\":calendar: Suggestion ready for approval: " + title + "\",\"emoji\":true}},"
+                + "{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"A suggestion is waiting for admin approval. Open the app and search for suggestion #" + idStr + " to review it.\"}}"
+                + "]}";
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(webhookUrl))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(payload))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                log.warn("Slack webhook returned non-success status {}: {}", response.statusCode(), response.body());
+            }
+        } catch (Exception e) {
+            log.warn("Failed to send Slack approval-needed notification for suggestion {}: {}", suggestion.getId(), e.getMessage());
+        }
+    }
+
     private void doSendUserStatusChange(String username, String header, String body) {
         String webhookUrl = siteSettingsService.getSettings().getSlackWebhookUrl();
 
