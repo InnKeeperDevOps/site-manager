@@ -99,6 +99,7 @@ public class ClaudeService {
         log.info("Claude CLI rate limiter initialized: maxConcurrent={}, maxCallsPerMinute={}, fifo=true",
                 claudeMaxConcurrent, claudeMaxCallsPerMinute);
         if (shouldRunAsDifferentUser()) {
+            ensureUserExists(claudeRunAsUser);
             log.info("Claude CLI subprocesses will run as user '{}' (current user is root)", claudeRunAsUser);
         }
     }
@@ -110,6 +111,48 @@ public class ClaudeService {
     private boolean shouldRunAsDifferentUser() {
         return claudeRunAsUser != null && !claudeRunAsUser.isBlank()
                 && "root".equals(System.getProperty("user.name"));
+    }
+
+    /**
+     * Ensure the given OS user exists, creating it if necessary.
+     * Also ensures the workspace directory is accessible to the user.
+     */
+    private void ensureUserExists(String username) {
+        try {
+            // Check if user already exists via `id`
+            ProcessBuilder checkPb = new ProcessBuilder("id", "-u", username);
+            checkPb.redirectErrorStream(true);
+            Process checkProcess = checkPb.start();
+            checkProcess.getInputStream().readAllBytes();
+            int exitCode = checkProcess.waitFor();
+            if (exitCode == 0) {
+                log.info("OS user '{}' already exists", username);
+            } else {
+                log.info("OS user '{}' does not exist, creating it", username);
+                ProcessBuilder createPb = new ProcessBuilder("useradd", "-m", "-s", "/bin/bash", username);
+                createPb.redirectErrorStream(true);
+                Process createProcess = createPb.start();
+                String output = new String(createProcess.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+                int createExit = createProcess.waitFor();
+                if (createExit != 0) {
+                    log.error("Failed to create user '{}': {}", username, output);
+                    return;
+                }
+                log.info("Created OS user '{}'", username);
+            }
+            // Ensure the workspace directory is accessible to the user
+            File workspace = new File(workspaceDir);
+            if (workspace.exists()) {
+                ProcessBuilder chownPb = new ProcessBuilder("chown", "-R", username + ":" + username, workspaceDir);
+                chownPb.redirectErrorStream(true);
+                Process chownProcess = chownPb.start();
+                chownProcess.getInputStream().readAllBytes();
+                chownProcess.waitFor();
+                log.info("Set ownership of {} to {}", workspaceDir, username);
+            }
+        } catch (Exception e) {
+            log.error("Failed to ensure user '{}' exists: {}", username, e.getMessage(), e);
+        }
     }
 
     /**
