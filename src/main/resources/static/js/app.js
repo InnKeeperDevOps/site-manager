@@ -986,6 +986,11 @@ const app = {
         document.getElementById('settingAnonymous').checked = settings.allowAnonymousSuggestions;
         document.getElementById('settingVoting').checked = settings.allowVoting;
         document.getElementById('settingApproval').checked = settings.requireApproval;
+        const slackInput = document.getElementById('settingSlackWebhookUrl');
+        slackInput.value = settings.slackWebhookUrl || '';
+        slackInput.placeholder = settings.slackWebhookUrl
+            ? 'Currently configured — enter new URL to replace'
+            : 'https://hooks.slack.com/services/...';
     },
 
     async saveSettings() {
@@ -1001,7 +1006,8 @@ const app = {
                 claudeMaxTurnsExpert: parseInt(document.getElementById('settingClaudeMaxTurnsExpert').value) || null,
                 allowAnonymousSuggestions: document.getElementById('settingAnonymous').checked,
                 allowVoting: document.getElementById('settingVoting').checked,
-                requireApproval: document.getElementById('settingApproval').checked
+                requireApproval: document.getElementById('settingApproval').checked,
+                slackWebhookUrl: document.getElementById('settingSlackWebhookUrl').value || null
             })
         });
         if (data.error) { alert(data.error); return; }

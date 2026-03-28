@@ -276,6 +276,18 @@
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
+                <div style="margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--border)">
+                    <h3>Integrations</h3>
+                    <div class="form-group" style="margin-top:0.75rem">
+                        <label>Slack Webhook URL</label>
+                        <input type="password" id="settingSlackWebhookUrl"
+                               placeholder="https://hooks.slack.com/services/...">
+                        <small style="color:var(--text-muted);display:block;margin-top:0.25rem">
+                            Leave blank to disable Slack notifications.
+                        </small>
+                    </div>
+                </div>
+
                 <button class="btn btn-primary" onclick="app.saveSettings()" style="margin-top:1rem">
                     Save Settings
                 </button>

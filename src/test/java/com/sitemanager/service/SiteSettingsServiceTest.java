@@ -60,4 +60,34 @@ class SiteSettingsServiceTest {
         assertEquals("My Site", result.getSiteName());
         assertFalse(result.isRequireApproval());
     }
+
+    @Test
+    void updateSettings_slackWebhookUrl_savedAndRetrieved() {
+        SiteSettings update = new SiteSettings();
+        update.setSlackWebhookUrl("https://hooks.slack.com/services/T00/B00/xxx");
+
+        SiteSettings result = settingsService.updateSettings(update);
+
+        assertEquals("https://hooks.slack.com/services/T00/B00/xxx", result.getSlackWebhookUrl());
+    }
+
+    @Test
+    void updateSettings_slackWebhookUrl_clearedWhenSetToNull() {
+        SiteSettings withUrl = new SiteSettings();
+        withUrl.setSlackWebhookUrl("https://hooks.slack.com/services/T00/B00/xxx");
+        settingsService.updateSettings(withUrl);
+
+        SiteSettings clearUrl = new SiteSettings();
+        clearUrl.setSlackWebhookUrl(null);
+        SiteSettings result = settingsService.updateSettings(clearUrl);
+
+        assertNull(result.getSlackWebhookUrl());
+    }
+
+    @Test
+    void getSettings_slackWebhookUrl_nullByDefault() {
+        SiteSettings settings = settingsService.getSettings();
+
+        assertNull(settings.getSlackWebhookUrl());
+    }
 }

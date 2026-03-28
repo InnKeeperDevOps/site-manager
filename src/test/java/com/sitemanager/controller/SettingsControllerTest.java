@@ -80,4 +80,28 @@ class SettingsControllerTest {
                                 "\"siteName\":\"Updated\"}"))
                 .andExpect(status().isOk());
     }
+
+    @Test
+    void updateSettings_slackWebhookUrl_savedAndReturnedInResponse() throws Exception {
+        MockHttpSession session = new MockHttpSession();
+        session.setAttribute("username", "admin");
+        session.setAttribute("role", "ROOT_ADMIN");
+
+        mockMvc.perform(put("/api/settings")
+                        .session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"allowAnonymousSuggestions\":true,\"allowVoting\":true," +
+                                "\"suggestionTimeoutMinutes\":1440,\"requireApproval\":true," +
+                                "\"siteName\":\"Test\"," +
+                                "\"slackWebhookUrl\":\"https://hooks.slack.com/services/T00/B00/xxx\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.slackWebhookUrl").value("https://hooks.slack.com/services/T00/B00/xxx"));
+    }
+
+    @Test
+    void getSettings_slackWebhookUrl_presentInResponse() throws Exception {
+        mockMvc.perform(get("/api/settings"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.slackWebhookUrl").doesNotExist());
+    }
 }
