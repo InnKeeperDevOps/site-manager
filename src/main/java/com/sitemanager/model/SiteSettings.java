@@ -43,6 +43,9 @@ public class SiteSettings {
     @Column
     private String slackWebhookUrl;
 
+    @Column(columnDefinition = "BOOLEAN DEFAULT 0")
+    private boolean requireRegistrationApproval = false;
+
     public SiteSettings() {}
 
     public Long getId() { return id; }
@@ -69,4 +72,6 @@ public class SiteSettings {
     public void setClaudeMaxTurnsExpert(Integer v) { this.claudeMaxTurnsExpert = v; }
     public String getSlackWebhookUrl() { return slackWebhookUrl; }
     public void setSlackWebhookUrl(String v) { this.slackWebhookUrl = v; }
+    public boolean isRequireRegistrationApproval() { return requireRegistrationApproval; }
+    public void setRequireRegistrationApproval(boolean v) { this.requireRegistrationApproval = v; }
 }

@@ -90,4 +90,34 @@ class SiteSettingsServiceTest {
 
         assertNull(settings.getSlackWebhookUrl());
     }
+
+    @Test
+    void getSettings_requireRegistrationApproval_falseByDefault() {
+        SiteSettings settings = settingsService.getSettings();
+
+        assertFalse(settings.isRequireRegistrationApproval());
+    }
+
+    @Test
+    void updateSettings_requireRegistrationApproval_canBeEnabled() {
+        SiteSettings update = new SiteSettings();
+        update.setRequireRegistrationApproval(true);
+
+        SiteSettings result = settingsService.updateSettings(update);
+
+        assertTrue(result.isRequireRegistrationApproval());
+    }
+
+    @Test
+    void updateSettings_requireRegistrationApproval_canBeDisabled() {
+        SiteSettings enable = new SiteSettings();
+        enable.setRequireRegistrationApproval(true);
+        settingsService.updateSettings(enable);
+
+        SiteSettings disable = new SiteSettings();
+        disable.setRequireRegistrationApproval(false);
+        SiteSettings result = settingsService.updateSettings(disable);
+
+        assertFalse(result.isRequireRegistrationApproval());
+    }
 }

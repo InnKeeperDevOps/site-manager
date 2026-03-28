@@ -32,6 +32,8 @@ public class DataMigrationRunner implements CommandLineRunner {
         if (updated > 0) {
             log.info("Data migration: updated {} suggestion(s) from COMPLETED to DEV_COMPLETE", updated);
         }
+
+        seedRegisteredUserGroup();
     }
 
     /**
@@ -80,5 +82,27 @@ public class DataMigrationRunner implements CommandLineRunner {
         jdbcTemplate.execute("PRAGMA foreign_keys=ON");
 
         log.info("Data migration: status CHECK constraint updated to: {}", validStatuses);
+    }
+
+    /**
+     * Ensures the default 'Registered User' group exists and that all existing
+     * USER-role accounts are assigned to it.
+     */
+    private void seedRegisteredUserGroup() {
+        int inserted = jdbcTemplate.update(
+                "INSERT INTO user_groups (name, can_create_suggestions, can_vote, can_reply, " +
+                "can_approve_deny_suggestions, can_manage_settings, can_manage_users) " +
+                "SELECT 'Registered User', 1, 1, 1, 0, 0, 0 " +
+                "WHERE NOT EXISTS (SELECT 1 FROM user_groups WHERE name = 'Registered User')");
+        if (inserted > 0) {
+            log.info("Data migration: created default 'Registered User' group");
+        }
+
+        int reassigned = jdbcTemplate.update(
+                "UPDATE app_users SET group_id = (SELECT id FROM user_groups WHERE name = 'Registered User') " +
+                "WHERE role = 'USER' AND group_id IS NULL");
+        if (reassigned > 0) {
+            log.info("Data migration: assigned {} USER-role account(s) to 'Registered User' group", reassigned);
+        }
     }
 }
