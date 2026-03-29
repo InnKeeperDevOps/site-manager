@@ -15,6 +15,7 @@ public class ProjectDefinitionStateResponse {
     private String generatedContent;
     private String prUrl;
     private String errorMessage;
+    private boolean isEdit;
 
     public ProjectDefinitionStateResponse() {
     }
@@ -89,5 +90,13 @@ public class ProjectDefinitionStateResponse {
 
     public void setErrorMessage(String errorMessage) {
         this.errorMessage = errorMessage;
+    }
+
+    public boolean isEdit() {
+        return isEdit;
+    }
+
+    public void setIsEdit(boolean isEdit) {
+        this.isEdit = isEdit;
     }
 }

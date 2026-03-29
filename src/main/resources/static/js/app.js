@@ -145,6 +145,8 @@ const app = {
                 const btn = document.getElementById('project-def-btn');
                 if (btn) btn.textContent = 'View Definition';
             } else if (['ACTIVE', 'GENERATING', 'SAVING'].includes(state.status)) {
+                const btn = document.getElementById('project-def-btn');
+                if (btn && state.isEdit) btn.textContent = 'Update Definition';
                 this.showProjectDefinitionModal(state);
             }
         } catch (e) {
@@ -184,6 +186,10 @@ const app = {
         const modal = document.getElementById('project-def-modal');
         if (!modal) return;
         modal.style.display = '';
+
+        // Update modal title based on edit vs new
+        const titleEl = document.getElementById('pd-modal-title');
+        if (titleEl) titleEl.textContent = state.isEdit ? 'Update Project Definition' : 'Project Definition';
 
         // Progress bar
         const bar = document.getElementById('pd-progress-bar');
@@ -262,7 +268,12 @@ const app = {
                 }
             }
 
-            const label = state.status === 'ACTIVE' ? 'Answer the questions below to define your project.' : '';
+            let label = '';
+            if (state.status === 'ACTIVE') {
+                label = state.isEdit
+                    ? 'Review and update your existing project definition.'
+                    : 'Answer the questions below to define your project.';
+            }
             if (statusEl) statusEl.textContent = label;
         }
 

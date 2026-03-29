@@ -11,7 +11,10 @@ import com.sitemanager.repository.UserRepository;
 import com.sitemanager.websocket.UserNotificationWebSocketHandler;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -411,6 +414,28 @@ class ProjectDefinitionServiceTest {
         assertNotNull(session.getErrorMessage());
     }
 
+    // ─── toStateResponse: isEdit field ───────────────────────────────────────────
+
+    @Test
+    void toStateResponse_isEdit_falseWhenHasExistingDefinitionIsFalse() {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        session.setHasExistingDefinition(false);
+
+        ProjectDefinitionStateResponse resp = service.toStateResponse(session);
+
+        assertFalse(resp.isEdit());
+    }
+
+    @Test
+    void toStateResponse_isEdit_trueWhenHasExistingDefinitionIsTrue() {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        session.setHasExistingDefinition(true);
+
+        ProjectDefinitionStateResponse resp = service.toStateResponse(session);
+
+        assertTrue(resp.isEdit());
+    }
+
     // ─── getState ────────────────────────────────────────────────────────────────
 
     @Test
@@ -594,6 +619,194 @@ class ProjectDefinitionServiceTest {
 
         assertDoesNotThrow(() -> service.markFailed(SESSION_ID, "error"));
         verify(sessionRepository, never()).save(any());
+    }
+
+    // ─── readExistingProjectDefinition ───────────────────────────────────────────
+
+    @Test
+    void readExistingProjectDefinition_returnsContent_whenFileExists(@TempDir Path tempDir) throws Exception {
+        String content = "# Project Definition\n## Overview\nThis is a test project.";
+        Files.writeString(tempDir.resolve("PROJECT_DEFINITION.md"), content);
+
+        when(claudeService.getMainRepoDir()).thenReturn(tempDir.toString());
+
+        ProjectDefinitionService svc = new ProjectDefinitionService(
+                sessionRepository, claudeService, settingsService, notificationHandler, userRepository) {
+            @Override protected String detectDefaultBranch(String repoDir) { return "main"; }
+            @Override protected void runGitCommand(String repoDir, String... command) {}
+        };
+
+        String result = svc.readExistingProjectDefinition();
+
+        assertEquals(content, result);
+    }
+
+    @Test
+    void readExistingProjectDefinition_returnsNull_whenFileDoesNotExist(@TempDir Path tempDir) {
+        when(claudeService.getMainRepoDir()).thenReturn(tempDir.toString());
+
+        ProjectDefinitionService svc = new ProjectDefinitionService(
+                sessionRepository, claudeService, settingsService, notificationHandler, userRepository) {
+            @Override protected String detectDefaultBranch(String repoDir) { return "main"; }
+            @Override protected void runGitCommand(String repoDir, String... command) {}
+        };
+
+        String result = svc.readExistingProjectDefinition();
+
+        assertNull(result);
+    }
+
+    // ─── startSession: hasExistingDefinition ─────────────────────────────────────
+
+    @Test
+    void startSession_setsHasExistingDefinitionTrue_whenDefinitionFileExists() {
+        when(sessionRepository.findFirstByStatusIn(anyList())).thenReturn(Optional.empty());
+
+        ProjectDefinitionSession saved = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        saved.setClaudeSessionId("app-session-uuid");
+        saved.setConversationHistory("[]");
+        saved.setHasExistingDefinition(true);
+        when(sessionRepository.save(any())).thenReturn(saved);
+
+        when(claudeService.continueConversation(any(), any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(questionJson(1)));
+
+        ProjectDefinitionService svcWithExisting = new ProjectDefinitionService(
+                sessionRepository, claudeService, settingsService, notificationHandler, userRepository) {
+            @Override protected String detectDefaultBranch(String repoDir) { return "main"; }
+            @Override protected void runGitCommand(String repoDir, String... command) {}
+            @Override protected String readExistingProjectDefinition() { return "# Existing Definition\nContent."; }
+        };
+
+        svcWithExisting.startSession();
+
+        verify(sessionRepository).save(argThat(s -> s.isHasExistingDefinition()));
+    }
+
+    @Test
+    void startSession_setsHasExistingDefinitionFalse_whenNoDefinitionFile() {
+        when(sessionRepository.findFirstByStatusIn(anyList())).thenReturn(Optional.empty());
+
+        ProjectDefinitionSession saved = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        saved.setClaudeSessionId("app-session-uuid");
+        saved.setConversationHistory("[]");
+        saved.setHasExistingDefinition(false);
+        when(sessionRepository.save(any())).thenReturn(saved);
+
+        when(claudeService.continueConversation(any(), any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(questionJson(1)));
+
+        ProjectDefinitionService svcWithoutExisting = new ProjectDefinitionService(
+                sessionRepository, claudeService, settingsService, notificationHandler, userRepository) {
+            @Override protected String detectDefaultBranch(String repoDir) { return "main"; }
+            @Override protected void runGitCommand(String repoDir, String... command) {}
+            @Override protected String readExistingProjectDefinition() { return null; }
+        };
+
+        svcWithoutExisting.startSession();
+
+        verify(sessionRepository).save(argThat(s -> !s.isHasExistingDefinition()));
+    }
+
+    // ─── buildInterviewPrompt ─────────────────────────────────────────────────────
+
+    @Test
+    void buildInterviewPrompt_withNullExistingDefinition_returnsConversationalNewPrompt() {
+        String prompt = service.buildInterviewPrompt(null);
+
+        // Should instruct conversational interview style
+        assertTrue(prompt.contains("conversational"), "Prompt should mention conversational style");
+        // Should not contain rigid numbered question list
+        assertFalse(prompt.contains("question 1") || prompt.contains("9 questions"),
+                "New-mode prompt should not impose a rigid question list");
+        // Should include JSON format instructions
+        assertTrue(prompt.contains("\"type\":\"question\""), "Prompt should include JSON question format");
+        assertTrue(prompt.contains("\"type\":\"complete\""), "Prompt should include JSON complete format");
+        // Should instruct Claude to avoid technical jargon
+        assertTrue(prompt.toLowerCase().contains("technical jargon") || prompt.toLowerCase().contains("plain, everyday language"),
+                "Prompt must instruct Claude to use plain language");
+        // Should cover key topic areas
+        assertTrue(prompt.contains("what the project does") || prompt.contains("what they are building"),
+                "Prompt should ask about what project does");
+        // Progress field should be described
+        assertTrue(prompt.contains("progress"), "Prompt should mention progress field");
+    }
+
+    @Test
+    void buildInterviewPrompt_withExistingDefinition_returnsEditPromptContainingDefinition() {
+        String existingContent = "# Project Definition\n## Overview\nThis is a task manager app.";
+        String prompt = service.buildInterviewPrompt(existingContent);
+
+        // Should include the existing definition content
+        assertTrue(prompt.contains(existingContent), "Prompt should embed the existing definition");
+        // Should instruct Claude to summarize and ask what to update
+        assertTrue(prompt.contains("summar"), "Prompt should ask Claude to summarize the existing definition");
+        assertTrue(prompt.contains("update") || prompt.contains("improve"),
+                "Prompt should ask what user wants to update or improve");
+        // Should include JSON format instructions
+        assertTrue(prompt.contains("\"type\":\"question\""), "Prompt should include JSON question format");
+        assertTrue(prompt.contains("\"type\":\"complete\""), "Prompt should include JSON complete format");
+        // Should instruct Claude to avoid technical jargon
+        assertTrue(prompt.toLowerCase().contains("technical jargon") || prompt.toLowerCase().contains("plain, everyday language"),
+                "Prompt must instruct Claude to use plain language");
+        // Progress field should be described
+        assertTrue(prompt.contains("progress"), "Prompt should mention progress field");
+    }
+
+    @Test
+    void buildInterviewPrompt_newMode_promptIncludesKeyTopicAreas() {
+        String prompt = service.buildInterviewPrompt(null);
+
+        // All key areas should be covered in the topic list
+        assertTrue(prompt.contains("who will use") || prompt.contains("Who will use"),
+                "Should ask about target users");
+        assertTrue(prompt.contains("goals") || prompt.contains("motivation"),
+                "Should ask about goals or motivation");
+        assertTrue(prompt.contains("success"), "Should ask about what success looks like");
+    }
+
+    @Test
+    void buildInterviewPrompt_editMode_mentionsIncompleteOrVagueAreas() {
+        String definition = "# My App\nIt does stuff.";
+        String prompt = service.buildInterviewPrompt(definition);
+
+        // Should guide the user toward refining vague areas
+        assertTrue(prompt.contains("incomplete") || prompt.contains("vague") || prompt.contains("lack detail"),
+                "Edit prompt should guide toward refining incomplete or vague content");
+    }
+
+    @Test
+    void buildInterviewPrompt_newMode_instructsOneQuestionAtATime() {
+        String prompt = service.buildInterviewPrompt(null);
+
+        assertTrue(prompt.contains("one question at a time"),
+                "New-mode prompt should instruct one question at a time");
+    }
+
+    @Test
+    void buildInterviewPrompt_editMode_instructsOneQuestionAtATime() {
+        String prompt = service.buildInterviewPrompt("# Existing\nContent.");
+
+        assertTrue(prompt.contains("one question at a time"),
+                "Edit-mode prompt should instruct one question at a time");
+    }
+
+    @Test
+    void buildInterviewPrompt_newMode_instructsToStartAsking() {
+        String prompt = service.buildInterviewPrompt(null);
+
+        // Should tell Claude to start asking right away
+        assertTrue(prompt.toLowerCase().contains("start by asking"),
+                "New-mode prompt should instruct Claude to start asking");
+    }
+
+    @Test
+    void buildInterviewPrompt_editMode_instructsToStartWithSummary() {
+        String prompt = service.buildInterviewPrompt("# Existing\nContent.");
+
+        // Should tell Claude to start with a summary
+        assertTrue(prompt.toLowerCase().contains("start by summar"),
+                "Edit-mode prompt should instruct Claude to start by summarizing");
     }
 
     // ─── Test helper methods ──────────────────────────────────────────────────────
