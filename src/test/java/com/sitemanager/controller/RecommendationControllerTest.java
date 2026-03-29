@@ -18,7 +18,6 @@ import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpSession;
 import org.springframework.test.web.servlet.MockMvc;
 
-import java.net.http.HttpTimeoutException;
 import java.util.Map;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -117,7 +116,7 @@ class RecommendationControllerTest {
 
     @Test
     void getRecommendations_onTimeout_returns504() throws Exception {
-        when(claudeService.getRecommendations(any())).thenThrow(new HttpTimeoutException("request timed out"));
+        when(claudeService.getRecommendations(any())).thenThrow(new RuntimeException("Claude CLI timed out after 30 minutes"));
 
         mockMvc.perform(post("/api/recommendations")
                         .session(adminSession())

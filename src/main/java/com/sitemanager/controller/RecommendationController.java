@@ -16,7 +16,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.net.http.HttpTimeoutException;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -62,15 +61,21 @@ public class RecommendationController {
             String rawResponse = claudeService.getRecommendations(prompt);
             List<Map<String, String>> recommendations = parseRecommendations(rawResponse);
             return ResponseEntity.ok(recommendations);
-        } catch (HttpTimeoutException e) {
-            log.warn("[RECOMMENDATIONS] Request timed out: {}", e.getMessage());
-            return ResponseEntity.status(504).body(Map.of(
-                    "error", "The AI took too long to respond. Please try again in a moment."
-            ));
         } catch (IllegalStateException e) {
             log.warn("[RECOMMENDATIONS] Failed to parse response: {}", e.getMessage());
             return ResponseEntity.status(500).body(Map.of(
                     "error", "The AI returned an unexpected response. Please try again."
+            ));
+        } catch (RuntimeException e) {
+            if (e.getMessage() != null && e.getMessage().contains("timed out")) {
+                log.warn("[RECOMMENDATIONS] Request timed out: {}", e.getMessage());
+                return ResponseEntity.status(504).body(Map.of(
+                        "error", "The AI took too long to respond. Please try again in a moment."
+                ));
+            }
+            log.error("[RECOMMENDATIONS] Unexpected error: {}", e.getMessage(), e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "error", "Unable to get recommendations right now. Please try again."
             ));
         } catch (Exception e) {
             log.error("[RECOMMENDATIONS] Unexpected error: {}", e.getMessage(), e);
