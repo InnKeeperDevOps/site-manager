@@ -134,13 +134,17 @@ flowchart TD
 
     E --> F{step >= 11?\nAll experts done?}
 
-    F -- No --> G[Run current expert\nClaudeService.expertReview]
+    F -- No --> EA{step >= 3 AND\nno plan changes AND\nall notes are approvals?}
+    EA -- Yes --> EB[Early exit: plan approved\nSkip remaining experts]
+    EB --> T
+
+    EA -- No --> G[Run current expert\nClaudeService.expertReview]
     G --> H[handleExpertReviewResponse]
 
     H --> N{Pipeline paused?\nClarification needed?}
     N -- Yes --> O[Wait for user answers\nvia WebSocket + API]
     O --> P[handleExpertClarificationAnswers]
-    P --> L
+    P --> H
 
     N -- No --> Q[Advance step]
     Q --> E
@@ -291,10 +295,11 @@ flowchart TD
     R --> C
 ```
 
-### Round Limits
+### Constants
 
 | Constant | Value | Purpose |
 |---|---|---|
+| `MIN_APPROVALS_FOR_EARLY_EXIT` | 3 | Minimum consecutive approvals (with no plan changes) before skipping remaining experts |
 | `MAX_EXPERT_REVIEW_ROUNDS` | 2 | Maximum rounds within a single review cycle |
 | `MAX_TOTAL_EXPERT_REVIEW_ROUNDS` | 3 | Hard cap across all cycles (including user-guided restarts) |
 
