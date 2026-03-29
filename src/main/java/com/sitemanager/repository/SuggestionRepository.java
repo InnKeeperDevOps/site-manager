@@ -22,4 +22,12 @@ public interface SuggestionRepository extends JpaRepository<Suggestion, Long>, J
 
     @Query("SELECT s FROM Suggestion s WHERE s.status <> com.sitemanager.model.enums.SuggestionStatus.DRAFT OR s.authorName = :authorName ORDER BY s.createdAt DESC")
     List<Suggestion> findAllExcludingOthersDrafts(@Param("authorName") String authorName);
+
+    @Query("SELECT s.authorId, s.authorName, s.status, COUNT(s) FROM Suggestion s WHERE s.authorId IS NOT NULL GROUP BY s.authorId, s.authorName, s.status")
+    List<Object[]> findStatusCountsByAuthorId();
+
+    List<Suggestion> findByAuthorIdOrderByCreatedAtDesc(Long authorId);
+
+    @Query("SELECT DISTINCT s.authorId, s.authorName FROM Suggestion s WHERE s.authorId IS NOT NULL")
+    List<Object[]> findDistinctAuthorIdAndName();
 }

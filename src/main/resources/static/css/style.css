@@ -511,3 +511,13 @@ textarea { resize: vertical; min-height: 80px; }
     .suggestion-header { flex-direction: column; }
     .message { max-width: 95%; }
 }
+
+/* Dashboard / Leaderboard */
+.leaderboard-table { width: 100%; border-collapse: collapse; }
+.leaderboard-table th,
+.leaderboard-table td { padding: 10px 14px; border-bottom: 1px solid var(--border); text-align: left; }
+.leaderboard-table tbody tr:hover { background: var(--bg); }
+.rank-medal { font-size: 1.2em; }
+.contributor-link { color: var(--primary); cursor: pointer; text-decoration: underline; }
+#userHistoryPanel { margin-top: 2rem; padding: 1rem; border: 1px solid var(--border); border-radius: 8px; }
+.history-suggestion-card { padding: 0.75rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }

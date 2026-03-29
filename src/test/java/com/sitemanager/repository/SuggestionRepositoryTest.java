@@ -194,4 +194,138 @@ class SuggestionRepositoryTest {
         assertNotNull(saved.getUpdatedAt());
         assertNotNull(saved.getLastActivityAt());
     }
+
+    @Test
+    void findStatusCountsByAuthorId_aggregatesCorrectly() {
+        Suggestion s1 = new Suggestion();
+        s1.setTitle("Alice Merged");
+        s1.setDescription("d");
+        s1.setStatus(SuggestionStatus.MERGED);
+        s1.setAuthorName("alice");
+        s1.setAuthorId(1L);
+        suggestionRepository.save(s1);
+
+        Suggestion s2 = new Suggestion();
+        s2.setTitle("Alice Draft");
+        s2.setDescription("d");
+        s2.setStatus(SuggestionStatus.DRAFT);
+        s2.setAuthorName("alice");
+        s2.setAuthorId(1L);
+        suggestionRepository.save(s2);
+
+        Suggestion s3 = new Suggestion();
+        s3.setTitle("Bob Approved");
+        s3.setDescription("d");
+        s3.setStatus(SuggestionStatus.APPROVED);
+        s3.setAuthorName("bob");
+        s3.setAuthorId(2L);
+        suggestionRepository.save(s3);
+
+        // No authorId — should be excluded
+        Suggestion s4 = new Suggestion();
+        s4.setTitle("Anonymous");
+        s4.setDescription("d");
+        s4.setStatus(SuggestionStatus.DRAFT);
+        s4.setAuthorName("anon");
+        suggestionRepository.save(s4);
+
+        List<Object[]> rows = suggestionRepository.findStatusCountsByAuthorId();
+        // alice has 2 rows (MERGED + DRAFT), bob has 1 row (APPROVED)
+        assertEquals(3, rows.size());
+
+        long aliceMergedCount = rows.stream()
+                .filter(r -> Long.valueOf(1L).equals(r[0]) && SuggestionStatus.MERGED.equals(r[2]))
+                .mapToLong(r -> (Long) r[3])
+                .sum();
+        assertEquals(1L, aliceMergedCount);
+    }
+
+    @Test
+    void findStatusCountsByAuthorId_excludesNullAuthorId() {
+        Suggestion s = new Suggestion();
+        s.setTitle("No Author");
+        s.setDescription("d");
+        s.setStatus(SuggestionStatus.APPROVED);
+        s.setAuthorName("someone");
+        suggestionRepository.save(s);
+
+        List<Object[]> rows = suggestionRepository.findStatusCountsByAuthorId();
+        assertTrue(rows.isEmpty());
+    }
+
+    @Test
+    void findByAuthorIdOrderByCreatedAtDesc_returnsInDescOrder() {
+        Suggestion old = new Suggestion();
+        old.setTitle("Old");
+        old.setDescription("d");
+        old.setStatus(SuggestionStatus.MERGED);
+        old.setAuthorName("alice");
+        old.setAuthorId(1L);
+        old.setCreatedAt(Instant.now().minusSeconds(100));
+        suggestionRepository.save(old);
+
+        Suggestion recent = new Suggestion();
+        recent.setTitle("Recent");
+        recent.setDescription("d");
+        recent.setStatus(SuggestionStatus.DRAFT);
+        recent.setAuthorName("alice");
+        recent.setAuthorId(1L);
+        suggestionRepository.save(recent);
+
+        Suggestion other = new Suggestion();
+        other.setTitle("Other User");
+        other.setDescription("d");
+        other.setStatus(SuggestionStatus.DRAFT);
+        other.setAuthorName("bob");
+        other.setAuthorId(2L);
+        suggestionRepository.save(other);
+
+        List<Suggestion> aliceHistory = suggestionRepository.findByAuthorIdOrderByCreatedAtDesc(1L);
+        assertEquals(2, aliceHistory.size());
+        assertEquals("Recent", aliceHistory.get(0).getTitle());
+        assertEquals("Old", aliceHistory.get(1).getTitle());
+    }
+
+    @Test
+    void findByAuthorIdOrderByCreatedAtDesc_returnsEmptyForUnknownAuthor() {
+        List<Suggestion> result = suggestionRepository.findByAuthorIdOrderByCreatedAtDesc(999L);
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void findDistinctAuthorIdAndName_returnsUniqueAuthors() {
+        for (int i = 0; i < 3; i++) {
+            Suggestion s = new Suggestion();
+            s.setTitle("Alice " + i);
+            s.setDescription("d");
+            s.setStatus(SuggestionStatus.DRAFT);
+            s.setAuthorName("alice");
+            s.setAuthorId(1L);
+            suggestionRepository.save(s);
+        }
+
+        Suggestion bobSuggestion = new Suggestion();
+        bobSuggestion.setTitle("Bob");
+        bobSuggestion.setDescription("d");
+        bobSuggestion.setStatus(SuggestionStatus.DRAFT);
+        bobSuggestion.setAuthorName("bob");
+        bobSuggestion.setAuthorId(2L);
+        suggestionRepository.save(bobSuggestion);
+
+        // null authorId should be excluded
+        Suggestion anon = new Suggestion();
+        anon.setTitle("Anon");
+        anon.setDescription("d");
+        anon.setStatus(SuggestionStatus.DRAFT);
+        anon.setAuthorName("anon");
+        suggestionRepository.save(anon);
+
+        List<Object[]> pairs = suggestionRepository.findDistinctAuthorIdAndName();
+        assertEquals(2, pairs.size());
+
+        boolean hasAlice = pairs.stream().anyMatch(r -> Long.valueOf(1L).equals(r[0]) && "alice".equals(r[1]));
+        boolean hasBob = pairs.stream().anyMatch(r -> Long.valueOf(2L).equals(r[0]) && "bob".equals(r[1]));
+        assertTrue(hasAlice);
+        assertTrue(hasBob);
+    }
 }
