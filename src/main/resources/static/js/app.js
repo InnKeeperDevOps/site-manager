@@ -483,7 +483,6 @@ const app = {
         }
 
         // Admin actions
-        const isAdmin = this.state.role === 'ROOT_ADMIN' || this.state.role === 'ADMIN';
         const canApprove = ['PLANNED', 'DISCUSSING'].includes(suggestion.status);
         document.getElementById('adminActions').style.display =
             (isAdmin && canApprove) ? '' : 'none';
@@ -1264,14 +1263,14 @@ const app = {
             if (Notification.permission !== 'granted') {
                 return;
             }
-            if (this.state.currentSuggestion?.id === data.suggestionId) {
+            if (this.state.currentSuggestion === data.suggestionId) {
                 return;
             }
             const n = new Notification('Clarification Needed', {
                 body: 'Your suggestion "' + data.suggestionTitle + '" needs ' + data.questionCount + ' question(s) answered.',
                 tag: 'suggestion-clarification-' + data.suggestionId
             });
-            n.onclick = () => { window.focus(); loadDetail(data.suggestionId); n.close(); };
+            n.onclick = () => { window.focus(); app.loadDetail(data.suggestionId); n.close(); };
         } else if (data.type === 'approval_needed') {
             this.state.approvalPendingCount++;
             this.updateApprovalBanner();

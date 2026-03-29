@@ -67,8 +67,7 @@ CREATE TABLE IF NOT EXISTS suggestions (
     expert_review_changed_domains TEXT,
     created_at                    TIMESTAMP NOT NULL,
     updated_at                    TIMESTAMP NOT NULL,
-    last_activity_at              TIMESTAMP,
-    priority                      VARCHAR(10) NOT NULL DEFAULT 'MEDIUM'
+    last_activity_at              TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS suggestion_messages (
