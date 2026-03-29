@@ -237,6 +237,11 @@ public class SuggestionController {
         return ResponseEntity.ok(Map.of("questions", questions, "hasPending", true));
     }
 
+    @GetMapping("/execution-queue")
+    public ResponseEntity<?> getExecutionQueue() {
+        return ResponseEntity.ok(suggestionService.getExecutionQueueStatus());
+    }
+
     @PostMapping("/{id}/approve")
     public ResponseEntity<?> approve(@PathVariable Long id, HttpSession session) {
         if (!permissionService.hasPermission(session, Permission.APPROVE_DENY_SUGGESTIONS)) {

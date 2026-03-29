@@ -1544,6 +1544,7 @@ public class SuggestionService {
             broadcastUpdate(suggestion);
             addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
                     "Your suggestion is approved and queued. It will start automatically when a slot opens up.");
+            broadcastExecutionQueueStatus();
             return;
         }
 
@@ -1552,6 +1553,7 @@ public class SuggestionService {
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
         slackNotificationService.sendNotification(suggestion, "IN_PROGRESS");
+        broadcastExecutionQueueStatus();
 
         // Clone repo into suggestion-{id}-repo/ and execute in background
         new Thread(() -> {
@@ -1616,6 +1618,39 @@ public class SuggestionService {
         addMessage(next.getId(), SenderType.SYSTEM, "System",
                 "A slot has opened up. Starting work on your suggestion now.");
         executeApprovedSuggestion(next);
+    }
+
+    public Map<String, Object> getExecutionQueueStatus() {
+        int maxConcurrent = getMaxConcurrentSuggestions();
+        long activeCount = suggestionRepository.countByStatusIn(
+                List.of(SuggestionStatus.IN_PROGRESS, SuggestionStatus.TESTING));
+
+        List<Suggestion> queued = suggestionRepository.findByStatus(SuggestionStatus.APPROVED);
+        queued.sort(java.util.Comparator.comparing(Suggestion::getCreatedAt));
+
+        List<Map<String, Object>> queuedList = new java.util.ArrayList<>();
+        for (int i = 0; i < queued.size(); i++) {
+            Suggestion s = queued.get(i);
+            queuedList.add(Map.of(
+                    "id", s.getId(),
+                    "title", s.getTitle(),
+                    "position", i + 1
+            ));
+        }
+
+        return Map.of(
+                "maxConcurrent", maxConcurrent,
+                "activeCount", activeCount,
+                "queuedCount", queued.size(),
+                "queued", queuedList
+        );
+    }
+
+    private void broadcastExecutionQueueStatus() {
+        Map<String, Object> status = getExecutionQueueStatus();
+        java.util.Map<String, Object> payload = new java.util.HashMap<>(status);
+        payload.put("type", "execution_queue_status");
+        userNotificationHandler.broadcastToAll(payload);
     }
 
     /**
