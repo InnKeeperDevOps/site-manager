@@ -75,6 +75,7 @@ const app = {
             this.navigate('setup');
         } else {
             this.navigate('list');
+            this.initProjectDefinition();
         }
     },
 
@@ -99,6 +100,7 @@ const app = {
         }
         this.updateNewSuggestionBtn();
         this.updateAiRecommendationsBtn();
+        this.updateProjectDefinitionBtn();
     },
 
     updateAiRecommendationsBtn() {
@@ -106,6 +108,243 @@ const app = {
         if (!btn) return;
         const { loggedIn, role } = this.state;
         btn.style.display = (loggedIn && (role === 'ROOT_ADMIN' || role === 'ADMIN')) ? '' : 'none';
+    },
+
+    updateProjectDefinitionBtn() {
+        const btn = document.getElementById('project-def-btn');
+        if (!btn) return;
+        const { loggedIn, role } = this.state;
+        btn.style.display = (loggedIn && (role === 'ROOT_ADMIN' || role === 'ADMIN')) ? '' : 'none';
+    },
+
+    async initProjectDefinition() {
+        const isAdmin = this.state.role === 'ROOT_ADMIN' || this.state.role === 'ADMIN';
+        if (!isAdmin) return;
+        try {
+            const res = await fetch('/api/project-definition/state');
+            if (res.status === 204) return; // no active session
+            if (!res.ok) return;
+            const state = await res.json();
+            if (!state || !state.status) return;
+            if (state.status === 'COMPLETED' || state.status === 'PR_OPEN') {
+                const btn = document.getElementById('project-def-btn');
+                if (btn) btn.textContent = 'View Definition';
+            } else if (['ACTIVE', 'GENERATING', 'SAVING'].includes(state.status)) {
+                this.showProjectDefinitionModal(state);
+            }
+        } catch (e) {
+            // Silently ignore — feature may not be configured
+        }
+    },
+
+    async openProjectDefinition() {
+        const modal = document.getElementById('project-def-modal');
+        if (!modal) return;
+        try {
+            const res = await fetch('/api/project-definition/state');
+            if (res.status === 204) {
+                // No session — start one
+                const startRes = await fetch('/api/project-definition/start', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+                if (!startRes.ok) {
+                    const err = await startRes.json().catch(() => ({}));
+                    if (startRes.status === 409) {
+                        this.showToast('A session is already in progress.');
+                        return;
+                    }
+                    this.showToast(err.error || 'Could not start session.');
+                    return;
+                }
+                const state = await startRes.json();
+                this.showProjectDefinitionModal(state);
+            } else if (res.ok) {
+                const state = await res.json();
+                this.showProjectDefinitionModal(state);
+            }
+        } catch (e) {
+            this.showToast('Could not connect to the server.');
+        }
+    },
+
+    showProjectDefinitionModal(state) {
+        const modal = document.getElementById('project-def-modal');
+        if (!modal) return;
+        modal.style.display = '';
+
+        // Progress bar
+        const bar = document.getElementById('pd-progress-bar');
+        if (bar) bar.style.width = (state.progressPercent || 0) + '%';
+
+        // Status text
+        const statusEl = document.getElementById('pd-status-text');
+        const spinner = document.getElementById('pd-spinner');
+        const spinnerText = document.getElementById('pd-spinner-text');
+        const questionArea = document.getElementById('pd-question-area');
+        const completeView = document.getElementById('pd-complete-view');
+
+        // Hide all sections first
+        if (spinner) spinner.style.display = 'none';
+        if (questionArea) questionArea.style.display = '';
+        if (completeView) completeView.style.display = 'none';
+
+        if (state.status === 'GENERATING') {
+            if (statusEl) statusEl.textContent = 'Creating your project definition document...';
+            if (spinner) spinner.style.display = '';
+            if (spinnerText) spinnerText.textContent = 'Generating — this may take a moment';
+            if (questionArea) questionArea.style.display = 'none';
+        } else if (state.status === 'SAVING') {
+            if (statusEl) statusEl.textContent = 'Saving and opening a pull request...';
+            if (spinner) spinner.style.display = '';
+            if (spinnerText) spinnerText.textContent = 'Saving changes and opening a pull request';
+            if (questionArea) questionArea.style.display = 'none';
+        } else if (state.status === 'COMPLETED') {
+            if (statusEl) statusEl.textContent = 'Complete';
+            if (questionArea) questionArea.style.display = 'none';
+            this.renderProjectDefinitionComplete(state);
+        } else if (state.status === 'PR_OPEN') {
+            if (statusEl) statusEl.textContent = 'Pull request is open and waiting for review';
+            if (questionArea) questionArea.style.display = 'none';
+            this.renderProjectDefinitionComplete(state);
+        } else if (state.status === 'FAILED') {
+            if (statusEl) statusEl.textContent = 'Something went wrong.';
+            if (questionArea) questionArea.style.display = 'none';
+            if (completeView) completeView.style.display = '';
+            const errSection = document.getElementById('pd-error-section');
+            if (errSection) {
+                errSection.style.display = '';
+                errSection.textContent = state.errorMessage || 'An error occurred. Please try again.';
+            }
+        } else {
+            // ACTIVE — show question
+            const questionEl = document.getElementById('pd-question');
+            if (questionEl) questionEl.textContent = state.currentQuestion || '';
+
+            const optionsEl = document.getElementById('pd-options');
+            const textInput = document.getElementById('pd-text-input');
+            const textSubmit = document.getElementById('pd-text-submit-area');
+
+            if (state.questionType === 'MULTIPLE_CHOICE' && state.options && state.options.length > 0) {
+                if (textInput) textInput.style.display = 'none';
+                if (textSubmit) textSubmit.style.display = 'none';
+                if (optionsEl) {
+                    optionsEl.innerHTML = '';
+                    state.options.forEach(opt => {
+                        const btn = document.createElement('button');
+                        btn.className = 'btn btn-outline';
+                        btn.textContent = opt;
+                        btn.style.textAlign = 'left';
+                        btn.onclick = () => this.submitProjectDefinitionAnswer(opt, state.sessionId);
+                        optionsEl.appendChild(btn);
+                    });
+                }
+            } else {
+                if (optionsEl) optionsEl.innerHTML = '';
+                if (textInput) { textInput.style.display = ''; textInput.value = ''; }
+                if (textSubmit) textSubmit.style.display = '';
+                const submitBtn = document.getElementById('pd-submit-btn');
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.onclick = () => this.submitProjectDefinitionAnswer(document.getElementById('pd-text-input').value, state.sessionId);
+                }
+            }
+
+            const label = state.status === 'ACTIVE' ? 'Answer the questions below to define your project.' : '';
+            if (statusEl) statusEl.textContent = label;
+        }
+
+        this._pdCurrentSessionId = state.sessionId;
+    },
+
+    async submitProjectDefinitionAnswer(answer, sessionId) {
+        const id = sessionId || this._pdCurrentSessionId;
+        if (!id) return;
+        if (!answer || !answer.trim()) {
+            this.showToast('Please enter an answer before continuing.');
+            return;
+        }
+        const submitBtn = document.getElementById('pd-submit-btn');
+        if (submitBtn) submitBtn.disabled = true;
+        try {
+            const res = await fetch('/api/project-definition/' + id + '/answer', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ answer: answer.trim() })
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                this.showToast(err.error || 'Could not submit answer.');
+                if (submitBtn) submitBtn.disabled = false;
+                return;
+            }
+            const state = await res.json();
+            this.showProjectDefinitionModal(state);
+        } catch (e) {
+            this.showToast('Could not connect to the server.');
+            if (submitBtn) submitBtn.disabled = false;
+        }
+    },
+
+    renderProjectDefinitionComplete(state) {
+        const completeView = document.getElementById('pd-complete-view');
+        if (!completeView) return;
+        completeView.style.display = '';
+
+        const prSection = document.getElementById('pd-pr-section');
+        const prOpenSection = document.getElementById('pd-pr-open-section');
+        const prLink = document.getElementById('pd-pr-link');
+        const prOpenLink = document.getElementById('pd-pr-open-link');
+        const contentText = document.getElementById('pd-content-text');
+        const contentExpander = document.getElementById('pd-content-expander');
+        const errSection = document.getElementById('pd-error-section');
+
+        if (errSection) errSection.style.display = 'none';
+
+        if (state.status === 'PR_OPEN') {
+            if (prSection) prSection.style.display = 'none';
+            if (prOpenSection) prOpenSection.style.display = '';
+            if (prOpenLink && state.prUrl) prOpenLink.href = state.prUrl;
+        } else if (state.prUrl) {
+            if (prOpenSection) prOpenSection.style.display = 'none';
+            if (prSection) prSection.style.display = '';
+            if (prLink) prLink.href = state.prUrl;
+        } else {
+            if (prSection) prSection.style.display = 'none';
+            if (prOpenSection) prOpenSection.style.display = 'none';
+        }
+
+        if (state.generatedContent && contentText) {
+            const preview = state.generatedContent.substring(0, 500);
+            contentText.textContent = preview;
+            if (state.generatedContent.length > 500) {
+                this._pdFullContent = state.generatedContent;
+                if (contentExpander) contentExpander.style.display = '';
+            } else {
+                if (contentExpander) contentExpander.style.display = 'none';
+            }
+        }
+
+        // Update button label
+        const btn = document.getElementById('project-def-btn');
+        if (btn) btn.textContent = 'View Definition';
+    },
+
+    expandProjectDefinitionContent(e) {
+        e.preventDefault();
+        const contentText = document.getElementById('pd-content-text');
+        if (contentText && this._pdFullContent) {
+            contentText.textContent = this._pdFullContent;
+            contentText.style.maxHeight = 'none';
+        }
+        const expander = document.getElementById('pd-content-expander');
+        if (expander) expander.style.display = 'none';
+    },
+
+    closeProjectDefinitionModal() {
+        const modal = document.getElementById('project-def-modal');
+        if (modal) modal.style.display = 'none';
+    },
+
+    onProjectDefinitionUpdate(wsData) {
+        this.showProjectDefinitionModal(wsData);
     },
 
     updateNewSuggestionBtn() {
@@ -1274,6 +1513,8 @@ const app = {
         } else if (data.type === 'approval_needed') {
             this.state.approvalPendingCount++;
             this.updateApprovalBanner();
+        } else if (data.type === 'PROJECT_DEFINITION_UPDATE') {
+            this.onProjectDefinitionUpdate(data.data || data);
         }
     },
 
