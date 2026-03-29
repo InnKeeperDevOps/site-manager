@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sitemanager.model.SiteSettings;
+import com.sitemanager.model.enums.ExpertRole;
 import com.sitemanager.repository.SiteSettingsRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -509,9 +510,82 @@ public class ClaudeService {
                                                     String tasksJson, String previousNotes,
                                                     String workingDir,
                                                     Consumer<String> progressCallback,
-                                                    int reviewRound) {
+                                                    int reviewRound,
+                                                    List<Integer> ownerLockedSections) {
+        boolean isProjectOwner = ExpertRole.PROJECT_OWNER.getDisplayName().equals(expertDisplayName);
+
+        String prompt;
+        if (isProjectOwner) {
+            prompt = buildProjectOwnerReviewPrompt(expertPrompt, suggestionTitle, suggestionDescription,
+                    plan, tasksJson, previousNotes);
+        } else {
+            prompt = buildStandardExpertReviewPrompt(expertPrompt, suggestionTitle, suggestionDescription,
+                    plan, tasksJson, previousNotes, reviewRound, ownerLockedSections);
+        }
+
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback,
+                "expert-review:" + expertDisplayName, resolveExpertModel(), resolveExpertMaxTurns());
+    }
+
+    String buildProjectOwnerReviewPrompt(String expertPrompt, String suggestionTitle,
+                                                   String suggestionDescription, String plan,
+                                                   String tasksJson, String previousNotes) {
+        return String.format(
+                "%s\n\n" +
+                "Suggestion Title: %s\n" +
+                "Suggestion Description: %s\n\n" +
+                "Current Plan:\n%s\n\n" +
+                "%s" +
+                "%s" +
+                "DUAL-LEVEL DETAIL RULES:\n" +
+                "- Your 'analysis' field may reference technical details about what is present or missing in the plan.\n" +
+                "- Your 'message' field MUST be written in plain, non-technical language — describe features and behaviors only. " +
+                "NEVER mention file names, classes, APIs, or technical implementation details in the message.\n\n" +
+                "LOCKED TASK INDICES:\n" +
+                "- In your response, include 'lockedTaskIndices': a list of 0-based indices of tasks you consider essential " +
+                "to fulfilling the original request.\n" +
+                "- These tasks will be protected from removal or scope changes by downstream reviewers.\n" +
+                "- Include ALL tasks that directly implement what the user requested. " +
+                "Only exclude tasks that are clearly optional or purely technical improvements.\n" +
+                "- lockedTaskIndices is REQUIRED in all responses (use an empty list [] if no tasks exist yet).\n\n" +
+                "Respond in this JSON format:\n" +
+                "If the plan fully and faithfully captures the original suggestion:\n" +
+                "{\"status\": \"APPROVED\", \"analysis\": \"what you verified and found to be complete\", " +
+                "\"message\": \"concise NON-TECHNICAL summary for the user\", " +
+                "\"lockedTaskIndices\": [0, 1, 2, ...]}\n\n" +
+                "If the plan is missing content, reduces scope, or misrepresents the original request:\n" +
+                "{\"status\": \"CHANGES_PROPOSED\", \"analysis\": \"what is missing or incorrect\", " +
+                "\"proposedChanges\": \"technical description of what needs to be added or changed\", " +
+                "\"revisedPlan\": \"updated low-level technical plan\", " +
+                "\"revisedPlanDisplaySummary\": \"updated high-level non-technical summary for the user\", " +
+                "\"revisedTasks\": [{\"title\": \"low-level technical task name\", \"description\": \"detailed technical description\", " +
+                "\"displayTitle\": \"high-level user-facing task name\", \"displayDescription\": \"plain language description\", " +
+                "\"estimatedMinutes\": number}, ...], " +
+                "\"message\": \"concise NON-TECHNICAL summary for the user\", " +
+                "\"lockedTaskIndices\": [0, 1, 2, ...]}\n\n" +
+                "IMPORTANT: lockedTaskIndices is REQUIRED in every response. " +
+                "List every 0-based task index that is essential to fulfilling the user's original request. " +
+                "When proposing changes, include the COMPLETE revised task list, not just modified tasks.",
+                expertPrompt,
+                suggestionTitle,
+                suggestionDescription,
+                plan,
+                tasksJson != null ? "Current Tasks:\n" + tasksJson + "\n\n" : "",
+                previousNotes != null && !previousNotes.isBlank() ?
+                        "Previous expert reviews:\n" + previousNotes + "\n\n" : ""
+        );
+    }
+
+    String buildStandardExpertReviewPrompt(String expertPrompt, String suggestionTitle,
+                                                     String suggestionDescription, String plan,
+                                                     String tasksJson, String previousNotes,
+                                                     int reviewRound, List<Integer> ownerLockedSections) {
         String roundContext = "";
         if (reviewRound > 1) {
+            String ownerLockRoundNote = (ownerLockedSections != null && !ownerLockedSections.isEmpty())
+                    ? "- Do NOT propose removing owner-locked tasks (indices: " + ownerLockedSections +
+                      "). These are essential to the original request and cannot be removed.\n"
+                    : "";
             roundContext = "ROUND " + reviewRound + " RE-REVIEW RULES (MANDATORY):\n" +
                 "- This plan was ALREADY reviewed and updated. You are re-reviewing because changes " +
                 "were made in a domain related to yours.\n" +
@@ -520,16 +594,28 @@ public class ClaudeService {
                 "  * CRITICAL issues that were clearly missed in round 1\n" +
                 "- Do NOT re-raise issues noted by other experts in previous rounds.\n" +
                 "- Do NOT propose changes for anything below CRITICAL severity.\n" +
+                ownerLockRoundNote +
                 "- If the plan is acceptable (even imperfect), you MUST approve it.\n" +
                 "- The goal is CONVERGENCE, not perfection. Approve unless something is broken.\n\n";
         }
 
-        String prompt = String.format(
+        String ownerLockContext = "";
+        if (ownerLockedSections != null && !ownerLockedSections.isEmpty()) {
+            ownerLockContext = "OWNER-LOCKED TASKS (DO NOT REMOVE OR CHANGE SCOPE):\n" +
+                "The Project Owner has identified task indices " + ownerLockedSections +
+                " as essential to fulfilling the original request.\n" +
+                "When proposing revisedTasks, you MUST include all owner-locked tasks. " +
+                "You may suggest different implementation approaches for these tasks, " +
+                "but you CANNOT remove them or change what they deliver to the user.\n\n";
+        }
+
+        return String.format(
                 "%s\n\n" +
                 "%s" +
                 "Suggestion Title: %s\n" +
                 "Suggestion Description: %s\n\n" +
                 "Current Plan:\n%s\n\n" +
+                "%s" +
                 "%s" +
                 "%s" +
                 "REVIEW SEVERITY RULES:\n" +
@@ -580,11 +666,9 @@ public class ClaudeService {
                 plan,
                 tasksJson != null ? "Current Tasks:\n" + tasksJson + "\n\n" : "",
                 previousNotes != null && !previousNotes.isBlank() ?
-                        "Previous expert reviews:\n" + previousNotes + "\n\n" : ""
+                        "Previous expert reviews:\n" + previousNotes + "\n\n" : "",
+                ownerLockContext
         );
-
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback,
-                "expert-review:" + expertDisplayName, resolveExpertModel(), resolveExpertMaxTurns());
     }
 
     public CompletableFuture<String> reviewExpertFeedback(String sessionId, String expertDisplayName,
@@ -592,7 +676,8 @@ public class ClaudeService {
                                                             String currentPlan, String reviewerRole,
                                                             String reviewerPrompt, String workingDir,
                                                             Consumer<String> progressCallback,
-                                                            int reviewRound) {
+                                                            int reviewRound,
+                                                            List<Integer> ownerLockedSections) {
         String roundWarning = "";
         if (reviewRound > 1) {
             roundWarning = "IMPORTANT: This is round " + reviewRound + " of review. The bar for accepting changes is EXTREMELY HIGH. " +
@@ -600,8 +685,19 @@ public class ClaudeService {
                 "Reject ALL other changes to ensure the review converges. When in doubt, REJECT.\n\n";
         }
 
+        String ownerLockInstruction = "";
+        if (ownerLockedSections != null && !ownerLockedSections.isEmpty()) {
+            ownerLockInstruction = "OWNER-LOCKED TASKS — PROTECTED BY PROJECT OWNER:\n" +
+                "Task indices " + ownerLockedSections + " are owner-locked and essential to the original request.\n" +
+                "If the proposed changes would remove any of these tasks or change what they deliver to the user " +
+                "(not just how they are implemented), you MUST set apply=false and explain that owner-locked tasks " +
+                "cannot have their scope altered. Implementation-level changes to locked tasks (technical approach, " +
+                "file choices, method signatures) ARE allowed.\n\n";
+        }
+
         String prompt = String.format(
                 "%s\n\n" +
+                "%s" +
                 "%s" +
                 "A %s has reviewed an implementation plan and proposed changes. " +
                 "As the %s, evaluate whether these changes are warranted.\n\n" +
@@ -618,7 +714,8 @@ public class ClaudeService {
                 "\"apply\": true/false}\n\n" +
                 "Set apply=true ONLY if the changes fix a critical or major issue. " +
                 "Reject changes that are cosmetic, over-engineered, or add scope without clear value.",
-                reviewerPrompt, roundWarning, expertDisplayName, reviewerRole,
+                reviewerPrompt, roundWarning, ownerLockInstruction,
+                expertDisplayName, reviewerRole,
                 currentPlan, expertDisplayName, expertAnalysis, proposedChanges, reviewerRole
         );
 

@@ -1,10 +1,14 @@
 package com.sitemanager.model;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sitemanager.model.enums.Priority;
 import com.sitemanager.model.enums.SuggestionStatus;
 import jakarta.persistence.*;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 @Entity
@@ -95,6 +99,9 @@ public class Suggestion {
     @Column(length = 10, nullable = false)
     private Priority priority = Priority.MEDIUM;
 
+    @Column(columnDefinition = "TEXT")
+    private String ownerLockedPlanSections;
+
     public Suggestion() {}
 
     @PrePersist
@@ -164,6 +171,34 @@ public class Suggestion {
     public void setExpertReviewChangedDomains(String expertReviewChangedDomains) { this.expertReviewChangedDomains = expertReviewChangedDomains; }
     public Priority getPriority() { return priority; }
     public void setPriority(Priority priority) { this.priority = priority; }
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    public List<Integer> getOwnerLockedSections() {
+        if (ownerLockedPlanSections == null || ownerLockedPlanSections.isBlank()) {
+            return Collections.emptyList();
+        }
+        try {
+            return MAPPER.readValue(ownerLockedPlanSections, new TypeReference<List<Integer>>() {});
+        } catch (JsonProcessingException e) {
+            return Collections.emptyList();
+        }
+    }
+
+    public String getOwnerLockedPlanSections() { return ownerLockedPlanSections; }
+    public void setOwnerLockedPlanSections(String ownerLockedPlanSections) { this.ownerLockedPlanSections = ownerLockedPlanSections; }
+
+    public void setOwnerLockedSections(List<Integer> sections) {
+        if (sections == null || sections.isEmpty()) {
+            this.ownerLockedPlanSections = null;
+            return;
+        }
+        try {
+            this.ownerLockedPlanSections = MAPPER.writeValueAsString(sections);
+        } catch (JsonProcessingException e) {
+            this.ownerLockedPlanSections = null;
+        }
+    }
 
     // --- Expert Review Summary ---
 
