@@ -36,49 +36,34 @@ stateDiagram-v2
 
 ---
 
-## Expert Panel & Batch Structure
+## Expert Panel & Execution Order
 
-Experts are organized into four sequential batches. Experts within the same batch run **concurrently**; batches run **sequentially** so later experts can see earlier notes.
+Experts run **sequentially, one at a time**, so every expert can see the notes from all prior reviews.
 
 ```mermaid
-block-beta
-    columns 4
+flowchart LR
+    SA[1. Software\nArchitect] --> SE[2. Security\nEngineer]
+    SE --> IE[3. Infrastructure\nEngineer]
+    IE --> DA[4. Data\nAnalyst]
+    DA --> PE[5. Performance\nEngineer]
+    PE --> DE[6. DevOps\nEngineer]
+    DE --> SWE[7. Software\nEngineer]
+    SWE --> FE[8. Frontend\nEngineer]
+    FE --> UX[9. UX\nExpert]
+    UX --> PM[10. Product\nManager]
+    PM --> QA[11. QA\nEngineer]
 
-    block:batch1:1
-        columns 1
-        b1["Batch 1\nArchitecture & Security"]
-        sa["Software Architect"]
-        se["Security Engineer"]
-        ie["Infrastructure Engineer"]
-    end
-
-    block:batch2:1
-        columns 1
-        b2["Batch 2\nData, Performance & Ops"]
-        da["Data Analyst"]
-        pe["Performance Engineer"]
-        de["DevOps Engineer"]
-    end
-
-    block:batch3:1
-        columns 1
-        b3["Batch 3\nImplementation, UI & UX"]
-        swe["Software Engineer"]
-        fe["Frontend Engineer"]
-        ux["UX Expert"]
-    end
-
-    block:batch4:1
-        columns 1
-        b4["Batch 4\nProduct & QA"]
-        pm["Product Manager"]
-        qa["QA Engineer"]
-    end
-
-    style b1 fill:#4a90d9,color:#fff
-    style b2 fill:#50b88e,color:#fff
-    style b3 fill:#e6a23c,color:#fff
-    style b4 fill:#d9534f,color:#fff
+    style SA fill:#4a90d9,color:#fff
+    style SE fill:#4a90d9,color:#fff
+    style IE fill:#4a90d9,color:#fff
+    style DA fill:#50b88e,color:#fff
+    style PE fill:#50b88e,color:#fff
+    style DE fill:#50b88e,color:#fff
+    style SWE fill:#e6a23c,color:#fff
+    style FE fill:#e6a23c,color:#fff
+    style UX fill:#e6a23c,color:#fff
+    style PM fill:#d9534f,color:#fff
+    style QA fill:#d9534f,color:#fff
 ```
 
 ---
@@ -149,18 +134,10 @@ flowchart TD
 
     E --> F{step >= 11?\nAll experts done?}
 
-    F -- No --> G{At start of batch?\npositionInBatch == 0}
-    G -- Yes --> H[runExpertBatch\nLaunch batch concurrently]
-    G -- No --> I[runSingleExpertReview\nResume mid-batch after clarification]
+    F -- No --> G[Run current expert\nClaudeService.expertReview]
+    G --> H[handleExpertReviewResponse]
 
-    H --> J[All experts in batch call\nClaudeService.expertReview]
-    J --> K[Wait for all to complete]
-    K --> L[Process results sequentially\nhandleExpertReviewResponse]
-
-    I --> M[Single expert calls\nClaudeService.expertReview]
-    M --> L
-
-    L --> N{Pipeline paused?\nClarification needed?}
+    H --> N{Pipeline paused?\nClarification needed?}
     N -- Yes --> O[Wait for user answers\nvia WebSocket + API]
     O --> P[handleExpertClarificationAnswers]
     P --> L
@@ -233,9 +210,9 @@ flowchart TD
 
 ---
 
-## Batch Execution Detail
+## Sequential Expert Execution Detail
 
-Within a batch, experts run in parallel. Results are processed sequentially after all complete.
+Each expert runs one at a time. After an expert completes, its response is processed before moving to the next.
 
 ```mermaid
 sequenceDiagram
@@ -244,24 +221,13 @@ sequenceDiagram
     participant WS as WebSocket
     participant DB as Database
 
-    Note over SS: runExpertBatch(batchIndex)
+    loop For each expert (1 through 11)
+        SS->>DB: Load suggestion + plan + prior notes
+        SS->>WS: Broadcast "Expert N is reviewing..."
 
-    SS->>DB: Load suggestion + plan
-    SS->>WS: Broadcast "experts reviewing..."
+        SS->>CS: expertReview(Expert N)
+        CS-->>SS: Expert N response
 
-    par Concurrent expert reviews
-        SS->>CS: expertReview(Expert A)
-        SS->>CS: expertReview(Expert B)
-        SS->>CS: expertReview(Expert C)
-    end
-
-    CS-->>SS: Expert A response
-    CS-->>SS: Expert B response
-    CS-->>SS: Expert C response
-
-    Note over SS: Process results sequentially
-
-    loop For each expert result
         SS->>SS: handleExpertReviewResponse
         alt APPROVED
             SS->>DB: Append note, advance step
@@ -278,11 +244,11 @@ sequenceDiagram
         else NEEDS_CLARIFICATION
             SS->>DB: Save questions
             SS->>WS: Broadcast expert_clarification_questions
-            Note over SS: Pipeline paused—waiting for user
+            Note over SS: Pipeline paused — waiting for user
         end
-    end
 
-    SS->>SS: runNextExpertReview (next batch)
+        SS->>SS: runNextExpertReview
+    end
 ```
 
 ---
