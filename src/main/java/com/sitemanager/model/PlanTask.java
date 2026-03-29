@@ -38,6 +38,9 @@ public class PlanTask {
     private Integer estimatedMinutes;
 
     @Column
+    private String statusDetail;
+
+    @Column
     private Instant startedAt;
 
     @Column
@@ -63,6 +66,8 @@ public class PlanTask {
     public void setStatus(TaskStatus status) { this.status = status; }
     public Integer getEstimatedMinutes() { return estimatedMinutes; }
     public void setEstimatedMinutes(Integer estimatedMinutes) { this.estimatedMinutes = estimatedMinutes; }
+    public String getStatusDetail() { return statusDetail; }
+    public void setStatusDetail(String statusDetail) { this.statusDetail = statusDetail; }
     public Instant getStartedAt() { return startedAt; }
     public void setStartedAt(Instant startedAt) { this.startedAt = startedAt; }
     public Instant getCompletedAt() { return completedAt; }

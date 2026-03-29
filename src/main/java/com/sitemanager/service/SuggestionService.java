@@ -1360,6 +1360,7 @@ public class SuggestionService {
             task.setDisplayDescription(taskNode.has("displayDescription") ? taskNode.get("displayDescription").asText() : task.getDescription());
             task.setEstimatedMinutes(taskNode.has("estimatedMinutes") ? taskNode.get("estimatedMinutes").asInt() : null);
             task.setStatus(TaskStatus.PENDING);
+            task.setStatusDetail("Waiting to start");
             planTaskRepository.save(task);
         }
         log.info("Updated {} plan tasks for suggestion {} from expert revision", order - 1, suggestionId);
@@ -1706,6 +1707,12 @@ public class SuggestionService {
         int taskOrder = nextTask.getTaskOrder();
         log.info("[AI-FLOW] suggestion={} executing task {}/{}: {}", suggestionId, taskOrder, totalTasks, nextTask.getTitle());
 
+        nextTask.setStatus(TaskStatus.IN_PROGRESS);
+        nextTask.setStartedAt(Instant.now());
+        nextTask.setStatusDetail("Writing code...");
+        planTaskRepository.save(nextTask);
+        broadcastTaskUpdate(suggestionId, nextTask);
+
         suggestion.setCurrentPhase("Task " + taskOrder + "/" + totalTasks + ": " + nextTask.getTitle());
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
@@ -1747,21 +1754,25 @@ public class SuggestionService {
         PlanTask task = optTask.get();
 
         if (task.getStatus() == TaskStatus.COMPLETED) {
-            // Task was marked completed during progress streaming — trigger expert review
+            task.setStatusDetail("Implementation finished — starting review");
+            planTaskRepository.save(task);
+            broadcastTaskUpdate(suggestionId, task);
             addMessage(suggestionId, SenderType.SYSTEM, "System",
                     "Task " + taskOrder + " implementation complete. Experts are now reviewing the work...");
             startTaskCompletionReview(suggestionId, taskOrder);
         } else if (task.getStatus() == TaskStatus.FAILED) {
-            // Task failed — notify and halt
+            task.setStatusDetail("Implementation failed");
+            planTaskRepository.save(task);
+            broadcastTaskUpdate(suggestionId, task);
             addMessage(suggestionId, SenderType.AI, "Claude", result);
             suggestion.setCurrentPhase("Task " + taskOrder + " failed — can retry");
             suggestionRepository.save(suggestion);
             broadcastUpdate(suggestion);
         } else {
-            // Task didn't report completion through progress — mark it and review
             task.setStatus(TaskStatus.COMPLETED);
             task.setCompletedAt(Instant.now());
             if (task.getStartedAt() == null) task.setStartedAt(task.getCompletedAt());
+            task.setStatusDetail("Implementation finished — starting review");
             planTaskRepository.save(task);
             broadcastTaskUpdate(suggestionId, task);
 
@@ -1796,8 +1807,8 @@ public class SuggestionService {
             return;
         }
 
-        // Mark as REVIEWING to prevent re-entry
         task.setStatus(TaskStatus.REVIEWING);
+        task.setStatusDetail("Queued for expert review");
         planTaskRepository.save(task);
         broadcastTaskUpdate(suggestionId, task);
 
@@ -1808,7 +1819,6 @@ public class SuggestionService {
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
 
-        // Use Software Engineer and QA Engineer to review the task completion
         ExpertRole[] taskReviewers = { ExpertRole.SOFTWARE_ENGINEER, ExpertRole.QA_ENGINEER };
         String plan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription();
         String workDir = suggestion.getWorkingDirectory();
@@ -1825,8 +1835,8 @@ public class SuggestionService {
                                    String plan, String workDir,
                                    ExpertRole[] reviewers, int reviewerIndex) {
         if (reviewerIndex >= reviewers.length) {
-            // All reviewers approved — mark task as COMPLETED and move to next task
             task.setStatus(TaskStatus.COMPLETED);
+            task.setStatusDetail("Verified by expert review");
             planTaskRepository.save(task);
             broadcastTaskUpdate(suggestionId, task);
 
@@ -1850,6 +1860,10 @@ public class SuggestionService {
 
         List<PlanTask> allTasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
         int totalTasks = allTasks.size();
+
+        task.setStatusDetail(reviewer.getDisplayName() + " is reviewing...");
+        planTaskRepository.save(task);
+        broadcastTaskUpdate(suggestionId, task);
 
         suggestion.setCurrentPhase(reviewer.getDisplayName() + " reviewing task " + taskOrder + "/" + totalTasks + "...");
         suggestionRepository.save(suggestion);
@@ -1917,9 +1931,12 @@ public class SuggestionService {
                         "Task " + taskOrder + " review: Needs fixes. " + analysis);
                 addMessage(suggestionId, SenderType.AI, reviewer.getDisplayName(), message);
 
-                // Send fixes back to Claude to address, then re-review
                 addMessage(suggestionId, SenderType.SYSTEM, "System",
                         reviewer.getDisplayName() + " found issues with task " + taskOrder + ". Fixing...");
+
+                task.setStatusDetail("Fixing issues found by " + reviewer.getDisplayName());
+                planTaskRepository.save(task);
+                broadcastTaskUpdate(suggestionId, task);
 
                 suggestion.setCurrentPhase("Fixing issues in task " + taskOrder + " found by " + reviewer.getDisplayName() + "...");
                 suggestionRepository.save(suggestion);
@@ -2313,6 +2330,7 @@ public class SuggestionService {
                 task.setDisplayDescription(taskNode.has("displayDescription") ? taskNode.get("displayDescription").asText() : task.getDescription());
                 task.setEstimatedMinutes(taskNode.has("estimatedMinutes") ? taskNode.get("estimatedMinutes").asInt() : null);
                 task.setStatus(TaskStatus.PENDING);
+                task.setStatusDetail("Waiting to start");
                 planTaskRepository.save(task);
             }
 
@@ -2364,6 +2382,9 @@ public class SuggestionService {
                 "{\"type\":\"execution_progress\",\"content\":\"" +
                         escapeJson(progress) + "\"}");
 
+        // Derive high-level activity from raw progress and broadcast to active task
+        deriveTaskActivity(suggestionId, progress);
+
         // Try to parse task status updates from Claude's output
         try {
             String json = extractJsonBlock(progress);
@@ -2387,8 +2408,8 @@ public class SuggestionService {
 
             if (newStatus == TaskStatus.IN_PROGRESS && task.getStartedAt() == null) {
                 task.setStartedAt(Instant.now());
+                task.setStatusDetail(message != null ? message : "Writing code...");
 
-                // Update suggestion's currentPhase to show which task is running
                 Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
                 if (suggestion != null) {
                     List<PlanTask> allTasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
@@ -2396,8 +2417,10 @@ public class SuggestionService {
                     suggestionRepository.save(suggestion);
                     broadcastUpdate(suggestion);
                 }
+            } else if (newStatus == TaskStatus.IN_PROGRESS) {
+                task.setStatusDetail(message != null ? message : task.getStatusDetail());
             } else if (newStatus == TaskStatus.REVIEWING) {
-                // Update phase to show review in progress
+                task.setStatusDetail("Implementation finished — starting review");
                 Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
                 if (suggestion != null) {
                     List<PlanTask> allTasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
@@ -2407,6 +2430,9 @@ public class SuggestionService {
                 }
             } else if (newStatus == TaskStatus.COMPLETED || newStatus == TaskStatus.FAILED) {
                 task.setCompletedAt(Instant.now());
+                task.setStatusDetail(newStatus == TaskStatus.COMPLETED
+                        ? (message != null ? message : "Done")
+                        : (message != null ? message : "Failed"));
 
                 // Update phase to show progress
                 Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
@@ -2444,6 +2470,7 @@ public class SuggestionService {
         for (PlanTask task : tasks) {
             if (task.getStatus() != TaskStatus.COMPLETED && task.getStatus() != TaskStatus.FAILED) {
                 task.setStatus(TaskStatus.COMPLETED);
+                task.setStatusDetail("Done");
                 if (task.getCompletedAt() == null) {
                     task.setCompletedAt(Instant.now());
                 }
@@ -2474,6 +2501,54 @@ public class SuggestionService {
                     "{\"type\":\"task_update\",\"task\":" + taskJson + "}");
         } catch (Exception e) {
             log.warn("Failed to broadcast task update: {}", e.getMessage());
+        }
+    }
+
+    private void broadcastTaskActivity(Long suggestionId, int taskOrder, String detail) {
+        webSocketHandler.sendToSuggestion(suggestionId,
+                "{\"type\":\"task_activity\",\"taskOrder\":" + taskOrder +
+                        ",\"detail\":\"" + escapeJson(detail) + "\"}");
+    }
+
+    private void deriveTaskActivity(Long suggestionId, String progress) {
+        try {
+            if (progress == null || progress.isBlank()) return;
+            // Skip JSON task-status lines — those are handled separately
+            if (progress.contains("\"taskOrder\"")) return;
+
+            String lower = progress.toLowerCase();
+            String activity = null;
+
+            if (lower.contains("reading") || lower.contains("analyzing")) {
+                activity = "Analyzing existing code...";
+            } else if (lower.contains("creating file") || lower.contains("writing file") || lower.contains("create file")) {
+                activity = "Creating new files...";
+            } else if (lower.contains("editing") || lower.contains("modifying") || lower.contains("updating")) {
+                activity = "Editing files...";
+            } else if (lower.contains("running test") || lower.contains("executing test")) {
+                activity = "Running tests...";
+            } else if (lower.contains("installing") || lower.contains("dependencies")) {
+                activity = "Installing dependencies...";
+            } else if (lower.contains("building") || lower.contains("compiling")) {
+                activity = "Building project...";
+            } else if (lower.contains("fixing") || lower.contains("fix ")) {
+                activity = "Fixing issues...";
+            } else if (lower.contains("refactor")) {
+                activity = "Refactoring code...";
+            } else if (lower.contains("configur")) {
+                activity = "Updating configuration...";
+            }
+
+            if (activity == null) return;
+
+            final String activityMsg = activity;
+            List<PlanTask> tasks = planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
+            tasks.stream()
+                    .filter(t -> t.getStatus() == TaskStatus.IN_PROGRESS)
+                    .findFirst()
+                    .ifPresent(task -> broadcastTaskActivity(suggestionId, task.getTaskOrder(), activityMsg));
+        } catch (Exception e) {
+            // Non-critical — ignore errors in activity derivation
         }
     }
 

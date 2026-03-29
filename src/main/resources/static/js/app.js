@@ -893,11 +893,17 @@ const app = {
                 meta += (meta ? ' · ' : '') + `took ${dur} min`;
             }
 
-            return `<div class="task-item" data-task-order="${t.taskOrder}">
+            const isActive = t.status === 'IN_PROGRESS' || t.status === 'REVIEWING';
+            const activityDetail = t.statusDetail ? this.esc(t.statusDetail) : '';
+
+            return `<div class="task-item ${isActive ? 'task-active' : ''}" data-task-order="${t.taskOrder}">
                 <div class="task-icon ${statusClass}">${icon}</div>
                 <div class="task-body">
                     <div class="${titleClass}">${t.taskOrder}. ${this.esc(t.displayTitle || t.title)}${statusLabel ? `<span style="font-weight:400;font-size:0.8rem;color:${t.status === 'REVIEWING' ? '#d97706' : '#2563eb'}">${statusLabel}</span>` : ''}</div>
                     ${(t.displayDescription || t.description) ? `<div class="task-desc">${this.esc(t.displayDescription || t.description)}</div>` : ''}
+                    ${isActive && activityDetail ? `<div class="task-activity"><span class="task-activity-dot"></span>${activityDetail}</div>` : ''}
+                    ${(!isActive && t.status === 'COMPLETED' && activityDetail) ? `<div class="task-completed-detail">${activityDetail}</div>` : ''}
+                    ${(!isActive && t.status === 'FAILED' && activityDetail) ? `<div class="task-failed-detail">${activityDetail}</div>` : ''}
                     ${meta ? `<div class="task-meta">${meta}</div>` : ''}
                 </div>
             </div>`;
@@ -1837,6 +1843,17 @@ const app = {
             case 'task_update': {
                 if (data.task) {
                     this.updateTask(data.task);
+                }
+                break;
+            }
+            case 'task_activity': {
+                if (data.taskOrder && data.detail) {
+                    const tasks = this.state.tasks;
+                    const idx = tasks.findIndex(t => t.taskOrder === data.taskOrder);
+                    if (idx >= 0 && (tasks[idx].status === 'IN_PROGRESS' || tasks[idx].status === 'REVIEWING')) {
+                        tasks[idx].statusDetail = data.detail;
+                        this.renderTasks();
+                    }
                 }
                 break;
             }
