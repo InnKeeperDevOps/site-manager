@@ -157,6 +157,76 @@ class UserNotificationWebSocketHandlerTest {
         verify(s2).sendMessage(any(TextMessage.class));
     }
 
+    @Test
+    void broadcastToAll_sendsToAllConnectedUsers() throws Exception {
+        WebSocketSession sAlice = mockSession("alice", "session1");
+        WebSocketSession sBob = mockSession("bob", "session2");
+        when(sAlice.isOpen()).thenReturn(true);
+        when(sBob.isOpen()).thenReturn(true);
+
+        handler.afterConnectionEstablished(sAlice);
+        handler.afterConnectionEstablished(sBob);
+
+        handler.broadcastToAll(Map.of("type", "PROJECT_DEFINITION_UPDATE", "data", Map.of("status", "ACTIVE")));
+
+        verify(sAlice).sendMessage(any(TextMessage.class));
+        verify(sBob).sendMessage(any(TextMessage.class));
+    }
+
+    @Test
+    void broadcastToAll_skipsClosedSessions() throws Exception {
+        WebSocketSession openSession = mockSession("alice", "session1");
+        WebSocketSession closedSession = mockSession("alice", "session2");
+        when(openSession.isOpen()).thenReturn(true);
+        when(closedSession.isOpen()).thenReturn(false);
+
+        handler.afterConnectionEstablished(openSession);
+        handler.afterConnectionEstablished(closedSession);
+
+        handler.broadcastToAll(Map.of("type", "PROJECT_DEFINITION_UPDATE"));
+
+        verify(openSession).sendMessage(any(TextMessage.class));
+        verify(closedSession, never()).sendMessage(any(TextMessage.class));
+    }
+
+    @Test
+    void broadcastToAll_noSessions_doesNothing() {
+        assertDoesNotThrow(() ->
+                handler.broadcastToAll(Map.of("type", "PROJECT_DEFINITION_UPDATE")));
+    }
+
+    @Test
+    void broadcastToAll_payloadContainsProjectDefinitionUpdateType() throws Exception {
+        WebSocketSession session = mockSession("alice", "session1");
+        when(session.isOpen()).thenReturn(true);
+
+        handler.afterConnectionEstablished(session);
+        handler.broadcastToAll(Map.of("type", "PROJECT_DEFINITION_UPDATE", "data",
+                Map.of("sessionId", 1, "status", "GENERATING")));
+
+        verify(session).sendMessage(argThat(msg -> {
+            String payload = ((TextMessage) msg).getPayload();
+            return payload.contains("PROJECT_DEFINITION_UPDATE")
+                    && payload.contains("GENERATING");
+        }));
+    }
+
+    @Test
+    void broadcastToAll_ioExceptionOnOneSession_continuesOthers() throws Exception {
+        WebSocketSession s1 = mockSession("alice", "session1");
+        WebSocketSession s2 = mockSession("bob", "session2");
+        when(s1.isOpen()).thenReturn(true);
+        when(s2.isOpen()).thenReturn(true);
+        doThrow(new java.io.IOException("send failed")).when(s1).sendMessage(any());
+
+        handler.afterConnectionEstablished(s1);
+        handler.afterConnectionEstablished(s2);
+
+        assertDoesNotThrow(() ->
+                handler.broadcastToAll(Map.of("type", "PROJECT_DEFINITION_UPDATE")));
+        verify(s2).sendMessage(any(TextMessage.class));
+    }
+
     private WebSocketSession mockSession(String username, String sessionId) throws Exception {
         WebSocketSession session = mock(WebSocketSession.class);
         Principal principal = mock(Principal.class);

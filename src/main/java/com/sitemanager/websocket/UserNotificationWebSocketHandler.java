@@ -89,6 +89,30 @@ public class UserNotificationWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
+    public void broadcastToAll(Map<String, Object> payload) {
+        String json;
+        try {
+            json = objectMapper.writeValueAsString(payload);
+        } catch (IOException e) {
+            log.error("Failed to serialize broadcast payload: {}", e.getMessage());
+            return;
+        }
+
+        TextMessage message = new TextMessage(json);
+        for (Set<WebSocketSession> sessions : userSessions.values()) {
+            for (WebSocketSession session : sessions) {
+                if (!session.isOpen()) continue;
+                try {
+                    synchronized (session) {
+                        session.sendMessage(message);
+                    }
+                } catch (IOException e) {
+                    log.error("Error broadcasting to session {}: {}", session.getId(), e.getMessage());
+                }
+            }
+        }
+    }
+
     public int getConnectionCount(String username) {
         Set<WebSocketSession> sessions = userSessions.get(username);
         return sessions != null ? sessions.size() : 0;
