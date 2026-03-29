@@ -36,6 +36,9 @@ public class ProjectDefinitionSession {
 
     private String errorMessage;
 
+    @Column(name = "has_existing_definition", nullable = false)
+    private boolean hasExistingDefinition = false;
+
     @PrePersist
     protected void onCreate() {
         if (createdAt == null) {
@@ -129,5 +132,13 @@ public class ProjectDefinitionSession {
 
     public void setErrorMessage(String errorMessage) {
         this.errorMessage = errorMessage;
+    }
+
+    public boolean isHasExistingDefinition() {
+        return hasExistingDefinition;
+    }
+
+    public void setHasExistingDefinition(boolean hasExistingDefinition) {
+        this.hasExistingDefinition = hasExistingDefinition;
     }
 }
