@@ -18,6 +18,7 @@ public interface SuggestionRepository extends JpaRepository<Suggestion, Long>, J
     List<Suggestion> findByStatusInAndLastActivityAtBefore(List<SuggestionStatus> statuses, Instant before);
     List<Suggestion> findByStatusIn(List<SuggestionStatus> statuses);
     List<Suggestion> findByStatusAndAuthorName(SuggestionStatus status, String authorName);
+    long countByStatusIn(List<SuggestionStatus> statuses);
 
     @Query("SELECT s FROM Suggestion s WHERE s.status <> com.sitemanager.model.enums.SuggestionStatus.DRAFT OR s.authorName = :authorName ORDER BY s.createdAt DESC")
     List<Suggestion> findAllExcludingOthersDrafts(@Param("authorName") String authorName);

@@ -43,6 +43,7 @@ public class SiteSettingsService {
         current.setClaudeModelExpert(updated.getClaudeModelExpert());
         current.setClaudeMaxTurnsExpert(updated.getClaudeMaxTurnsExpert());
         current.setSlackWebhookUrl(updated.getSlackWebhookUrl());
+        current.setMaxConcurrentSuggestions(updated.getMaxConcurrentSuggestions());
         current.setAutoMergePr(updated.isAutoMergePr());
         current.setRequireRegistrationApproval(updated.isRequireRegistrationApproval());
         current.setRegistrationsEnabled(updated.isRegistrationsEnabled());

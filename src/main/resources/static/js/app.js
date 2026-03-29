@@ -1837,6 +1837,7 @@ const app = {
         document.getElementById('settingClaudeModel').value = settings.claudeModel || '';
         document.getElementById('settingClaudeModelExpert').value = settings.claudeModelExpert || '';
         document.getElementById('settingClaudeMaxTurnsExpert').value = settings.claudeMaxTurnsExpert || '';
+        document.getElementById('settingMaxConcurrentSuggestions').value = settings.maxConcurrentSuggestions || 1;
         document.getElementById('settingAnonymous').checked = settings.allowAnonymousSuggestions;
         document.getElementById('settingVoting').checked = settings.allowVoting;
         document.getElementById('settingApproval').checked = settings.requireApproval;
@@ -2213,6 +2214,7 @@ const app = {
                 claudeModel: document.getElementById('settingClaudeModel').value || null,
                 claudeModelExpert: document.getElementById('settingClaudeModelExpert').value || null,
                 claudeMaxTurnsExpert: parseInt(document.getElementById('settingClaudeMaxTurnsExpert').value) || null,
+                maxConcurrentSuggestions: parseInt(document.getElementById('settingMaxConcurrentSuggestions').value) || 1,
                 allowAnonymousSuggestions: document.getElementById('settingAnonymous').checked,
                 allowVoting: document.getElementById('settingVoting').checked,
                 requireApproval: document.getElementById('settingApproval').checked,
