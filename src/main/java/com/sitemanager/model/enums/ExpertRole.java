@@ -1,6 +1,19 @@
 package com.sitemanager.model.enums;
 
 public enum ExpertRole {
+    PROJECT_OWNER("Project Owner",
+            "You are the Project Owner — the highest-authority reviewer in this process.\n" +
+            "Your role is to ensure this implementation plan completely and faithfully captures everything the user requested.\n" +
+            "You review BEFORE all technical experts and your decisions take precedence.\n" +
+            "Consider:\n" +
+            "- Does the plan address every aspect and requirement described in the original suggestion?\n" +
+            "- Is anything the user asked for missing, reduced in scope, or misinterpreted?\n" +
+            "- Are there implicit requirements or expectations that should be made explicit?\n" +
+            "- Does the plan deliver the full value the user was expecting — nothing critical left out?\n" +
+            "- Are the tasks clearly scoped so that completing them will fully satisfy the request?\n" +
+            "After your review, identify which tasks are essential to fulfilling the user's original request. " +
+            "These will be owner-locked, meaning downstream reviewers can suggest how to build them but cannot remove them."),
+
     SOFTWARE_ARCHITECT("Software Architect",
             "You are a senior Software Architect. Review this plan from an architectural perspective.\n" +
             "Consider:\n" +
@@ -106,6 +119,7 @@ public enum ExpertRole {
     private final String reviewPrompt;
 
     public enum Domain {
+        OWNER,
         ARCHITECTURE,
         SECURITY,
         DATA_PERF,
@@ -122,8 +136,17 @@ public enum ExpertRole {
     public String getDisplayName() { return displayName; }
     public String getReviewPrompt() { return reviewPrompt; }
 
+    /**
+     * Returns the Project Owner's review prompt. Exposed as a named method so
+     * callers can explicitly request the highest-authority review prompt.
+     */
+    public static String projectOwnerPrompt() {
+        return PROJECT_OWNER.getReviewPrompt();
+    }
+
     public Domain domain() {
         return switch (this) {
+            case PROJECT_OWNER -> Domain.OWNER;
             case SOFTWARE_ARCHITECT, INFRASTRUCTURE_ENGINEER -> Domain.ARCHITECTURE;
             case SECURITY_ENGINEER -> Domain.SECURITY;
             case DATA_ANALYST, PERFORMANCE_ENGINEER -> Domain.DATA_PERF;
@@ -139,6 +162,7 @@ public enum ExpertRole {
      */
     public static java.util.Set<Domain> affectedDomains(Domain changedDomain) {
         return switch (changedDomain) {
+            case OWNER -> java.util.Set.of(Domain.values()); // owner changes trigger re-review of all domains
             case ARCHITECTURE -> java.util.Set.of(Domain.ARCHITECTURE, Domain.IMPLEMENTATION);
             case SECURITY -> java.util.Set.of(Domain.SECURITY, Domain.ARCHITECTURE);
             case DATA_PERF -> java.util.Set.of(Domain.DATA_PERF, Domain.IMPLEMENTATION);
@@ -149,7 +173,7 @@ public enum ExpertRole {
     }
 
     public static ExpertRole[] reviewOrder() {
-        return new ExpertRole[] { SOFTWARE_ARCHITECT, SECURITY_ENGINEER, INFRASTRUCTURE_ENGINEER,
+        return new ExpertRole[] { PROJECT_OWNER, SOFTWARE_ARCHITECT, SECURITY_ENGINEER, INFRASTRUCTURE_ENGINEER,
                 DATA_ANALYST, PERFORMANCE_ENGINEER, DEVOPS_ENGINEER,
                 SOFTWARE_ENGINEER, FRONTEND_ENGINEER, UX_EXPERT, PRODUCT_MANAGER, QA_ENGINEER };
     }
@@ -161,6 +185,8 @@ public enum ExpertRole {
      */
     public static ExpertRole[][] reviewBatches() {
         return new ExpertRole[][] {
+            // Batch 0: Project Owner — validates the plan captures the full original request
+            { PROJECT_OWNER },
             // Batch 1: Architecture & security foundations
             { SOFTWARE_ARCHITECT, SECURITY_ENGINEER, INFRASTRUCTURE_ENGINEER },
             // Batch 2: Data, performance & ops

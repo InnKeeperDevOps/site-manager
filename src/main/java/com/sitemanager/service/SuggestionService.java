@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sitemanager.dto.ClarificationRequest;
@@ -679,6 +681,7 @@ public class SuggestionService {
 
         // Launch all experts in this batch concurrently
         int currentRound = suggestion.getExpertReviewRound() != null ? suggestion.getExpertReviewRound() : 1;
+        List<Integer> ownerLockedSections = suggestion.getOwnerLockedSections();
         List<CompletableFuture<ExpertBatchResult>> futures = new ArrayList<>();
         for (ExpertRole expert : batch) {
             String reviewSessionId = claudeService.generateSessionId();
@@ -697,7 +700,8 @@ public class SuggestionService {
                                 "{\"type\":\"progress\",\"content\":\"" +
                                         escapeJson(progress) + "\"}");
                     },
-                    currentRound
+                    currentRound,
+                    ownerLockedSections
             ).thenApply(response -> new ExpertBatchResult(expert, reviewSessionId, response));
             futures.add(future);
         }
@@ -758,7 +762,8 @@ public class SuggestionService {
                             "{\"type\":\"progress\",\"content\":\"" +
                                     escapeJson(progress) + "\"}");
                 },
-                currentRound
+                currentRound,
+                suggestion.getOwnerLockedSections()
         ).thenAccept(response -> {
             handleExpertReviewResponse(suggestionId, response, expert, reviewSessionId);
         });
@@ -839,6 +844,12 @@ public class SuggestionService {
             }
 
             if ("CHANGES_PROPOSED".equals(status)) {
+                // PROJECT_OWNER is highest authority — apply changes directly, no reviewer needed
+                if (expert == ExpertRole.PROJECT_OWNER) {
+                    applyProjectOwnerChanges(suggestionId, suggestion, root, response, analysis, message);
+                    return;
+                }
+
                 String proposedChanges = root.has("proposedChanges") ? root.get("proposedChanges").asText() : "";
 
                 // Pick the right reviewer: Product Manager for UX/product experts,
@@ -864,7 +875,8 @@ public class SuggestionService {
                         reviewer.getReviewPrompt(),
                         claudeService.getMainRepoDir(),
                         progress -> {},
-                        currentRound
+                        currentRound,
+                        suggestion.getOwnerLockedSections()
                 ).thenAccept(reviewerResponse -> {
                     handleReviewerResponse(suggestionId, reviewerResponse, expert, response, analysis, message);
                 });
@@ -914,48 +926,99 @@ public class SuggestionService {
         }
 
         if (applyChanges) {
-            // Apply the expert's proposed changes to the plan
+            // Apply the expert's proposed changes, subject to owner-lock constraints
+            boolean allChangesBlocked = false;
+            String ownerLockNote = "";
+
             try {
                 String json = extractJsonBlock(originalExpertResponse);
                 if (json != null) {
                     JsonNode root = objectMapper.readTree(json);
-                    if (root.has("revisedPlan")) {
-                        suggestion.setPlanSummary(root.get("revisedPlan").asText());
-                    }
-                    if (root.has("revisedPlanDisplaySummary")) {
-                        suggestion.setPlanDisplaySummary(root.get("revisedPlanDisplaySummary").asText());
-                    }
-                    if (root.has("revisedTasks") && root.get("revisedTasks").isArray()) {
-                        savePlanTasksFromNode(suggestionId, root.get("revisedTasks"));
+                    List<Integer> lockedSections = suggestion.getOwnerLockedSections();
+                    boolean hasTaskChanges = root.has("revisedTasks") && root.get("revisedTasks").isArray();
+                    boolean hasPlanChanges = root.has("revisedPlan") || root.has("revisedPlanDisplaySummary");
+
+                    if (!lockedSections.isEmpty() && hasTaskChanges) {
+                        OwnerLockResult lockResult = enforceOwnerLockOnTasks(
+                                suggestionId, root.get("revisedTasks"), lockedSections);
+
+                        if (lockResult.allTaskChangesBlocked()) {
+                            ownerLockNote = lockResult.blockedNote();
+                            if (!hasPlanChanges) {
+                                allChangesBlocked = true;
+                            } else {
+                                // Apply plan-level changes but skip the blocked task list
+                                if (root.has("revisedPlan")) {
+                                    suggestion.setPlanSummary(root.get("revisedPlan").asText());
+                                }
+                                if (root.has("revisedPlanDisplaySummary")) {
+                                    suggestion.setPlanDisplaySummary(root.get("revisedPlanDisplaySummary").asText());
+                                }
+                            }
+                        } else {
+                            if (root.has("revisedPlan")) {
+                                suggestion.setPlanSummary(root.get("revisedPlan").asText());
+                            }
+                            if (root.has("revisedPlanDisplaySummary")) {
+                                suggestion.setPlanDisplaySummary(root.get("revisedPlanDisplaySummary").asText());
+                            }
+                            savePlanTasksFromNode(suggestionId, lockResult.filteredTasks());
+                            if (lockResult.anyBlocked()) {
+                                ownerLockNote = lockResult.blockedNote();
+                            }
+                        }
+                    } else {
+                        if (root.has("revisedPlan")) {
+                            suggestion.setPlanSummary(root.get("revisedPlan").asText());
+                        }
+                        if (root.has("revisedPlanDisplaySummary")) {
+                            suggestion.setPlanDisplaySummary(root.get("revisedPlanDisplaySummary").asText());
+                        }
+                        if (hasTaskChanges) {
+                            savePlanTasksFromNode(suggestionId, root.get("revisedTasks"));
+                        }
                     }
                 }
             } catch (Exception e) {
                 log.warn("Failed to apply expert changes: {}", e.getMessage());
             }
 
-            appendExpertNote(suggestion, expert,
-                    "Proposed changes — ACCEPTED. " + expertAnalysis +
-                    "\nReviewer: " + reviewerNotes);
-            addMessage(suggestionId, SenderType.AI, expert.getDisplayName(),
-                    expertMessage + "\n\n*Changes have been applied to the plan.*");
+            if (allChangesBlocked) {
+                // All proposed changes were blocked by owner-lock — treat as APPROVED
+                appendExpertNote(suggestion, expert,
+                        "Proposed changes — not applied. All task changes were blocked by owner-lock constraints. "
+                        + ownerLockNote + "\nReviewer: " + reviewerNotes);
+                addMessage(suggestionId, SenderType.AI, expert.getDisplayName(),
+                        expertMessage + "\n\n*Recommendations were noted but owner-protected tasks prevented changes from being applied.*");
+                advanceExpertStep(suggestion);
+                broadcastTasks(suggestionId);
+                runNextExpertReview(suggestionId);
+            } else {
+                String noteExtra = ownerLockNote.isBlank() ? "" : "\nOwner lock: " + ownerLockNote;
+                appendExpertNote(suggestion, expert,
+                        "Proposed changes — ACCEPTED. " + expertAnalysis +
+                        "\nReviewer: " + reviewerNotes + noteExtra);
+                addMessage(suggestionId, SenderType.AI, expert.getDisplayName(),
+                        expertMessage + "\n\n*Changes have been applied to the plan.*");
 
-            // Mark that the plan changed during this round and track which domain caused it
-            suggestion.setExpertReviewPlanChanged(true);
-            String changedDomain = expert.domain().name();
-            String existing = suggestion.getExpertReviewChangedDomains();
-            if (existing == null || existing.isBlank()) {
-                suggestion.setExpertReviewChangedDomains(changedDomain);
-            } else if (!existing.contains(changedDomain)) {
-                suggestion.setExpertReviewChangedDomains(existing + "," + changedDomain);
+                // Mark that the plan changed during this round and track which domain caused it
+                suggestion.setExpertReviewPlanChanged(true);
+                String changedDomain = expert.domain().name();
+                String existing = suggestion.getExpertReviewChangedDomains();
+                if (existing == null || existing.isBlank()) {
+                    suggestion.setExpertReviewChangedDomains(changedDomain);
+                } else if (!existing.contains(changedDomain)) {
+                    suggestion.setExpertReviewChangedDomains(existing + "," + changedDomain);
+                }
+                suggestionRepository.save(suggestion);
+
+                addMessage(suggestionId, SenderType.SYSTEM, "System",
+                        "The plan was updated. Remaining experts will continue reviewing before a new round begins.");
+                advanceExpertStep(suggestion);
+                broadcastTasks(suggestionId);
+                broadcastExpertReviewStatus(suggestionId);
+                runNextExpertReview(suggestionId);
             }
-            suggestionRepository.save(suggestion);
-
-            addMessage(suggestionId, SenderType.SYSTEM, "System",
-                    "The plan was updated. Remaining experts will continue reviewing before a new round begins.");
-            advanceExpertStep(suggestion);
-            broadcastTasks(suggestionId);
-            broadcastExpertReviewStatus(suggestionId);
-            runNextExpertReview(suggestionId);
         } else {
             appendExpertNote(suggestion, expert,
                     "Proposed changes — not applied. " + expertAnalysis +
@@ -965,6 +1028,58 @@ public class SuggestionService {
 
             advanceExpertStep(suggestion);
             broadcastTasks(suggestionId);
+            runNextExpertReview(suggestionId);
+        }
+    }
+
+    @Transactional
+    private void applyProjectOwnerChanges(Long suggestionId, Suggestion suggestion,
+                                           JsonNode root, String response,
+                                           String analysis, String message) {
+        try {
+            if (root.has("revisedPlan")) {
+                suggestion.setPlanSummary(root.get("revisedPlan").asText());
+            }
+            if (root.has("revisedPlanDisplaySummary")) {
+                suggestion.setPlanDisplaySummary(root.get("revisedPlanDisplaySummary").asText());
+            }
+            if (root.has("revisedTasks") && root.get("revisedTasks").isArray()) {
+                savePlanTasksFromNode(suggestionId, root.get("revisedTasks"));
+            }
+
+            // Parse and store owner-locked task indices
+            if (root.has("lockedTaskIndices") && root.get("lockedTaskIndices").isArray()) {
+                List<Integer> lockedIndices = new ArrayList<>();
+                for (JsonNode idx : root.get("lockedTaskIndices")) {
+                    lockedIndices.add(idx.asInt());
+                }
+                suggestion.setOwnerLockedSections(lockedIndices);
+            }
+
+            // Mark plan as changed so downstream experts re-review
+            suggestion.setExpertReviewPlanChanged(true);
+            String changedDomain = ExpertRole.PROJECT_OWNER.domain().name();
+            String existingDomains = suggestion.getExpertReviewChangedDomains();
+            if (existingDomains == null || existingDomains.isBlank()) {
+                suggestion.setExpertReviewChangedDomains(changedDomain);
+            } else if (!existingDomains.contains(changedDomain)) {
+                suggestion.setExpertReviewChangedDomains(existingDomains + "," + changedDomain);
+            }
+
+            appendExpertNote(suggestion, ExpertRole.PROJECT_OWNER, "Changes applied. " + analysis);
+            addMessage(suggestionId, SenderType.AI, ExpertRole.PROJECT_OWNER.getDisplayName(),
+                    message + "\n\n*Changes have been applied to the plan.*");
+
+            broadcastExpertReviewStatus(suggestionId);
+            advanceExpertStep(suggestion);
+            runNextExpertReview(suggestionId);
+
+        } catch (Exception e) {
+            log.error("Failed to apply Project Owner changes for suggestion {}: {}",
+                    suggestionId, e.getMessage(), e);
+            appendExpertNote(suggestion, ExpertRole.PROJECT_OWNER, "Approved.");
+            addMessage(suggestionId, SenderType.AI, ExpertRole.PROJECT_OWNER.getDisplayName(), "Approved.");
+            advanceExpertStep(suggestion);
             runNextExpertReview(suggestionId);
         }
     }
@@ -1191,7 +1306,8 @@ public class SuggestionService {
                             "{\"type\":\"progress\",\"content\":\"" +
                                     escapeJson(progress) + "\"}");
                 },
-                round
+                round,
+                suggestion.getOwnerLockedSections()
         ).thenAccept(response -> {
             handleExpertReviewResponse(suggestionId, response, expert, reviewSessionId);
 
@@ -1270,10 +1386,93 @@ public class SuggestionService {
                             "{\"type\":\"progress\",\"content\":\"" +
                                     escapeJson(progress) + "\"}");
                 },
-                currentRound
+                currentRound,
+                suggestion.getOwnerLockedSections()
         ).thenAccept(response -> {
             handleExpertReviewResponse(suggestionId, response, expert, retrySessionId);
         });
+    }
+
+    /**
+     * Holds the result of owner-lock enforcement over proposed task changes.
+     */
+    private record OwnerLockResult(
+            boolean anyBlocked,
+            boolean allTaskChangesBlocked,
+            String blockedNote,
+            JsonNode filteredTasks) {}
+
+    /**
+     * Checks proposed revisedTasks against owner-locked sections and returns an
+     * enforcement result. Locked tasks may not be removed or have their
+     * displayTitle / displayDescription changed; implementation-level fields
+     * (title, description, estimatedMinutes) are still allowed to change.
+     */
+    private OwnerLockResult enforceOwnerLockOnTasks(Long suggestionId,
+                                                     JsonNode proposedTasksNode,
+                                                     List<Integer> lockedIndices) {
+        List<PlanTask> currentTasks =
+                planTaskRepository.findBySuggestionIdOrderByTaskOrder(suggestionId);
+        List<String> removalReasons = new ArrayList<>();
+
+        // Check whether any locked task is outright removed (index out of bounds)
+        for (int lockedIdx : lockedIndices) {
+            if (lockedIdx >= proposedTasksNode.size()) {
+                removalReasons.add("task " + (lockedIdx + 1) + " cannot be removed");
+            }
+        }
+
+        if (!removalReasons.isEmpty()) {
+            String note = "Owner-protected tasks were removed: " + String.join(", ", removalReasons);
+            return new OwnerLockResult(true, true, note, proposedTasksNode);
+        }
+
+        // Check for scope changes (displayTitle / displayDescription) on locked tasks
+        ArrayNode filteredTasks = objectMapper.createArrayNode();
+        List<String> scopeBlockReasons = new ArrayList<>();
+
+        for (int i = 0; i < proposedTasksNode.size(); i++) {
+            JsonNode proposedTask = proposedTasksNode.get(i);
+
+            if (lockedIndices.contains(i) && i < currentTasks.size()) {
+                PlanTask currentTask = currentTasks.get(i);
+                String proposedDisplayTitle = proposedTask.has("displayTitle")
+                        ? proposedTask.get("displayTitle").asText("") : "";
+                String proposedDisplayDesc = proposedTask.has("displayDescription")
+                        ? proposedTask.get("displayDescription").asText("") : "";
+                String currentDisplayTitle = currentTask.getDisplayTitle() != null
+                        ? currentTask.getDisplayTitle() : "";
+                String currentDisplayDesc = currentTask.getDisplayDescription() != null
+                        ? currentTask.getDisplayDescription() : "";
+
+                boolean titleChanged = !currentDisplayTitle.equals(proposedDisplayTitle);
+                boolean descChanged = !currentDisplayDesc.equals(proposedDisplayDesc);
+
+                if (titleChanged || descChanged) {
+                    // Revert scope fields; implementation-level changes are preserved
+                    ObjectNode fixedTask = objectMapper.createObjectNode();
+                    proposedTask.fields().forEachRemaining(e -> fixedTask.set(e.getKey(), e.getValue()));
+                    fixedTask.put("displayTitle", currentDisplayTitle);
+                    fixedTask.put("displayDescription", currentDisplayDesc);
+                    filteredTasks.add(fixedTask);
+
+                    if (titleChanged) scopeBlockReasons.add("task " + (i + 1) + " title is owner-protected");
+                    if (descChanged) scopeBlockReasons.add("task " + (i + 1) + " description is owner-protected");
+                } else {
+                    filteredTasks.add(proposedTask);
+                }
+            } else {
+                filteredTasks.add(proposedTask);
+            }
+        }
+
+        if (scopeBlockReasons.isEmpty()) {
+            return new OwnerLockResult(false, false, "", proposedTasksNode);
+        }
+
+        String note = "Some changes to owner-protected tasks were blocked: "
+                + String.join(", ", scopeBlockReasons);
+        return new OwnerLockResult(true, false, note, filteredTasks);
     }
 
     private void savePlanTasksFromNode(Long suggestionId, JsonNode tasksNode) {
@@ -1319,13 +1518,14 @@ public class SuggestionService {
             expertList.add(Map.of("name", experts[i].getDisplayName(), "status", stepStatus));
         }
 
-        return Map.of(
-                "currentStep", currentStep,
-                "totalSteps", experts.length,
-                "round", currentRound,
-                "maxRounds", MAX_EXPERT_REVIEW_ROUNDS,
-                "experts", expertList
-        );
+        java.util.Map<String, Object> result = new java.util.LinkedHashMap<>();
+        result.put("currentStep", currentStep);
+        result.put("totalSteps", experts.length);
+        result.put("round", currentRound);
+        result.put("maxRounds", MAX_EXPERT_REVIEW_ROUNDS);
+        result.put("experts", expertList);
+        result.put("ownerLockedSections", suggestion.getOwnerLockedSections());
+        return result;
     }
 
     private void broadcastExpertReviewStatus(Long suggestionId) {
@@ -1358,52 +1558,77 @@ public class SuggestionService {
         return ExpertRole.reviewOrder().length;
     }
 
-    public List<Map<String, String>> getReviewSummary(Long suggestionId) {
+    public List<Map<String, Object>> getReviewSummary(Long suggestionId) {
         Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
         if (suggestion == null) return null;
 
         List<Suggestion.ExpertReviewEntry> parsed = suggestion.getExpertReviewSummary();
-        java.util.Set<String> reviewedNames = new java.util.LinkedHashSet<>();
         java.util.Map<String, Suggestion.ExpertReviewEntry> byName = new java.util.LinkedHashMap<>();
         for (Suggestion.ExpertReviewEntry e : parsed) {
             byName.put(e.getExpertName(), e);
-            reviewedNames.add(e.getExpertName());
         }
 
-        List<Map<String, String>> result = new ArrayList<>();
+        // Detect which experts had changes blocked by owner-lock
+        java.util.Map<String, Boolean> ownerLockBlocked =
+                detectOwnerLockBlocks(suggestion.getExpertReviewNotes());
+
+        List<Map<String, Object>> result = new ArrayList<>();
 
         // Include all known experts; mark unreviewed ones as PENDING
         for (ExpertRole role : ExpertRole.reviewOrder()) {
             String displayName = role.getDisplayName();
+            java.util.Map<String, Object> entry = new java.util.LinkedHashMap<>();
             if (byName.containsKey(displayName)) {
-                Suggestion.ExpertReviewEntry entry = byName.get(displayName);
-                result.add(Map.of(
-                        "expertName", entry.getExpertName(),
-                        "status", entry.getStatus(),
-                        "keyPoint", entry.getKeyPoint()
-                ));
+                Suggestion.ExpertReviewEntry reviewed = byName.get(displayName);
+                entry.put("expertName", reviewed.getExpertName());
+                entry.put("status", reviewed.getStatus());
+                entry.put("keyPoint", reviewed.getKeyPoint());
+                if (Boolean.TRUE.equals(ownerLockBlocked.get(displayName))) {
+                    entry.put("blockedByOwnerLock", true);
+                }
             } else {
-                result.add(Map.of(
-                        "expertName", displayName,
-                        "status", "PENDING",
-                        "keyPoint", "No review yet"
-                ));
+                entry.put("expertName", displayName);
+                entry.put("status", "PENDING");
+                entry.put("keyPoint", "No review yet");
             }
+            result.add(entry);
         }
 
         // Append any extra notes (e.g. user guidance) not matching a known expert role
-        for (Suggestion.ExpertReviewEntry entry : parsed) {
+        for (Suggestion.ExpertReviewEntry extra : parsed) {
             if (!java.util.Arrays.stream(ExpertRole.reviewOrder())
-                    .anyMatch(r -> r.getDisplayName().equals(entry.getExpertName()))) {
-                result.add(Map.of(
-                        "expertName", entry.getExpertName(),
-                        "status", entry.getStatus(),
-                        "keyPoint", entry.getKeyPoint()
-                ));
+                    .anyMatch(r -> r.getDisplayName().equals(extra.getExpertName()))) {
+                java.util.Map<String, Object> entry = new java.util.LinkedHashMap<>();
+                entry.put("expertName", extra.getExpertName());
+                entry.put("status", extra.getStatus());
+                entry.put("keyPoint", extra.getKeyPoint());
+                result.add(entry);
             }
         }
 
         return result;
+    }
+
+    /**
+     * Scans raw expert review notes to detect which experts had changes blocked by owner-lock.
+     * Returns a map from expert display name to true when owner-lock blocking was recorded.
+     */
+    private java.util.Map<String, Boolean> detectOwnerLockBlocks(String notes) {
+        java.util.Map<String, Boolean> blocked = new java.util.LinkedHashMap<>();
+        if (notes == null || notes.isBlank()) return blocked;
+        String[] entries = notes.split("\n\n");
+        for (String entry : entries) {
+            entry = entry.trim();
+            if (!entry.startsWith("**")) continue;
+            int nameEnd = entry.indexOf("**", 2);
+            if (nameEnd < 0) continue;
+            String expertName = entry.substring(2, nameEnd).trim();
+            String note = entry.substring(nameEnd + 2).trim();
+            if (note.contains("owner-lock")) {
+                blocked.put(expertName, true);
+            }
+        }
+        return blocked;
     }
 
     @Transactional

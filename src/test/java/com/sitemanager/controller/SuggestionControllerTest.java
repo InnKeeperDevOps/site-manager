@@ -429,14 +429,16 @@ class SuggestionControllerTest {
         suggestion.setExpertReviewStep(2);
         suggestionRepository.save(suggestion);
 
-        // Software Architect is first in review order, Security Engineer is second
+        // Project Owner is first in review order (PENDING), Software Architect is second, Security Engineer is third
         mockMvc.perform(get("/api/suggestions/" + id + "/review-summary"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$").isArray())
-                .andExpect(jsonPath("$[0].expertName").value("Software Architect"))
-                .andExpect(jsonPath("$[0].status").value("APPROVED"))
-                .andExpect(jsonPath("$[1].expertName").value("Security Engineer"))
-                .andExpect(jsonPath("$[1].status").value("FLAGGED"));
+                .andExpect(jsonPath("$[0].expertName").value("Project Owner"))
+                .andExpect(jsonPath("$[0].status").value("PENDING"))
+                .andExpect(jsonPath("$[1].expertName").value("Software Architect"))
+                .andExpect(jsonPath("$[1].status").value("APPROVED"))
+                .andExpect(jsonPath("$[2].expertName").value("Security Engineer"))
+                .andExpect(jsonPath("$[2].status").value("FLAGGED"));
     }
 
     // --- Search and filter tests ---

@@ -108,4 +108,44 @@ class SuggestionExpertReviewSummaryTest {
 
         assertThat(result.get(0).getStatus()).isEqualTo("FLAGGED");
     }
+
+    @Test
+    void parsesProjectOwnerEntry_withApprovedStatus() {
+        String notes = "**Project Owner**: The plan fully captures the original request. All key requirements are addressed.";
+        List<Suggestion.ExpertReviewEntry> result = suggestionWithNotes(notes).getExpertReviewSummary();
+
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).getExpertName()).isEqualTo("Project Owner");
+        assertThat(result.get(0).getStatus()).isEqualTo("APPROVED");
+        assertThat(result.get(0).getKeyPoint()).isNotBlank();
+    }
+
+    @Test
+    void parsesProjectOwnerEntry_withFlaggedStatus_whenNoteContainsConcern() {
+        String notes = "**Project Owner**: There is a concern that the plan does not cover the full scope of the original request.";
+        List<Suggestion.ExpertReviewEntry> result = suggestionWithNotes(notes).getExpertReviewSummary();
+
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).getExpertName()).isEqualTo("Project Owner");
+        assertThat(result.get(0).getStatus()).isEqualTo("FLAGGED");
+    }
+
+    @Test
+    void parsesProjectOwnerEntry_alongsideOtherExperts() {
+        String notes = "**Project Owner**: The plan is complete and captures everything requested.\n\n" +
+                "**Software Architect**: The architecture looks solid and well-designed.";
+        List<Suggestion.ExpertReviewEntry> result = suggestionWithNotes(notes).getExpertReviewSummary();
+
+        assertThat(result).hasSize(2);
+        assertThat(result.get(0).getExpertName()).isEqualTo("Project Owner");
+        assertThat(result.get(1).getExpertName()).isEqualTo("Software Architect");
+    }
+
+    @Test
+    void parsesProjectOwnerEntry_keyPointIsFirstSentence() {
+        String notes = "**Project Owner**: The plan is complete. There are additional details about the locked tasks.";
+        List<Suggestion.ExpertReviewEntry> result = suggestionWithNotes(notes).getExpertReviewSummary();
+
+        assertThat(result.get(0).getKeyPoint()).isEqualTo("The plan is complete.");
+    }
 }
