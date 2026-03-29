@@ -553,6 +553,7 @@ public class SuggestionService {
                     suggestionId);
             return;
         }
+        clearApprovalTracker(suggestion);
         broadcastExpertReviewStatus(suggestionId);
         runNextExpertReview(suggestionId);
     }
@@ -587,7 +588,34 @@ public class SuggestionService {
 
                 java.util.List<ExpertRole> expertsToRerun = java.util.Arrays.stream(ExpertRole.reviewOrder())
                         .filter(e -> affectedDomains.contains(e.domain()))
+                        .filter(e -> {
+                            // Skip experts who already approved, unless their own domain was directly changed
+                            String approvalStatus = getApprovalStatus(suggestion, e);
+                            boolean alreadyApproved = "APPROVED".equals(approvalStatus);
+                            boolean ownDomainChanged = changedDomains.contains(e.domain());
+                            return !alreadyApproved || ownDomainChanged;
+                        })
                         .toList();
+
+                if (expertsToRerun.isEmpty()) {
+                    // All affected reviewers already approved — skip re-review and go straight to PLANNED
+                    log.info("Suggestion {} — all affected reviewers already approved, skipping re-review round",
+                            suggestionId);
+                    addMessage(suggestionId, SenderType.SYSTEM, "System",
+                            "All affected reviewers already approved — proceeding to final approval.");
+                    suggestion.setStatus(SuggestionStatus.PLANNED);
+                    suggestion.setExpertReviewStep(null);
+                    suggestion.setExpertReviewRound(null);
+                    suggestion.setExpertReviewPlanChanged(null);
+                    suggestion.setTotalExpertReviewRounds(null);
+                    suggestion.setExpertReviewChangedDomains(null);
+                    suggestion.setCurrentPhase("Plan ready — waiting for approval");
+                    suggestionRepository.save(suggestion);
+                    broadcastUpdate(suggestion);
+                    broadcastExpertReviewStatus(suggestionId);
+                    notifyAdminsApprovalNeeded(suggestion);
+                    return;
+                }
 
                 int nextRound = currentRound + 1;
                 suggestion.setExpertReviewRound(nextRound);
@@ -847,12 +875,13 @@ public class SuggestionService {
             String status = root.has("status") ? root.get("status").asText() : "APPROVED";
             String analysis = root.has("analysis") ? root.get("analysis").asText() : "";
             String message = root.has("message") ? root.get("message").asText() : "";
+            int currentRound = suggestion.getExpertReviewRound() != null ? suggestion.getExpertReviewRound() : 1;
 
             log.info("[AI-FLOW] suggestion={} expert={} verdict={} analysisLength={}",
                     suggestionId, expert.getDisplayName(), status, analysis.length());
 
             // Ensure every expert provides substantive feedback
-            if (!isSubstantiveAnalysis(analysis) && !"NEEDS_CLARIFICATION".equals(status)) {
+            if (!isSubstantiveAnalysis(analysis) && "CHANGES_PROPOSED".equals(status)) {
                 log.info("Expert {} provided insufficient analysis (length={}), re-invoking for detailed review",
                         expert.getDisplayName(), analysis.length());
                 reInvokeExpertForDetailedReview(suggestionId, expert, reviewSessionId);
@@ -904,7 +933,6 @@ public class SuggestionService {
 
                 String reviewerSessionId = claudeService.generateSessionId();
                 String currentPlan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : "";
-                int currentRound = suggestion.getExpertReviewRound() != null ? suggestion.getExpertReviewRound() : 1;
 
                 claudeService.reviewExpertFeedback(
                         reviewerSessionId,
@@ -925,6 +953,7 @@ public class SuggestionService {
             }
 
             // APPROVED or unknown status — record note and advance
+            updateApprovalTracker(suggestion, expert, "APPROVED", currentRound);
             appendExpertNote(suggestion, expert, "Approved.");
             addMessage(suggestionId, SenderType.AI, expert.getDisplayName(), "Approved.");
             advanceExpertStep(suggestion);
@@ -946,6 +975,7 @@ public class SuggestionService {
         Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
         if (suggestion == null) return;
 
+        int currentRound = suggestion.getExpertReviewRound() != null ? suggestion.getExpertReviewRound() : 1;
         boolean applyChanges = false;
         String reviewerNotes = "";
 
@@ -1035,6 +1065,7 @@ public class SuggestionService {
                 broadcastTasks(suggestionId);
                 runNextExpertReview(suggestionId);
             } else {
+                updateApprovalTracker(suggestion, expert, "CHANGES_APPLIED", currentRound);
                 String noteExtra = ownerLockNote.isBlank() ? "" : "\nOwner lock: " + ownerLockNote;
                 appendExpertNote(suggestion, expert,
                         "Proposed changes — ACCEPTED. " + expertAnalysis +
@@ -1061,6 +1092,7 @@ public class SuggestionService {
                 runNextExpertReview(suggestionId);
             }
         } else {
+            updateApprovalTracker(suggestion, expert, "APPROVED", currentRound);
             appendExpertNote(suggestion, expert,
                     "Proposed changes — not applied. " + expertAnalysis +
                     "\nReviewer: " + reviewerNotes);
@@ -1184,8 +1216,32 @@ public class SuggestionService {
             suggestion.setExpertReviewNotes(
                     (existingNotes != null ? existingNotes + "\n\n" : "") + userGuidance);
 
-            // Reset review pipeline with fresh rounds (total keeps accumulating)
-            suggestion.setExpertReviewStep(0);
+            // Skip experts who already approved — only re-run those who did not
+            java.util.List<ExpertRole> expertsToRerun = java.util.Arrays.stream(ExpertRole.reviewOrder())
+                    .filter(e -> !"APPROVED".equals(getApprovalStatus(suggestion, e)))
+                    .toList();
+
+            if (expertsToRerun.isEmpty()) {
+                // All experts already approved — skip directly to PLANNED
+                log.info("Suggestion {} — all experts already approved, skipping re-review after user guidance",
+                        suggestionId);
+                addMessage(suggestionId, SenderType.SYSTEM, "System",
+                        "All experts have already approved the plan. Proceeding to final approval.");
+                suggestion.setStatus(SuggestionStatus.PLANNED);
+                suggestion.setExpertReviewStep(null);
+                suggestion.setExpertReviewRound(null);
+                suggestion.setExpertReviewPlanChanged(null);
+                suggestion.setTotalExpertReviewRounds(null);
+                suggestion.setExpertReviewChangedDomains(null);
+                suggestion.setCurrentPhase("Plan ready — waiting for approval");
+                suggestionRepository.save(suggestion);
+                broadcastUpdate(suggestion);
+                broadcastExpertReviewStatus(suggestionId);
+                notifyAdminsApprovalNeeded(suggestion);
+                return;
+            }
+
+            // Some experts still need to review — run targeted re-review with guidance context
             suggestion.setExpertReviewRound(1);
             suggestion.setTotalExpertReviewRounds(totalRounds + 1);
             suggestion.setExpertReviewPlanChanged(false);
@@ -1196,7 +1252,7 @@ public class SuggestionService {
             addMessage(suggestionId, SenderType.SYSTEM, "System",
                     "Thank you for the guidance. Restarting expert reviews with your direction in mind.");
             broadcastExpertReviewStatus(suggestionId);
-            runNextExpertReview(suggestionId);
+            runTargetedExpertRereviews(suggestionId, expertsToRerun, 1);
             return;
         }
 
@@ -3191,6 +3247,41 @@ public class SuggestionService {
                 "\"message\": \"The plan has been updated to account for the recent project changes.\", " +
                 "\"plan\": \"<updated plan>\"}\n\n" +
                 "IMPORTANT: When status is NEEDS_CLARIFICATION, you MUST include a \"questions\" array.";
+    }
+
+    // -------------------------------------------------------------------------
+    // Expert Approval Tracker helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Re-fetches the suggestion from the database (for concurrency safety), updates
+     * the approval tracker entry for the given expert, and saves back to the database.
+     */
+    private void updateApprovalTracker(Suggestion suggestion, ExpertRole expert, String status, int round) {
+        Long id = suggestion.getId();
+        if (id == null) return;
+        Suggestion fresh = suggestionRepository.findById(id).orElse(suggestion);
+        Map<String, Suggestion.ExpertApprovalEntry> tracker = fresh.getExpertApprovalMap();
+        tracker.put(expert.getDisplayName(), new Suggestion.ExpertApprovalEntry(status, round));
+        fresh.setExpertApprovalMap(tracker);
+        suggestionRepository.save(fresh);
+    }
+
+    /**
+     * Returns the last recorded approval status for the given expert, or null if not tracked.
+     */
+    private String getApprovalStatus(Suggestion suggestion, ExpertRole expert) {
+        Map<String, Suggestion.ExpertApprovalEntry> tracker = suggestion.getExpertApprovalMap();
+        Suggestion.ExpertApprovalEntry entry = tracker.get(expert.getDisplayName());
+        return entry != null ? entry.getStatus() : null;
+    }
+
+    /**
+     * Clears the approval tracker for the given suggestion and saves back to the database.
+     */
+    private void clearApprovalTracker(Suggestion suggestion) {
+        suggestion.setExpertApprovalTracker(null);
+        suggestionRepository.save(suggestion);
     }
 
     /**
