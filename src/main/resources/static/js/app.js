@@ -793,8 +793,11 @@ const app = {
 
         // Admin actions
         const canApprove = ['PLANNED', 'DISCUSSING'].includes(suggestion.status);
+        const canForceReApproval = ['PLANNED', 'APPROVED'].includes(suggestion.status);
         document.getElementById('adminActions').style.display =
-            (isAdmin && canApprove) ? '' : 'none';
+            (isAdmin && (canApprove || canForceReApproval)) ? '' : 'none';
+        document.getElementById('forceReApprovalBtn').style.display =
+            (isAdmin && canForceReApproval) ? '' : 'none';
 
         // Retry PR action
         const canRetryPr = isAdmin && suggestion.currentPhase === 'Done — review request failed';
@@ -1402,6 +1405,24 @@ const app = {
         }
     },
 
+    async forceReApproval() {
+        if (!confirm('This will restart expert reviews from scratch. All expert reviewers will re-evaluate the plan. Continue?')) return;
+        const btn = document.getElementById('forceReApprovalBtn');
+        btn.disabled = true;
+        btn.textContent = 'Restarting...';
+        try {
+            const result = await this.api('/suggestions/' + this.state.currentSuggestion + '/force-re-approval', { method: 'POST' });
+            if (result && result.error) {
+                alert('Force re-approval failed: ' + result.error);
+            }
+        } catch (e) {
+            alert('Force re-approval failed: ' + e.message);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Force Re-approval';
+        }
+    },
+
     async vote(value) {
         const id = this.state.currentSuggestion;
         const data = await this.api('/suggestions/' + id + '/vote', {
@@ -1795,8 +1816,11 @@ const app = {
                 // Update admin actions visibility
                 const isAdmin = this.state.role === 'ROOT_ADMIN' || this.state.role === 'ADMIN';
                 const canApprove = ['PLANNED', 'DISCUSSING'].includes(data.status);
+                const canForceReApproval = ['PLANNED', 'APPROVED'].includes(data.status);
                 document.getElementById('adminActions').style.display =
-                    (isAdmin && canApprove) ? '' : 'none';
+                    (isAdmin && (canApprove || canForceReApproval)) ? '' : 'none';
+                document.getElementById('forceReApprovalBtn').style.display =
+                    (isAdmin && canForceReApproval) ? '' : 'none';
 
                 // Retry PR action
                 const canRetryPr2 = isAdmin && data.currentPhase === 'Done — review request failed';

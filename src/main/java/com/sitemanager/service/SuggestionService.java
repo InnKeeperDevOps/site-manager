@@ -1753,6 +1753,36 @@ public class SuggestionService {
         return suggestion;
     }
 
+    @Transactional
+    public Suggestion forceReApproval(Long suggestionId) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId)
+                .orElseThrow(() -> new IllegalArgumentException("Suggestion not found"));
+
+        SuggestionStatus current = suggestion.getStatus();
+        if (current != SuggestionStatus.PLANNED && current != SuggestionStatus.APPROVED) {
+            throw new IllegalStateException(
+                    "Force re-approval is only available for PLANNED or APPROVED suggestions (current: " + current + ")");
+        }
+
+        suggestion.setStatus(SuggestionStatus.EXPERT_REVIEW);
+        suggestion.setExpertReviewStep(0);
+        suggestion.setExpertReviewRound(1);
+        suggestion.setTotalExpertReviewRounds(1);
+        suggestion.setExpertReviewNotes(null);
+        suggestion.setExpertReviewPlanChanged(false);
+        suggestion.setExpertReviewChangedDomains(null);
+        suggestion.setCurrentPhase("Force re-approval — restarting expert reviews...");
+        suggestionRepository.save(suggestion);
+
+        addMessage(suggestionId, SenderType.SYSTEM, "System",
+                "An admin has requested **force re-approval** — all expert reviewers will re-evaluate the plan.");
+        broadcastUpdate(suggestion);
+
+        startExpertReviewPipeline(suggestionId);
+
+        return suggestion;
+    }
+
     private void executeApprovedSuggestion(Suggestion suggestion) {
         log.info("[AI-FLOW] suggestion={} starting execution", suggestion.getId());
         String repoUrl = settingsService.getSettings().getTargetRepoUrl();
