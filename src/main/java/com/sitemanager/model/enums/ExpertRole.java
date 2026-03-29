@@ -155,21 +155,16 @@ public enum ExpertRole {
     }
 
     /**
-     * Expert review batches for parallel execution. Experts within the same batch
-     * run concurrently since they review independent aspects of the plan.
-     * Batches run sequentially so later batches can see earlier notes.
+     * Expert review batches. Each expert runs as its own batch (sequentially,
+     * one after the other) so every expert can see all prior notes.
      */
     public static ExpertRole[][] reviewBatches() {
-        return new ExpertRole[][] {
-            // Batch 1: Architecture & security foundations
-            { SOFTWARE_ARCHITECT, SECURITY_ENGINEER, INFRASTRUCTURE_ENGINEER },
-            // Batch 2: Data, performance & ops
-            { DATA_ANALYST, PERFORMANCE_ENGINEER, DEVOPS_ENGINEER },
-            // Batch 3: Implementation, UI & UX
-            { SOFTWARE_ENGINEER, FRONTEND_ENGINEER, UX_EXPERT },
-            // Batch 4: Product & QA
-            { PRODUCT_MANAGER, QA_ENGINEER }
-        };
+        ExpertRole[] order = reviewOrder();
+        ExpertRole[][] batches = new ExpertRole[order.length][1];
+        for (int i = 0; i < order.length; i++) {
+            batches[i] = new ExpertRole[] { order[i] };
+        }
+        return batches;
     }
 
     /**

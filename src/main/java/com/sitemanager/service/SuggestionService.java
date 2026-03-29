@@ -56,6 +56,7 @@ public class SuggestionService {
     private static final int MAX_TOTAL_EXPERT_REVIEW_ROUNDS = 3;
     private static final int MIN_EXPERT_ANALYSIS_LENGTH = 50;
     private static final int MAX_EXPERT_RETRIES = 2;
+    private static final int MIN_APPROVALS_FOR_EARLY_EXIT = 3;
     private final ConcurrentHashMap<String, Integer> expertRetryCount = new ConcurrentHashMap<>();
     private final ObjectMapper objectMapper = new ObjectMapper()
             .registerModule(new JavaTimeModule())
@@ -108,19 +109,33 @@ public class SuggestionService {
 
         log.info("Found {} suggestion(s) to resume on startup", toResume.size());
 
-        for (Suggestion suggestion : toResume) {
+        // Resume IN_PROGRESS/TESTING suggestions first (already running), then try APPROVED
+        List<Suggestion> active = toResume.stream()
+                .filter(s -> s.getStatus() != SuggestionStatus.APPROVED)
+                .toList();
+        List<Suggestion> approved = toResume.stream()
+                .filter(s -> s.getStatus() == SuggestionStatus.APPROVED)
+                .toList();
+
+        for (Suggestion suggestion : active) {
             try {
-                if (suggestion.getStatus() == SuggestionStatus.APPROVED) {
-                    // Approved but execution never started (or crashed before cloning).
-                    // Re-trigger the full execution flow.
-                    log.info("Resuming approved suggestion {} — starting execution", suggestion.getId());
-                    addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                            "System restarted. Picking up where we left off...");
-                    executeApprovedSuggestion(suggestion);
-                } else {
-                    // IN_PROGRESS or TESTING — Claude was mid-execution. Resume it.
-                    resumeInProgressSuggestion(suggestion);
-                }
+                resumeInProgressSuggestion(suggestion);
+            } catch (Exception e) {
+                log.error("Failed to resume suggestion {} on startup: {}", suggestion.getId(), e.getMessage(), e);
+                addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                        "Something went wrong while resuming work. You can retry.");
+                suggestion.setCurrentPhase("Resume failed — can retry");
+                suggestionRepository.save(suggestion);
+                broadcastUpdate(suggestion);
+            }
+        }
+
+        for (Suggestion suggestion : approved) {
+            try {
+                log.info("Resuming approved suggestion {} — starting execution", suggestion.getId());
+                addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                        "System restarted. Picking up where we left off...");
+                executeApprovedSuggestion(suggestion);
             } catch (Exception e) {
                 log.error("Failed to resume suggestion {} on startup: {}", suggestion.getId(), e.getMessage(), e);
                 addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
@@ -626,6 +641,32 @@ public class SuggestionService {
             return;
         }
 
+        // Early exit: if enough consecutive experts have approved without any plan
+        // changes, the plan is considered approved by the panel — skip remaining experts.
+        if (step >= MIN_APPROVALS_FOR_EARLY_EXIT && !Boolean.TRUE.equals(suggestion.getExpertReviewPlanChanged())
+                && hasConsecutiveApprovals(suggestion, step)) {
+            int skipped = experts.length - step;
+            log.info("Suggestion {} approved by {} consecutive experts with no plan changes — " +
+                    "skipping remaining {} experts", suggestionId, step, skipped);
+
+            addMessage(suggestionId, SenderType.SYSTEM, "System",
+                    "The plan has been approved by " + step + " consecutive experts with no changes needed. " +
+                    "Skipping the remaining " + skipped + " reviews.");
+
+            suggestion.setStatus(SuggestionStatus.PLANNED);
+            suggestion.setExpertReviewStep(null);
+            suggestion.setExpertReviewRound(null);
+            suggestion.setExpertReviewPlanChanged(null);
+            suggestion.setTotalExpertReviewRounds(null);
+            suggestion.setExpertReviewChangedDomains(null);
+            suggestion.setCurrentPhase("Plan ready — waiting for approval");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+            broadcastExpertReviewStatus(suggestionId);
+            notifyAdminsApprovalNeeded(suggestion);
+            return;
+        }
+
         // Determine which batch this step belongs to and run the whole batch in parallel
         int[] batchInfo = ExpertRole.batchForStep(step);
         if (batchInfo == null) {
@@ -1091,6 +1132,29 @@ public class SuggestionService {
         });
     }
 
+    /**
+     * Check whether all expert notes so far are pure approvals (no "ACCEPTED" changes,
+     * no "not applied" flags). Returns true only when every recorded note is an approval.
+     */
+    private boolean hasConsecutiveApprovals(Suggestion suggestion, int completedSteps) {
+        String notes = suggestion.getExpertReviewNotes();
+        if (notes == null || notes.isBlank()) return false;
+
+        String[] entries = notes.split("\n\n");
+        int approvalCount = 0;
+        for (String entry : entries) {
+            entry = entry.trim();
+            if (!entry.startsWith("**")) continue;
+            String lower = entry.toLowerCase();
+            if (lower.contains("changes") || lower.contains("proposed") || lower.contains("accepted")
+                    || lower.contains("not applied")) {
+                return false;
+            }
+            approvalCount++;
+        }
+        return approvalCount >= completedSteps;
+    }
+
     private void advanceExpertStep(Suggestion suggestion) {
         int current = suggestion.getExpertReviewStep() != null ? suggestion.getExpertReviewStep() : 0;
         ExpertRole expert = ExpertRole.fromStep(current);
@@ -1468,11 +1532,28 @@ public class SuggestionService {
             return;
         }
 
+        // Check concurrency limit before starting execution
+        int maxConcurrent = getMaxConcurrentSuggestions();
+        long activeCount = suggestionRepository.countByStatusIn(
+                List.of(SuggestionStatus.IN_PROGRESS, SuggestionStatus.TESTING));
+        if (activeCount >= maxConcurrent) {
+            log.info("[AI-FLOW] suggestion={} queued — {} suggestion(s) already executing (limit={})",
+                    suggestion.getId(), activeCount, maxConcurrent);
+            suggestion.setCurrentPhase("Queued — waiting for a slot (" + activeCount + "/" + maxConcurrent + " running)");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+            addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                    "Your suggestion is approved and queued. It will start automatically when a slot opens up.");
+            broadcastExecutionQueueStatus();
+            return;
+        }
+
         suggestion.setStatus(SuggestionStatus.IN_PROGRESS);
         suggestion.setCurrentPhase("Setting up a workspace for this suggestion...");
         suggestionRepository.save(suggestion);
         broadcastUpdate(suggestion);
         slackNotificationService.sendNotification(suggestion, "IN_PROGRESS");
+        broadcastExecutionQueueStatus();
 
         // Clone repo into suggestion-{id}-repo/ and execute in background
         new Thread(() -> {
@@ -1499,8 +1580,77 @@ public class SuggestionService {
                 suggestion.setCurrentPhase("Failed — can retry");
                 suggestionRepository.save(suggestion);
                 broadcastUpdate(suggestion);
+                tryStartNextQueuedSuggestion();
             }
         }).start();
+    }
+
+    private int getMaxConcurrentSuggestions() {
+        Integer max = settingsService.getSettings().getMaxConcurrentSuggestions();
+        return (max != null && max >= 1) ? max : 1;
+    }
+
+    /**
+     * Try to start the next queued (APPROVED) suggestion if a slot is available.
+     * Called whenever a suggestion exits the active execution pipeline.
+     */
+    private void tryStartNextQueuedSuggestion() {
+        int maxConcurrent = getMaxConcurrentSuggestions();
+        long activeCount = suggestionRepository.countByStatusIn(
+                List.of(SuggestionStatus.IN_PROGRESS, SuggestionStatus.TESTING));
+        if (activeCount >= maxConcurrent) {
+            return;
+        }
+
+        List<Suggestion> queued = suggestionRepository.findByStatus(SuggestionStatus.APPROVED);
+        if (queued.isEmpty()) {
+            return;
+        }
+
+        // Pick the oldest approved suggestion
+        Suggestion next = queued.stream()
+                .min(java.util.Comparator.comparing(Suggestion::getCreatedAt))
+                .orElse(null);
+        if (next == null) return;
+
+        log.info("[AI-FLOW] Starting next queued suggestion {} (slot freed, {}/{} active)",
+                next.getId(), activeCount, maxConcurrent);
+        addMessage(next.getId(), SenderType.SYSTEM, "System",
+                "A slot has opened up. Starting work on your suggestion now.");
+        executeApprovedSuggestion(next);
+    }
+
+    public Map<String, Object> getExecutionQueueStatus() {
+        int maxConcurrent = getMaxConcurrentSuggestions();
+        long activeCount = suggestionRepository.countByStatusIn(
+                List.of(SuggestionStatus.IN_PROGRESS, SuggestionStatus.TESTING));
+
+        List<Suggestion> queued = suggestionRepository.findByStatus(SuggestionStatus.APPROVED);
+        queued.sort(java.util.Comparator.comparing(Suggestion::getCreatedAt));
+
+        List<Map<String, Object>> queuedList = new java.util.ArrayList<>();
+        for (int i = 0; i < queued.size(); i++) {
+            Suggestion s = queued.get(i);
+            queuedList.add(Map.of(
+                    "id", s.getId(),
+                    "title", s.getTitle(),
+                    "position", i + 1
+            ));
+        }
+
+        return Map.of(
+                "maxConcurrent", maxConcurrent,
+                "activeCount", activeCount,
+                "queuedCount", queued.size(),
+                "queued", queuedList
+        );
+    }
+
+    private void broadcastExecutionQueueStatus() {
+        Map<String, Object> status = getExecutionQueueStatus();
+        java.util.Map<String, Object> payload = new java.util.HashMap<>(status);
+        payload.put("type", "execution_queue_status");
+        userNotificationHandler.broadcastToAll(payload);
     }
 
     /**
@@ -1548,6 +1698,7 @@ public class SuggestionService {
             addMessage(suggestionId, SenderType.SYSTEM, "System",
                     "All tasks have been completed and verified by expert review. Submitting changes...");
             createPrAsync(suggestionId);
+            tryStartNextQueuedSuggestion();
             return;
         }
 
@@ -1857,6 +2008,7 @@ public class SuggestionService {
 
             // Push branch and create PR in background
             createPrAsync(suggestion.getId());
+            tryStartNextQueuedSuggestion();
             return;
         } else if (result.contains("FAILED")) {
             suggestion.setCurrentPhase("Something went wrong — can retry");
@@ -2330,6 +2482,10 @@ public class SuggestionService {
         Suggestion suggestion = suggestionRepository.findById(suggestionId)
                 .orElseThrow(() -> new IllegalArgumentException("Suggestion not found"));
 
+        boolean wasActive = suggestion.getStatus() == SuggestionStatus.IN_PROGRESS
+                || suggestion.getStatus() == SuggestionStatus.TESTING
+                || suggestion.getStatus() == SuggestionStatus.APPROVED;
+
         suggestion.setStatus(SuggestionStatus.DENIED);
         suggestion.setCurrentPhase("Denied");
         suggestionRepository.save(suggestion);
@@ -2341,6 +2497,10 @@ public class SuggestionService {
         addMessage(suggestionId, SenderType.SYSTEM, "System", msg);
         broadcastUpdate(suggestion);
         slackNotificationService.sendNotification(suggestion, "DENIED");
+
+        if (wasActive) {
+            tryStartNextQueuedSuggestion();
+        }
 
         return suggestion;
     }
