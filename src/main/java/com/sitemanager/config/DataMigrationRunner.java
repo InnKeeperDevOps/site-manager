@@ -28,6 +28,7 @@ public class DataMigrationRunner implements CommandLineRunner {
         migrateStatusCheckConstraint();
         ensureAutoMergePrColumn();
         ensureRegistrationsEnabledColumn();
+        ensureMaxConcurrentSuggestionsColumn();
 
         int updated = jdbcTemplate.update(
                 "UPDATE suggestions SET status = 'DEV_COMPLETE' WHERE status = 'COMPLETED'");
@@ -76,6 +77,17 @@ public class DataMigrationRunner implements CommandLineRunner {
      * updated via the standard SQLite table-rebuild pattern: create a new table with the
      * correct constraint, copy data, drop the old table, and rename.
      */
+    private void ensureMaxConcurrentSuggestionsColumn() {
+        String tableSql = jdbcTemplate.queryForObject(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='site_settings'",
+                String.class);
+        if (tableSql == null || tableSql.contains("max_concurrent_suggestions")) {
+            return;
+        }
+        jdbcTemplate.execute("ALTER TABLE site_settings ADD COLUMN max_concurrent_suggestions INTEGER DEFAULT 1");
+        log.info("Data migration: added max_concurrent_suggestions column to site_settings");
+    }
+
     private void migrateStatusCheckConstraint() {
         String currentSql = jdbcTemplate.queryForObject(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='suggestions'",

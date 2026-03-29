@@ -43,6 +43,9 @@ public class SiteSettings {
     @Column
     private String slackWebhookUrl;
 
+    @Column(name = "max_concurrent_suggestions")
+    private Integer maxConcurrentSuggestions = 1;
+
     @Column(name = "auto_merge_pr", nullable = false)
     private boolean autoMergePr = false;
 
@@ -78,6 +81,8 @@ public class SiteSettings {
     public void setClaudeMaxTurnsExpert(Integer v) { this.claudeMaxTurnsExpert = v; }
     public String getSlackWebhookUrl() { return slackWebhookUrl; }
     public void setSlackWebhookUrl(String v) { this.slackWebhookUrl = v; }
+    public Integer getMaxConcurrentSuggestions() { return maxConcurrentSuggestions; }
+    public void setMaxConcurrentSuggestions(Integer v) { this.maxConcurrentSuggestions = v; }
     public boolean isAutoMergePr() { return autoMergePr; }
     public void setAutoMergePr(boolean v) { this.autoMergePr = v; }
     public boolean isRequireRegistrationApproval() { return requireRegistrationApproval; }

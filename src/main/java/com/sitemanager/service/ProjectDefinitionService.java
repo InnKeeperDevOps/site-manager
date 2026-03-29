@@ -99,15 +99,18 @@ public class ProjectDefinitionService {
             throw new IllegalStateException("A project definition session is already in progress");
         }
 
+        String existingDefinition = readExistingProjectDefinition();
+
         ProjectDefinitionSession session = new ProjectDefinitionSession();
         session.setStatus(ProjectDefinitionStatus.ACTIVE);
         session.setClaudeSessionId(claudeService.generateSessionId());
         session.setConversationHistory("[]");
+        session.setHasExistingDefinition(existingDefinition != null);
         session = sessionRepository.save(session);
 
         final Long sessionId = session.getId();
         final String claudeSessionId = session.getClaudeSessionId();
-        final String prompt = buildInterviewPrompt();
+        final String prompt = buildInterviewPrompt(existingDefinition);
 
         claudeService.continueConversation(claudeSessionId, prompt, null,
                 claudeService.getMainRepoDir(), null)
@@ -330,35 +333,73 @@ public class ProjectDefinitionService {
                 });
     }
 
+    // ---- Existing definition reader ----
+
+    /**
+     * Reads PROJECT_DEFINITION.md from the main repo directory.
+     * Returns the file content if it exists, or null if it does not.
+     * Protected for testability.
+     */
+    protected String readExistingProjectDefinition() {
+        String mainRepoDir = claudeService.getMainRepoDir();
+        java.nio.file.Path filePath = Paths.get(mainRepoDir, "PROJECT_DEFINITION.md");
+        try {
+            return Files.readString(filePath);
+        } catch (java.nio.file.NoSuchFileException e) {
+            return null;
+        } catch (Exception e) {
+            log.warn("Could not read PROJECT_DEFINITION.md from {}: {}", filePath, e.getMessage());
+            return null;
+        }
+    }
+
     // ---- Prompt builders ----
 
-    private String buildInterviewPrompt() {
-        return "You are helping define a software project through a structured interview. " +
-                "Ask the following 9 questions one at a time, in order. " +
-                "Wait for the user to answer each question before asking the next one.\n\n" +
-                "The 9 questions cover:\n" +
-                "1. Project description (what the project is about)\n" +
-                "2. Motivation (why it needs to exist)\n" +
-                "3. Goals (what the project aims to achieve)\n" +
-                "4. Target users — multiple choice: individuals/consumers, small businesses, " +
-                "enterprise teams, developers/technical users, internal team only, combination\n" +
-                "5. Interaction mode — multiple choice: web application, API/backend service, " +
-                "command-line tool, mobile app, background service, combination\n" +
-                "6. Project stage — multiple choice: just an idea/concept, early development, " +
-                "has an MVP already, in production\n" +
-                "7. Top 2-3 features to build first (free text)\n" +
-                "8. Technical constraints or preferences (free text)\n" +
-                "9. What success looks like in 6 months (free text)\n\n" +
-                "For each question respond in JSON:\n" +
-                "Open-ended: {\"type\":\"question\",\"questionType\":\"open\"," +
+    String buildInterviewPrompt(String existingDefinition) {
+        String jsonFormat =
+                "For each response, reply in JSON using one of these formats:\n" +
+                "Open-ended question: {\"type\":\"question\",\"questionType\":\"open\"," +
                 "\"question\":\"...\",\"options\":[],\"progress\":<0-100>}\n" +
-                "Multiple choice: {\"type\":\"question\",\"questionType\":\"multiple_choice\"," +
-                "\"question\":\"...\",\"options\":[\"opt1\",\"opt2\",...],\"progress\":<0-100>}\n" +
-                "After all 9 answers: {\"type\":\"complete\",\"message\":\"Thank you! " +
-                "Your project definition is ready to be compiled.\"}\n\n" +
-                "IMPORTANT: Use plain, non-technical language in questions. " +
-                "Do not mention programming languages, frameworks, or technical terms. " +
-                "Start with question 1 now.";
+                "Multiple choice question: {\"type\":\"question\",\"questionType\":\"multiple_choice\"," +
+                "\"question\":\"...\",\"options\":[\"option 1\",\"option 2\",...],\"progress\":<0-100>}\n" +
+                "When finished: {\"type\":\"complete\",\"message\":\"...\"}\n\n" +
+                "RULES:\n" +
+                "- Use plain, everyday language. Never use technical jargon, tool names, " +
+                "file names, code terms, or developer-specific terminology in your messages.\n" +
+                "- Describe everything from the user's perspective, not a developer's.\n" +
+                "- Set progress (0-100) based on how much useful information has been gathered.\n" +
+                "- Send {\"type\":\"complete\"} when the user says they are satisfied " +
+                "or when you have gathered enough to write a thorough project description.";
+
+        if (existingDefinition == null) {
+            return "You are helping a user describe their software project. " +
+                    "Have a friendly, conversational interview to understand what they are building.\n\n" +
+                    "Cover these areas naturally — adapt the order and follow-up questions based on their answers:\n" +
+                    "- What the project does and what problem it solves\n" +
+                    "- Who will use it\n" +
+                    "- The goals and motivation behind building it\n" +
+                    "- The most important things it should be able to do\n" +
+                    "- Any limitations or constraints to keep in mind\n" +
+                    "- What success looks like\n\n" +
+                    "Ask one question at a time. Keep questions short and friendly. " +
+                    "Adapt your next question based on what the user tells you — " +
+                    "explore interesting areas further and skip topics already covered.\n\n" +
+                    jsonFormat + "\n\n" +
+                    "Start by asking what the project is about.";
+        } else {
+            return "You are helping a user review and improve their existing project description. " +
+                    "Here is the current description:\n\n" +
+                    "---\n" + existingDefinition + "\n---\n\n" +
+                    "Start by briefly summarizing what you see in plain terms (2-3 sentences). " +
+                    "Then ask the user what they would like to update or improve. " +
+                    "Guide them through refining any areas that seem incomplete, vague, or outdated, such as:\n" +
+                    "- Areas that lack detail or are hard to understand\n" +
+                    "- Goals or features that could be described more clearly\n" +
+                    "- Anything that may have changed since this was written\n\n" +
+                    "Ask one question at a time. When the user is happy with the updates, send the complete signal.\n\n" +
+                    jsonFormat + "\n\n" +
+                    "Start by summarizing what you see and asking what they would like to change.";
+        }
     }
 
     private String buildCompilationPrompt() {
@@ -389,6 +430,7 @@ public class ProjectDefinitionService {
         resp.setGeneratedContent(session.getGeneratedContent());
         resp.setPrUrl(session.getPrUrl());
         resp.setErrorMessage(session.getErrorMessage());
+        resp.setIsEdit(session.isHasExistingDefinition());
         return resp;
     }
 

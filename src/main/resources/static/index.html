@@ -15,6 +15,8 @@
             <span id="userBadge" class="user-badge" style="display:none"></span>
             <button id="project-def-btn" class="btn btn-outline btn-sm" style="display:none"
                     onclick="app.openProjectDefinition()">Project Definition</button>
+            <button id="dashboardBtn" class="btn btn-outline btn-sm"
+                    onclick="app.navigate('dashboard')">Dashboard</button>
             <button id="settingsBtn" class="btn btn-outline btn-sm" style="display:none"
                     onclick="app.navigate('settings')">Settings</button>
             <button id="loginBtn" class="btn btn-outline btn-sm" onclick="app.navigate('login')">Login</button>
@@ -292,6 +294,8 @@
                 <span id="detailPhaseText"></span>
             </div>
 
+            <div id="detailQueueInfo" class="card" style="display:none;margin-top:0.75rem;padding:0.75rem 1rem;font-size:0.85rem;background:var(--bg-muted, #f3f4f6);color:var(--text-muted)"></div>
+
             <div id="detailPlan" class="card" style="display:none;margin-top:1rem;background:#f0fdf4">
                 <strong>Plan:</strong>
                 <pre id="detailPlanText" style="white-space:pre-wrap;margin-top:0.5rem;font-size:0.85rem"></pre>
@@ -393,6 +397,29 @@
         </div>
     </div>
 
+    <!-- Dashboard View -->
+    <div id="dashboardView" class="view" style="display:none">
+        <h2>Contributor Activity</h2>
+        <table id="leaderboardTable" style="width:100%;border-collapse:collapse;margin-top:1rem">
+            <thead>
+                <tr>
+                    <th style="text-align:left;padding:0.5rem;border-bottom:2px solid var(--border)">Rank</th>
+                    <th style="text-align:left;padding:0.5rem;border-bottom:2px solid var(--border)">Contributor</th>
+                    <th style="text-align:left;padding:0.5rem;border-bottom:2px solid var(--border)">Submissions</th>
+                    <th style="text-align:left;padding:0.5rem;border-bottom:2px solid var(--border)">Merged</th>
+                    <th style="text-align:left;padding:0.5rem;border-bottom:2px solid var(--border)">Approved</th>
+                    <th style="text-align:left;padding:0.5rem;border-bottom:2px solid var(--border)">Upvotes</th>
+                    <th style="text-align:left;padding:0.5rem;border-bottom:2px solid var(--border)">Score</th>
+                </tr>
+            </thead>
+            <tbody id="leaderboardBody"></tbody>
+        </table>
+        <div id="userHistoryPanel" style="display:none;margin-top:2rem">
+            <h3 id="historyUsername"></h3>
+            <div id="historyList"></div>
+        </div>
+    </div>
+
     <!-- Settings View -->
     <div id="settingsView" class="view">
         <span class="back-btn" onclick="app.navigate('list')">&larr; Back</span>
@@ -430,6 +457,11 @@
                     <label>Max Turns for Expert Reviews</label>
                     <input type="number" id="settingClaudeMaxTurnsExpert"
                            placeholder="3" min="1" max="20">
+                </div>
+                <div class="form-group">
+                    <label>Max Concurrent Suggestions</label>
+                    <input type="number" id="settingMaxConcurrentSuggestions"
+                           placeholder="1" min="1" max="50">
                 </div>
                 <div class="toggle-row">
                     <span class="toggle-label">Allow Anonymous Suggestions</span>
@@ -565,7 +597,7 @@
 <div id="project-def-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:300;overflow-y:auto;padding:2rem 1rem;">
     <div style="background:var(--card-bg);border-radius:0.5rem;box-shadow:0 20px 60px rgba(0,0,0,0.3);max-width:680px;width:100%;margin:0 auto;padding:1.5rem;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;padding-bottom:0.75rem;border-bottom:1px solid var(--border)">
-            <h3 style="margin:0">Project Definition</h3>
+            <h3 id="pd-modal-title" style="margin:0">Project Definition</h3>
             <button onclick="app.closeProjectDefinitionModal()" style="background:none;border:none;cursor:pointer;font-size:1.5rem;color:var(--text-muted);line-height:1;padding:0">&times;</button>
         </div>
         <!-- Progress bar -->

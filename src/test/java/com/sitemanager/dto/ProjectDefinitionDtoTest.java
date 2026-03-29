@@ -40,6 +40,7 @@ class ProjectDefinitionDtoTest {
         resp.setGeneratedContent("Generated doc content");
         resp.setPrUrl("https://github.com/org/repo/pull/1");
         resp.setErrorMessage("Something went wrong");
+        resp.setIsEdit(true);
 
         assertEquals(42L, resp.getSessionId());
         assertEquals(ProjectDefinitionStatus.ACTIVE, resp.getStatus());
@@ -50,6 +51,7 @@ class ProjectDefinitionDtoTest {
         assertEquals("Generated doc content", resp.getGeneratedContent());
         assertEquals("https://github.com/org/repo/pull/1", resp.getPrUrl());
         assertEquals("Something went wrong", resp.getErrorMessage());
+        assertTrue(resp.isEdit());
     }
 
     @Test
@@ -64,6 +66,19 @@ class ProjectDefinitionDtoTest {
         assertNull(resp.getGeneratedContent());
         assertNull(resp.getPrUrl());
         assertNull(resp.getErrorMessage());
+        assertFalse(resp.isEdit());
+    }
+
+    @Test
+    void stateResponse_isEdit_defaultsFalse_andCanBeSetTrue() {
+        ProjectDefinitionStateResponse resp = new ProjectDefinitionStateResponse();
+        assertFalse(resp.isEdit());
+
+        resp.setIsEdit(true);
+        assertTrue(resp.isEdit());
+
+        resp.setIsEdit(false);
+        assertFalse(resp.isEdit());
     }
 
     @Test

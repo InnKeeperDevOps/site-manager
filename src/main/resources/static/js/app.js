@@ -43,7 +43,8 @@ const app = {
             sortBy: 'created',
             sortDir: 'desc'
         },
-        searchDebounceTimer: null
+        searchDebounceTimer: null,
+        executionQueue: { maxConcurrent: 1, activeCount: 0, queuedCount: 0, queued: [] }
     },
 
     async init() {
@@ -145,6 +146,8 @@ const app = {
                 const btn = document.getElementById('project-def-btn');
                 if (btn) btn.textContent = 'View Definition';
             } else if (['ACTIVE', 'GENERATING', 'SAVING'].includes(state.status)) {
+                const btn = document.getElementById('project-def-btn');
+                if (btn && state.isEdit) btn.textContent = 'Update Definition';
                 this.showProjectDefinitionModal(state);
             }
         } catch (e) {
@@ -184,6 +187,10 @@ const app = {
         const modal = document.getElementById('project-def-modal');
         if (!modal) return;
         modal.style.display = '';
+
+        // Update modal title based on edit vs new
+        const titleEl = document.getElementById('pd-modal-title');
+        if (titleEl) titleEl.textContent = state.isEdit ? 'Update Project Definition' : 'Project Definition';
 
         // Progress bar
         const bar = document.getElementById('pd-progress-bar');
@@ -262,7 +269,12 @@ const app = {
                 }
             }
 
-            const label = state.status === 'ACTIVE' ? 'Answer the questions below to define your project.' : '';
+            let label = '';
+            if (state.status === 'ACTIVE') {
+                label = state.isEdit
+                    ? 'Review and update your existing project definition.'
+                    : 'Answer the questions below to define your project.';
+            }
             if (statusEl) statusEl.textContent = label;
         }
 
@@ -505,12 +517,14 @@ const app = {
 
         // Disconnect existing WebSocket
         this.disconnectWs();
+        this.state.currentView = view;
 
         switch (view) {
             case 'list':
                 this.state.myDraftsMode = false;
                 this.loadSuggestions();
                 break;
+            case 'dashboard': this.loadDashboardView(); break;
             case 'detail': this.loadDetail(data); break;
             case 'settings': this.loadSettings(); break;
             case 'login': {
@@ -599,9 +613,13 @@ const app = {
         const qs = params.toString();
 
         try {
-            const suggestions = await this.api('/suggestions' + (qs ? '?' + qs : ''));
-            const settings = await this.api('/settings');
+            const [suggestions, settings, queueStatus] = await Promise.all([
+                this.api('/suggestions' + (qs ? '?' + qs : '')),
+                this.api('/settings'),
+                this.api('/suggestions/execution-queue')
+            ]);
             this.state.settings = settings;
+            this.state.executionQueue = queueStatus;
             this.updateNewSuggestionBtn();
 
             if (suggestions.length === 0) {
@@ -610,10 +628,15 @@ const app = {
             }
 
             const canQuickApprove = this.state.permissions.includes('APPROVE_DENY_SUGGESTIONS');
+            const queueMap = {};
+            (queueStatus.queued || []).forEach(q => { queueMap[q.id] = q.position; });
 
             list.innerHTML = suggestions.map(s => {
                 const showApproveActions = canQuickApprove && ['PLANNED', 'DISCUSSING'].includes(s.status);
                 const priorityLabel = s.priority || 'MEDIUM';
+                const queuePos = queueMap[s.id];
+                const queueInfo = (s.status === 'APPROVED' && queuePos) ?
+                    `<div style="font-size:0.8rem;color:var(--text-muted);margin-top:0.5rem">&#9201; Queue position: ${queuePos} of ${queueStatus.queuedCount} (${queueStatus.activeCount}/${queueStatus.maxConcurrent} slots in use)</div>` : '';
                 return `
                 <div class="card suggestion-item" data-suggestion-id="${s.id}" onclick="app.navigate('detail', ${s.id})">
                     <div class="suggestion-header">
@@ -631,6 +654,7 @@ const app = {
                         </div>
                     </div>
                     ${s.currentPhase ? `<div style="font-size:0.8rem;color:${['IN_PROGRESS','EXPERT_REVIEW'].includes(s.status) ? 'var(--primary)' : 'var(--text-muted)'};margin-top:0.5rem">${['IN_PROGRESS','EXPERT_REVIEW'].includes(s.status) ? '<span class="spinner" style="display:inline-block;width:12px;height:12px;margin-right:4px;vertical-align:middle"></span>' : ''}${this.esc(s.currentPhase)}</div>` : ''}
+                    ${queueInfo}
                     ${showApproveActions ? `<div class="suggestion-quick-actions" onclick="event.stopPropagation()">
                         <button class="btn btn-success btn-sm" onclick="app.approveSuggestion(${s.id})">Approve</button>
                         <button class="btn btn-danger btn-sm" onclick="app.denySuggestion(${s.id})">Deny</button>
@@ -705,6 +729,26 @@ const app = {
             planText.textContent = suggestion.planDisplaySummary || suggestion.planSummary;
         } else {
             planEl.style.display = 'none';
+        }
+
+        // Queue status for APPROVED (queued) suggestions
+        const queueInfoEl = document.getElementById('detailQueueInfo');
+        if (queueInfoEl) {
+            if (suggestion.status === 'APPROVED') {
+                this.api('/suggestions/execution-queue').then(q => {
+                    this.state.executionQueue = q;
+                    const pos = (q.queued || []).find(item => item.id === id);
+                    if (pos) {
+                        queueInfoEl.style.display = '';
+                        queueInfoEl.innerHTML = '<strong>Queue position:</strong> ' + pos.position +
+                            ' of ' + q.queuedCount + ' &mdash; ' + q.activeCount + '/' + q.maxConcurrent + ' slots in use';
+                    } else {
+                        queueInfoEl.style.display = 'none';
+                    }
+                });
+            } else {
+                queueInfoEl.style.display = 'none';
+            }
         }
 
         // Expert review status — fetch current progress if in EXPERT_REVIEW
@@ -849,11 +893,17 @@ const app = {
                 meta += (meta ? ' · ' : '') + `took ${dur} min`;
             }
 
-            return `<div class="task-item" data-task-order="${t.taskOrder}">
+            const isActive = t.status === 'IN_PROGRESS' || t.status === 'REVIEWING';
+            const activityDetail = t.statusDetail ? this.esc(t.statusDetail) : '';
+
+            return `<div class="task-item ${isActive ? 'task-active' : ''}" data-task-order="${t.taskOrder}">
                 <div class="task-icon ${statusClass}">${icon}</div>
                 <div class="task-body">
                     <div class="${titleClass}">${t.taskOrder}. ${this.esc(t.displayTitle || t.title)}${statusLabel ? `<span style="font-weight:400;font-size:0.8rem;color:${t.status === 'REVIEWING' ? '#d97706' : '#2563eb'}">${statusLabel}</span>` : ''}</div>
                     ${(t.displayDescription || t.description) ? `<div class="task-desc">${this.esc(t.displayDescription || t.description)}</div>` : ''}
+                    ${isActive && activityDetail ? `<div class="task-activity"><span class="task-activity-dot"></span>${activityDetail}</div>` : ''}
+                    ${(!isActive && t.status === 'COMPLETED' && activityDetail) ? `<div class="task-completed-detail">${activityDetail}</div>` : ''}
+                    ${(!isActive && t.status === 'FAILED' && activityDetail) ? `<div class="task-failed-detail">${activityDetail}</div>` : ''}
                     ${meta ? `<div class="task-meta">${meta}</div>` : ''}
                 </div>
             </div>`;
@@ -1667,6 +1717,22 @@ const app = {
         } else if (data.type === 'approval_needed') {
             this.state.approvalPendingCount++;
             this.updateApprovalBanner();
+        } else if (data.type === 'execution_queue_status') {
+            this.state.executionQueue = data;
+            if (this.state.currentView === 'list') {
+                this.loadSuggestions();
+            }
+            const queueInfoEl = document.getElementById('detailQueueInfo');
+            if (queueInfoEl && this.state.currentSuggestion && this.state.currentStatus === 'APPROVED') {
+                const pos = (data.queued || []).find(item => item.id === this.state.currentSuggestion);
+                if (pos) {
+                    queueInfoEl.style.display = '';
+                    queueInfoEl.innerHTML = '<strong>Queue position:</strong> ' + pos.position +
+                        ' of ' + data.queuedCount + ' &mdash; ' + data.activeCount + '/' + data.maxConcurrent + ' slots in use';
+                } else {
+                    queueInfoEl.style.display = 'none';
+                }
+            }
         } else if (data.type === 'PROJECT_DEFINITION_UPDATE') {
             this.onProjectDefinitionUpdate(data.data || data);
         }
@@ -1780,6 +1846,17 @@ const app = {
                 }
                 break;
             }
+            case 'task_activity': {
+                if (data.taskOrder && data.detail) {
+                    const tasks = this.state.tasks;
+                    const idx = tasks.findIndex(t => t.taskOrder === data.taskOrder);
+                    if (idx >= 0 && (tasks[idx].status === 'IN_PROGRESS' || tasks[idx].status === 'REVIEWING')) {
+                        tasks[idx].statusDetail = data.detail;
+                        this.renderTasks();
+                    }
+                }
+                break;
+            }
             case 'tasks_update': {
                 if (data.tasks) {
                     this.state.tasks = data.tasks;
@@ -1826,6 +1903,7 @@ const app = {
         document.getElementById('settingClaudeModel').value = settings.claudeModel || '';
         document.getElementById('settingClaudeModelExpert').value = settings.claudeModelExpert || '';
         document.getElementById('settingClaudeMaxTurnsExpert').value = settings.claudeMaxTurnsExpert || '';
+        document.getElementById('settingMaxConcurrentSuggestions').value = settings.maxConcurrentSuggestions || 1;
         document.getElementById('settingAnonymous').checked = settings.allowAnonymousSuggestions;
         document.getElementById('settingVoting').checked = settings.allowVoting;
         document.getElementById('settingApproval').checked = settings.requireApproval;
@@ -2202,6 +2280,7 @@ const app = {
                 claudeModel: document.getElementById('settingClaudeModel').value || null,
                 claudeModelExpert: document.getElementById('settingClaudeModelExpert').value || null,
                 claudeMaxTurnsExpert: parseInt(document.getElementById('settingClaudeMaxTurnsExpert').value) || null,
+                maxConcurrentSuggestions: parseInt(document.getElementById('settingMaxConcurrentSuggestions').value) || 1,
                 allowAnonymousSuggestions: document.getElementById('settingAnonymous').checked,
                 allowVoting: document.getElementById('settingVoting').checked,
                 requireApproval: document.getElementById('settingApproval').checked,
@@ -2230,6 +2309,84 @@ const app = {
         alert('Admin user created: ' + data.username);
         document.getElementById('newAdminUsername').value = '';
         document.getElementById('newAdminPassword').value = '';
+    },
+
+    // --- Dashboard / Leaderboard ---
+    async loadDashboardView() {
+        const body = document.getElementById('leaderboardBody');
+        if (body) body.innerHTML = '<tr><td colspan="7">Loading...</td></tr>';
+        const panel = document.getElementById('userHistoryPanel');
+        if (panel) panel.style.display = 'none';
+        try {
+            const res = await fetch('/api/contributors/leaderboard');
+            const data = await res.json();
+            this.renderLeaderboard(data);
+        } catch (e) {
+            if (body) body.innerHTML = '<tr><td colspan="7">Could not load leaderboard.</td></tr>';
+        }
+    },
+
+    renderLeaderboard(contributors) {
+        const body = document.getElementById('leaderboardBody');
+        if (!body) return;
+        const medals = ['\uD83E\uDD47', '\uD83E\uDD48', '\uD83E\uDD49'];
+        body.innerHTML = '';
+        contributors.forEach((c, i) => {
+            const rank = i + 1;
+            const rankDisplay = rank <= 3 ? medals[rank - 1] : String(rank);
+            const tr = document.createElement('tr');
+            tr.innerHTML =
+                '<td style="padding:0.5rem">' + rankDisplay + '</td>' +
+                '<td style="padding:0.5rem"><a href="#" class="contributor-link"' +
+                    ' data-author-id="' + this.esc(c.authorId) + '"' +
+                    ' data-username="' + this.esc(c.username) + '">' +
+                    this.esc(c.username) + '</a></td>' +
+                '<td style="padding:0.5rem">' + c.totalSubmissions + '</td>' +
+                '<td style="padding:0.5rem">' + c.mergedSuggestions + '</td>' +
+                '<td style="padding:0.5rem">' + c.approvedSuggestions + '</td>' +
+                '<td style="padding:0.5rem">' + c.totalUpvotesReceived + '</td>' +
+                '<td style="padding:0.5rem">' + c.score + '</td>';
+            body.appendChild(tr);
+        });
+        body.onclick = async (e) => {
+            const link = e.target.closest('.contributor-link');
+            if (!link) return;
+            e.preventDefault();
+            const authorId = link.dataset.authorId;
+            const username = link.dataset.username;
+            try {
+                const res = await fetch('/api/contributors/' + encodeURIComponent(authorId) + '/history');
+                const suggestions = await res.json();
+                this.renderUserHistory(username, suggestions);
+            } catch (err) {
+                this.showToast('Could not load history.');
+            }
+        };
+    },
+
+    renderUserHistory(username, suggestions) {
+        const panel = document.getElementById('userHistoryPanel');
+        const nameEl = document.getElementById('historyUsername');
+        const listEl = document.getElementById('historyList');
+        if (!panel || !nameEl || !listEl) return;
+        panel.style.display = '';
+        nameEl.textContent = username + "'s Submissions";
+        if (!suggestions || suggestions.length === 0) {
+            listEl.innerHTML = '<p>No submissions found.</p>';
+            return;
+        }
+        listEl.innerHTML = '';
+        suggestions.forEach(s => {
+            const div = document.createElement('div');
+            div.style.cssText = 'padding:0.75rem;border:1px solid var(--border);border-radius:6px;margin-bottom:0.5rem';
+            div.innerHTML =
+                '<a href="#" onclick="app.navigate(\'detail\',{id:' + s.id + '});return false;"' +
+                    ' style="font-weight:500">' + this.esc(s.title) + '</a>' +
+                '<span class="badge" style="margin-left:0.5rem">' + this.esc(s.status) + '</span>' +
+                '<span style="color:var(--muted);font-size:0.85rem;margin-left:0.5rem">' + this.timeAgo(s.createdAt) + '</span>' +
+                '<span style="margin-left:0.5rem">\u25B2 ' + s.upVotes + '</span>';
+            listEl.appendChild(div);
+        });
     },
 
     // --- Helpers ---

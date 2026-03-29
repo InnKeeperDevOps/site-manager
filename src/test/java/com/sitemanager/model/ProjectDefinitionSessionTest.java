@@ -23,6 +23,7 @@ class ProjectDefinitionSessionTest {
         assertNull(s.getPrUrl());
         assertNull(s.getPrNumber());
         assertNull(s.getErrorMessage());
+        assertFalse(s.isHasExistingDefinition());
     }
 
     @Test
@@ -53,6 +54,19 @@ class ProjectDefinitionSessionTest {
         assertEquals("https://github.com/pr/1", s.getPrUrl());
         assertEquals("1", s.getPrNumber());
         assertEquals("some error", s.getErrorMessage());
+        assertFalse(s.isHasExistingDefinition());
+    }
+
+    @Test
+    void hasExistingDefinition_defaultsFalse_andCanBeSetTrue() {
+        ProjectDefinitionSession s = new ProjectDefinitionSession();
+        assertFalse(s.isHasExistingDefinition());
+
+        s.setHasExistingDefinition(true);
+        assertTrue(s.isHasExistingDefinition());
+
+        s.setHasExistingDefinition(false);
+        assertFalse(s.isHasExistingDefinition());
     }
 
     @Test
