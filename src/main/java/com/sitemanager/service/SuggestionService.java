@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sitemanager.dto.ClarificationRequest;
+import com.sitemanager.dto.UpdateDraftRequest;
 import com.sitemanager.model.Suggestion;
 import com.sitemanager.model.SuggestionMessage;
 import com.sitemanager.model.enums.ExpertRole;
@@ -29,10 +30,12 @@ import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 import jakarta.persistence.criteria.Predicate;
 import java.io.File;
@@ -175,7 +178,10 @@ public class SuggestionService {
         executeNextTask(suggestion.getId());
     }
 
-    public List<Suggestion> getAllSuggestions() {
+    public List<Suggestion> getAllSuggestions(String username) {
+        if (username != null) {
+            return suggestionRepository.findAllExcludingOthersDrafts(username);
+        }
         return suggestionRepository.findAllByOrderByCreatedAtDesc();
     }
 
@@ -263,7 +269,7 @@ public class SuggestionService {
 
     @Transactional
     public Suggestion createSuggestion(String title, String description, Long authorId, String authorName,
-                                       Priority priority) {
+                                       Priority priority, boolean isDraft) {
         Suggestion suggestion = new Suggestion();
         suggestion.setTitle(title);
         suggestion.setDescription(description);
@@ -274,6 +280,11 @@ public class SuggestionService {
         suggestion.setClaudeSessionId(claudeService.generateSessionId());
         suggestion = suggestionRepository.save(suggestion);
 
+        if (isDraft) {
+            // Saved as a user draft — skip AI evaluation and notifications
+            return suggestion;
+        }
+
         // Add the initial description as the first message
         addMessage(suggestion.getId(), SenderType.USER, suggestion.getAuthorName(),
                 "**" + title + "**\n\n" + description);
@@ -282,6 +293,51 @@ public class SuggestionService {
         triggerAiEvaluation(suggestion);
 
         return suggestion;
+    }
+
+    @Transactional
+    public Suggestion updateDraft(Long id, UpdateDraftRequest req, String username) {
+        Suggestion suggestion = suggestionRepository.findById(id)
+                .orElseThrow(() -> new IllegalArgumentException("Suggestion not found: " + id));
+        if (suggestion.getStatus() != SuggestionStatus.DRAFT) {
+            throw new IllegalStateException("Suggestion " + id + " is not a draft");
+        }
+        if (!username.equals(suggestion.getAuthorName())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You do not own this draft");
+        }
+        suggestion.setTitle(req.getTitle());
+        suggestion.setDescription(req.getDescription());
+        if (req.getPriority() != null) {
+            suggestion.setPriority(req.getPriority());
+        }
+        suggestion = suggestionRepository.save(suggestion);
+        broadcastUpdate(suggestion);
+        return suggestion;
+    }
+
+    @Transactional
+    public Suggestion submitDraft(Long id, String username) {
+        Suggestion suggestion = suggestionRepository.findById(id)
+                .orElseThrow(() -> new IllegalArgumentException("Suggestion not found: " + id));
+        if (suggestion.getStatus() != SuggestionStatus.DRAFT) {
+            throw new IllegalStateException("Suggestion " + id + " is not a draft");
+        }
+        if (!username.equals(suggestion.getAuthorName())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You do not own this draft");
+        }
+
+        // Add the initial description as the first message (skipped during draft creation)
+        addMessage(suggestion.getId(), SenderType.USER, suggestion.getAuthorName(),
+                "**" + suggestion.getTitle() + "**\n\n" + suggestion.getDescription());
+
+        // Run the same evaluation pipeline as a normal (non-draft) submission
+        triggerAiEvaluation(suggestion);
+
+        return suggestion;
+    }
+
+    public List<Suggestion> getMyDrafts(String username) {
+        return suggestionRepository.findByStatusAndAuthorName(SuggestionStatus.DRAFT, username);
     }
 
     public void triggerAiEvaluation(Suggestion suggestion) {

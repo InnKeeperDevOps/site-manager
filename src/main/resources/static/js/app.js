@@ -35,6 +35,7 @@ const app = {
             expertName: ''
         },
         approvalPendingCount: 0,
+        myDraftsMode: false,
         listFilters: {
             search: '',
             status: '',
@@ -101,6 +102,8 @@ const app = {
         this.updateNewSuggestionBtn();
         this.updateAiRecommendationsBtn();
         this.updateProjectDefinitionBtn();
+        this.updateMyDraftsBtn();
+        this.updateSaveAsDraftBtn();
     },
 
     updateAiRecommendationsBtn() {
@@ -115,6 +118,18 @@ const app = {
         if (!btn) return;
         const { loggedIn, role } = this.state;
         btn.style.display = (loggedIn && (role === 'ROOT_ADMIN' || role === 'ADMIN')) ? '' : 'none';
+    },
+
+    updateMyDraftsBtn() {
+        const btn = document.getElementById('myDraftsBtn');
+        if (!btn) return;
+        btn.style.display = this.state.loggedIn ? '' : 'none';
+    },
+
+    updateSaveAsDraftBtn() {
+        const btn = document.getElementById('saveAsDraftBtn');
+        if (!btn) return;
+        btn.style.display = this.state.loggedIn ? '' : 'none';
     },
 
     async initProjectDefinition() {
@@ -492,7 +507,10 @@ const app = {
         this.disconnectWs();
 
         switch (view) {
-            case 'list': this.loadSuggestions(); break;
+            case 'list':
+                this.state.myDraftsMode = false;
+                this.loadSuggestions();
+                break;
             case 'detail': this.loadDetail(data); break;
             case 'settings': this.loadSettings(); break;
             case 'login': {
@@ -503,10 +521,12 @@ const app = {
                 if (closedMsg) closedMsg.style.display = regDisabled ? '' : 'none';
                 break;
             }
-            case 'create':
+            case 'create': {
                 const nameGroup = document.getElementById('anonNameGroup');
                 nameGroup.style.display = this.state.loggedIn ? 'none' : '';
+                this.updateSaveAsDraftBtn();
                 break;
+            }
         }
     },
 
@@ -559,6 +579,12 @@ const app = {
     },
 
     async loadSuggestions() {
+        // Reset My Drafts button to default state
+        const myDraftsBtn = document.getElementById('myDraftsBtn');
+        if (myDraftsBtn) {
+            myDraftsBtn.textContent = 'My Drafts';
+            myDraftsBtn.onclick = () => this.showMyDrafts();
+        }
         this.restoreFiltersFromUrl();
         const list = document.getElementById('suggestionList');
         list.innerHTML = '<div class="loading">Loading...</div>';
@@ -1356,6 +1382,134 @@ const app = {
         }
         document.getElementById('createForm').reset();
         this.navigate('detail', data.id);
+    },
+
+    async saveAsDraft(e) {
+        e.preventDefault();
+        const data = await this.api('/suggestions', {
+            method: 'POST',
+            body: JSON.stringify({
+                title: document.getElementById('createTitle').value,
+                description: document.getElementById('createDescription').value,
+                priority: document.getElementById('createPriority').value || 'MEDIUM',
+                isDraft: true
+            })
+        });
+        if (data.error) {
+            this.showToast(data.error);
+            return;
+        }
+        document.getElementById('createForm').reset();
+        this.showToast('Draft saved.');
+        this.navigate('list');
+    },
+
+    showMyDrafts() {
+        this.state.myDraftsMode = true;
+        const btn = document.getElementById('myDraftsBtn');
+        if (btn) btn.textContent = 'All Suggestions';
+        if (btn) btn.onclick = () => this.showAllSuggestions();
+        this.loadMyDrafts();
+    },
+
+    showAllSuggestions() {
+        this.state.myDraftsMode = false;
+        const btn = document.getElementById('myDraftsBtn');
+        if (btn) btn.textContent = 'My Drafts';
+        if (btn) btn.onclick = () => this.showMyDrafts();
+        this.loadSuggestions();
+    },
+
+    async loadMyDrafts() {
+        const list = document.getElementById('suggestionList');
+        list.innerHTML = '<div class="loading">Loading drafts...</div>';
+        try {
+            const drafts = await this.api('/suggestions/my-drafts');
+            if (!Array.isArray(drafts) || drafts.length === 0) {
+                list.innerHTML = '<div class="card" style="text-align:center;color:var(--text-muted)">No saved drafts. Use "Save as Draft" when creating a suggestion.</div>';
+                return;
+            }
+            list.innerHTML = this.renderDraftCards(drafts);
+        } catch (err) {
+            list.innerHTML = '<div class="card" style="color:var(--danger)">Failed to load drafts.</div>';
+        }
+    },
+
+    renderDraftCards(drafts) {
+        return drafts.map(s => {
+            const priorityLabel = s.priority || 'MEDIUM';
+            return `
+            <div class="card suggestion-item" data-suggestion-id="${s.id}">
+                <div class="suggestion-header">
+                    <div>
+                        <div class="suggestion-title">${this.esc(s.title)}</div>
+                        <div class="suggestion-meta">
+                            <span>by ${this.esc(s.authorName || 'Anonymous')}</span>
+                            <span>${this.timeAgo(s.createdAt)}</span>
+                        </div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap">
+                        <span class="priority-badge priority-${priorityLabel}">${priorityLabel}</span>
+                        <span class="status-badge" style="background:#f1f5f9;color:#64748b;border:1px solid #cbd5e1">DRAFT</span>
+                    </div>
+                </div>
+                <div class="suggestion-quick-actions" onclick="event.stopPropagation()" style="margin-top:0.75rem">
+                    <button class="btn btn-outline btn-sm" onclick="app.openEditDraftModal(${s.id})">Edit</button>
+                    <button class="btn btn-primary btn-sm" onclick="app.submitDraftConfirm(${s.id})">Submit</button>
+                </div>
+            </div>`;
+        }).join('');
+    },
+
+    openEditDraftModal(id) {
+        const modal = document.getElementById('editDraftModal');
+        if (!modal) return;
+        // Fetch current draft data
+        this.api('/suggestions/' + id).then(s => {
+            if (s.error) { this.showToast(s.error); return; }
+            document.getElementById('editDraftId').value = id;
+            document.getElementById('editDraftTitle').value = s.title || '';
+            document.getElementById('editDraftDescription').value = s.description || '';
+            document.getElementById('editDraftPriority').value = s.priority || 'MEDIUM';
+            modal.style.display = '';
+        });
+    },
+
+    closeEditDraftModal() {
+        const modal = document.getElementById('editDraftModal');
+        if (modal) modal.style.display = 'none';
+    },
+
+    async saveEditDraft() {
+        const id = document.getElementById('editDraftId').value;
+        if (!id) return;
+        const data = await this.api('/suggestions/' + id + '/draft', {
+            method: 'PATCH',
+            body: JSON.stringify({
+                title: document.getElementById('editDraftTitle').value,
+                description: document.getElementById('editDraftDescription').value,
+                priority: document.getElementById('editDraftPriority').value
+            })
+        });
+        if (data.error) {
+            this.showToast(data.error);
+            return;
+        }
+        this.closeEditDraftModal();
+        this.showToast('Draft updated.');
+        this.loadMyDrafts();
+    },
+
+    async submitDraftConfirm(id) {
+        if (!confirm('Submit this draft? It will be sent for review.')) return;
+        const data = await this.api('/suggestions/' + id + '/submit', { method: 'POST' });
+        if (data.error) {
+            this.showToast(data.error);
+            return;
+        }
+        this.showToast('Suggestion submitted.');
+        this.showAllSuggestions();
+        this.navigate('detail', data.id || id);
     },
 
     // --- AI Recommendations ---

@@ -3,6 +3,7 @@ package com.sitemanager.controller;
 import com.sitemanager.dto.ClarificationRequest;
 import com.sitemanager.dto.MessageRequest;
 import com.sitemanager.dto.SuggestionRequest;
+import com.sitemanager.dto.UpdateDraftRequest;
 import com.sitemanager.dto.VoteRequest;
 import com.sitemanager.model.PlanTask;
 import com.sitemanager.model.Suggestion;
@@ -45,9 +46,11 @@ public class SuggestionController {
             @RequestParam(required = false) String status,
             @RequestParam(required = false) String sortBy,
             @RequestParam(required = false) String sortDir,
-            @RequestParam(required = false) String priority) {
+            @RequestParam(required = false) String priority,
+            HttpSession session) {
+        String username = (String) session.getAttribute("username");
         if (search == null && status == null && sortBy == null && sortDir == null && priority == null) {
-            return ResponseEntity.ok(suggestionService.getAllSuggestions());
+            return ResponseEntity.ok(suggestionService.getAllSuggestions(username));
         }
         return ResponseEntity.ok(suggestionService.getSuggestions(search, status, sortBy, sortDir, priority));
     }
@@ -86,15 +89,68 @@ public class SuggestionController {
         String authorName = username != null ? username :
                 (request.getAuthorName() != null ? request.getAuthorName() : "Anonymous");
 
+        if (request.isDraft() && username == null) {
+            return ResponseEntity.status(401)
+                    .body(Map.of("error", "You must be logged in to save a draft."));
+        }
+
         Suggestion suggestion = suggestionService.createSuggestion(
                 request.getTitle(),
                 request.getDescription(),
                 userId,
                 authorName,
-                request.getPriority()
+                request.getPriority(),
+                request.isDraft()
         );
 
         return ResponseEntity.ok(suggestion);
+    }
+
+    @GetMapping("/my-drafts")
+    public ResponseEntity<?> getMyDrafts(HttpSession session) {
+        String username = (String) session.getAttribute("username");
+        if (username == null) {
+            return ResponseEntity.status(401).body(Map.of("error", "You must be logged in to view your drafts."));
+        }
+        return ResponseEntity.ok(suggestionService.getMyDrafts(username));
+    }
+
+    @PatchMapping("/{id}/draft")
+    public ResponseEntity<?> updateDraft(@PathVariable Long id,
+                                         @Valid @RequestBody UpdateDraftRequest request,
+                                         HttpSession session) {
+        String username = (String) session.getAttribute("username");
+        if (username == null) {
+            return ResponseEntity.status(401).body(Map.of("error", "You must be logged in to update a draft."));
+        }
+        try {
+            Suggestion updated = suggestionService.updateDraft(id, request, username);
+            return ResponseEntity.ok(updated);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.notFound().build();
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(409).body(Map.of("error", e.getMessage()));
+        } catch (org.springframework.web.server.ResponseStatusException e) {
+            return ResponseEntity.status(e.getStatusCode()).body(Map.of("error", e.getReason()));
+        }
+    }
+
+    @PostMapping("/{id}/submit")
+    public ResponseEntity<?> submitDraft(@PathVariable Long id, HttpSession session) {
+        String username = (String) session.getAttribute("username");
+        if (username == null) {
+            return ResponseEntity.status(401).body(Map.of("error", "You must be logged in to submit a draft."));
+        }
+        try {
+            Suggestion submitted = suggestionService.submitDraft(id, username);
+            return ResponseEntity.ok(submitted);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.notFound().build();
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(409).body(Map.of("error", e.getMessage()));
+        } catch (org.springframework.web.server.ResponseStatusException e) {
+            return ResponseEntity.status(e.getStatusCode()).body(Map.of("error", e.getReason()));
+        }
     }
 
     @PostMapping("/{id}/messages")

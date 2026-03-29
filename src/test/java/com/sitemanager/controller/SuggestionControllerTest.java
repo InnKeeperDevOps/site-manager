@@ -2,10 +2,13 @@ package com.sitemanager.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sitemanager.dto.SuggestionRequest;
+import com.sitemanager.dto.UpdateDraftRequest;
 import com.sitemanager.dto.VoteRequest;
 import com.sitemanager.model.SiteSettings;
+import com.sitemanager.model.Suggestion;
 import com.sitemanager.model.User;
 import com.sitemanager.model.UserGroup;
+import com.sitemanager.model.enums.SuggestionStatus;
 import com.sitemanager.model.enums.UserRole;
 import com.sitemanager.repository.*;
 import com.sitemanager.service.SiteSettingsService;
@@ -642,6 +645,183 @@ class SuggestionControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.length()").value(3))
                 .andExpect(jsonPath("$[0].title").value("Suggestion 3"));
+    }
+
+    // --- Draft lifecycle tests ---
+
+    @Test
+    void createDraft_withValidSession_returnsDraftStatus() throws Exception {
+        User user = createApprovedUser("draftuser", true, false, false, false, false);
+        MockHttpSession session = new MockHttpSession();
+        session.setAttribute("username", user.getUsername());
+        session.setAttribute("userId", user.getId());
+        session.setAttribute("role", "USER");
+
+        String json = "{\"title\":\"My draft\",\"description\":\"Work in progress.\",\"isDraft\":true}";
+
+        mockMvc.perform(post("/api/suggestions")
+                        .session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.title").value("My draft"))
+                .andExpect(jsonPath("$.status").value("DRAFT"));
+    }
+
+    @Test
+    void createDraft_withoutSession_returns401() throws Exception {
+        String json = "{\"title\":\"My draft\",\"description\":\"Needs login.\",\"isDraft\":true}";
+
+        mockMvc.perform(post("/api/suggestions")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void updateDraft_byOwner_updatesContentAndReturns200() throws Exception {
+        User owner = createApprovedUser("owner1", true, false, false, false, false);
+        MockHttpSession ownerSession = new MockHttpSession();
+        ownerSession.setAttribute("username", owner.getUsername());
+        ownerSession.setAttribute("userId", owner.getId());
+        ownerSession.setAttribute("role", "USER");
+
+        Suggestion draft = new Suggestion();
+        draft.setTitle("Original title");
+        draft.setDescription("Original description");
+        draft.setAuthorName(owner.getUsername());
+        draft.setAuthorId(owner.getId());
+        draft.setStatus(SuggestionStatus.DRAFT);
+        draft = suggestionRepository.save(draft);
+
+        UpdateDraftRequest req = new UpdateDraftRequest();
+        req.setTitle("Updated title");
+        req.setDescription("Updated description");
+
+        mockMvc.perform(patch("/api/suggestions/" + draft.getId() + "/draft")
+                        .session(ownerSession)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.title").value("Updated title"))
+                .andExpect(jsonPath("$.description").value("Updated description"));
+    }
+
+    @Test
+    void updateDraft_byNonAuthor_returns403() throws Exception {
+        User owner = createApprovedUser("owner2", true, false, false, false, false);
+        User other = createApprovedUser("other2", true, false, false, false, false);
+
+        MockHttpSession otherSession = new MockHttpSession();
+        otherSession.setAttribute("username", other.getUsername());
+        otherSession.setAttribute("userId", other.getId());
+        otherSession.setAttribute("role", "USER");
+
+        Suggestion draft = new Suggestion();
+        draft.setTitle("Owner's draft");
+        draft.setDescription("Private draft");
+        draft.setAuthorName(owner.getUsername());
+        draft.setAuthorId(owner.getId());
+        draft.setStatus(SuggestionStatus.DRAFT);
+        draft = suggestionRepository.save(draft);
+
+        UpdateDraftRequest req = new UpdateDraftRequest();
+        req.setTitle("Hijacked title");
+        req.setDescription("Unauthorized edit");
+
+        mockMvc.perform(patch("/api/suggestions/" + draft.getId() + "/draft")
+                        .session(otherSession)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void submitDraft_byOwner_transitionsStatusAndReturns200() throws Exception {
+        User owner = createApprovedUser("submitter1", true, false, false, false, false);
+        MockHttpSession ownerSession = new MockHttpSession();
+        ownerSession.setAttribute("username", owner.getUsername());
+        ownerSession.setAttribute("userId", owner.getId());
+        ownerSession.setAttribute("role", "USER");
+
+        Suggestion draft = new Suggestion();
+        draft.setTitle("Draft to submit");
+        draft.setDescription("Ready to be submitted");
+        draft.setAuthorName(owner.getUsername());
+        draft.setAuthorId(owner.getId());
+        draft.setStatus(SuggestionStatus.DRAFT);
+        draft = suggestionRepository.save(draft);
+
+        mockMvc.perform(post("/api/suggestions/" + draft.getId() + "/submit")
+                        .session(ownerSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value(org.hamcrest.Matchers.not("DRAFT")));
+    }
+
+    @Test
+    void getMyDrafts_returnsOnlyCurrentUsersDrafts() throws Exception {
+        User alice = createApprovedUser("alice_list", true, false, false, false, false);
+        User bob = createApprovedUser("bob_list", true, false, false, false, false);
+
+        MockHttpSession aliceSession = new MockHttpSession();
+        aliceSession.setAttribute("username", alice.getUsername());
+        aliceSession.setAttribute("userId", alice.getId());
+        aliceSession.setAttribute("role", "USER");
+
+        Suggestion aliceDraft = new Suggestion();
+        aliceDraft.setTitle("Alice's draft");
+        aliceDraft.setDescription("Alice draft desc");
+        aliceDraft.setAuthorName(alice.getUsername());
+        aliceDraft.setAuthorId(alice.getId());
+        aliceDraft.setStatus(SuggestionStatus.DRAFT);
+        suggestionRepository.save(aliceDraft);
+
+        Suggestion bobDraft = new Suggestion();
+        bobDraft.setTitle("Bob's draft");
+        bobDraft.setDescription("Bob draft desc");
+        bobDraft.setAuthorName(bob.getUsername());
+        bobDraft.setAuthorId(bob.getId());
+        bobDraft.setStatus(SuggestionStatus.DRAFT);
+        suggestionRepository.save(bobDraft);
+
+        mockMvc.perform(get("/api/suggestions/my-drafts").session(aliceSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].title").value("Alice's draft"));
+    }
+
+    @Test
+    void listSuggestions_excludesOtherUsersDrafts_whenAuthenticated() throws Exception {
+        User alice = createApprovedUser("alice_filter", true, false, false, false, false);
+        User bob = createApprovedUser("bob_filter", true, false, false, false, false);
+
+        MockHttpSession aliceSession = new MockHttpSession();
+        aliceSession.setAttribute("username", alice.getUsername());
+        aliceSession.setAttribute("userId", alice.getId());
+        aliceSession.setAttribute("role", "USER");
+
+        // Bob saves a draft — Alice should NOT see it in the main listing
+        Suggestion bobDraft = new Suggestion();
+        bobDraft.setTitle("Bob's private draft");
+        bobDraft.setDescription("Not visible to alice");
+        bobDraft.setAuthorName(bob.getUsername());
+        bobDraft.setAuthorId(bob.getId());
+        bobDraft.setStatus(SuggestionStatus.DRAFT);
+        suggestionRepository.save(bobDraft);
+
+        // A non-draft suggestion — Alice should see it
+        Suggestion published = new Suggestion();
+        published.setTitle("Published suggestion");
+        published.setDescription("Visible to all");
+        published.setAuthorName(bob.getUsername());
+        published.setAuthorId(bob.getId());
+        published.setStatus(SuggestionStatus.DISCUSSING);
+        suggestionRepository.save(published);
+
+        mockMvc.perform(get("/api/suggestions").session(aliceSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].title").value("Published suggestion"));
     }
 
     // --- helpers ---
