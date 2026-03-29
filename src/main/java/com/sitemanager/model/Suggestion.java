@@ -9,7 +9,9 @@ import jakarta.persistence.*;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Entity
 @Table(name = "suggestions")
@@ -101,6 +103,9 @@ public class Suggestion {
 
     @Column(columnDefinition = "TEXT")
     private String ownerLockedPlanSections;
+
+    @Column(columnDefinition = "TEXT")
+    private String expertApprovalTracker;
 
     public Suggestion() {}
 
@@ -197,6 +202,51 @@ public class Suggestion {
             this.ownerLockedPlanSections = MAPPER.writeValueAsString(sections);
         } catch (JsonProcessingException e) {
             this.ownerLockedPlanSections = null;
+        }
+    }
+
+    // --- Expert Approval Tracker ---
+
+    public static class ExpertApprovalEntry {
+        private String status;
+        private int round;
+
+        public ExpertApprovalEntry() {}
+
+        public ExpertApprovalEntry(String status, int round) {
+            this.status = status;
+            this.round = round;
+        }
+
+        public String getStatus() { return status; }
+        public void setStatus(String status) { this.status = status; }
+        public int getRound() { return round; }
+        public void setRound(int round) { this.round = round; }
+    }
+
+    public String getExpertApprovalTracker() { return expertApprovalTracker; }
+    public void setExpertApprovalTracker(String expertApprovalTracker) { this.expertApprovalTracker = expertApprovalTracker; }
+
+    public Map<String, ExpertApprovalEntry> getExpertApprovalMap() {
+        if (expertApprovalTracker == null || expertApprovalTracker.isBlank()) {
+            return new HashMap<>();
+        }
+        try {
+            return MAPPER.readValue(expertApprovalTracker, new TypeReference<Map<String, ExpertApprovalEntry>>() {});
+        } catch (JsonProcessingException e) {
+            return new HashMap<>();
+        }
+    }
+
+    public void setExpertApprovalMap(Map<String, ExpertApprovalEntry> map) {
+        if (map == null || map.isEmpty()) {
+            this.expertApprovalTracker = null;
+            return;
+        }
+        try {
+            this.expertApprovalTracker = MAPPER.writeValueAsString(map);
+        } catch (JsonProcessingException e) {
+            this.expertApprovalTracker = null;
         }
     }
 
