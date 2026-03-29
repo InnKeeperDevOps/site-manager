@@ -56,6 +56,7 @@ public class SuggestionService {
     private static final int MAX_TOTAL_EXPERT_REVIEW_ROUNDS = 3;
     private static final int MIN_EXPERT_ANALYSIS_LENGTH = 50;
     private static final int MAX_EXPERT_RETRIES = 2;
+    private static final int MIN_APPROVALS_FOR_EARLY_EXIT = 3;
     private final ConcurrentHashMap<String, Integer> expertRetryCount = new ConcurrentHashMap<>();
     private final ObjectMapper objectMapper = new ObjectMapper()
             .registerModule(new JavaTimeModule())
@@ -626,6 +627,32 @@ public class SuggestionService {
             return;
         }
 
+        // Early exit: if enough consecutive experts have approved without any plan
+        // changes, the plan is considered approved by the panel — skip remaining experts.
+        if (step >= MIN_APPROVALS_FOR_EARLY_EXIT && !Boolean.TRUE.equals(suggestion.getExpertReviewPlanChanged())
+                && hasConsecutiveApprovals(suggestion, step)) {
+            int skipped = experts.length - step;
+            log.info("Suggestion {} approved by {} consecutive experts with no plan changes — " +
+                    "skipping remaining {} experts", suggestionId, step, skipped);
+
+            addMessage(suggestionId, SenderType.SYSTEM, "System",
+                    "The plan has been approved by " + step + " consecutive experts with no changes needed. " +
+                    "Skipping the remaining " + skipped + " reviews.");
+
+            suggestion.setStatus(SuggestionStatus.PLANNED);
+            suggestion.setExpertReviewStep(null);
+            suggestion.setExpertReviewRound(null);
+            suggestion.setExpertReviewPlanChanged(null);
+            suggestion.setTotalExpertReviewRounds(null);
+            suggestion.setExpertReviewChangedDomains(null);
+            suggestion.setCurrentPhase("Plan ready — waiting for approval");
+            suggestionRepository.save(suggestion);
+            broadcastUpdate(suggestion);
+            broadcastExpertReviewStatus(suggestionId);
+            notifyAdminsApprovalNeeded(suggestion);
+            return;
+        }
+
         // Determine which batch this step belongs to and run the whole batch in parallel
         int[] batchInfo = ExpertRole.batchForStep(step);
         if (batchInfo == null) {
@@ -1089,6 +1116,29 @@ public class SuggestionService {
         ).thenAccept(response -> {
             handleExpertReviewResponse(suggestionId, response, expert, reviewSessionId);
         });
+    }
+
+    /**
+     * Check whether all expert notes so far are pure approvals (no "ACCEPTED" changes,
+     * no "not applied" flags). Returns true only when every recorded note is an approval.
+     */
+    private boolean hasConsecutiveApprovals(Suggestion suggestion, int completedSteps) {
+        String notes = suggestion.getExpertReviewNotes();
+        if (notes == null || notes.isBlank()) return false;
+
+        String[] entries = notes.split("\n\n");
+        int approvalCount = 0;
+        for (String entry : entries) {
+            entry = entry.trim();
+            if (!entry.startsWith("**")) continue;
+            String lower = entry.toLowerCase();
+            if (lower.contains("changes") || lower.contains("proposed") || lower.contains("accepted")
+                    || lower.contains("not applied")) {
+                return false;
+            }
+            approvalCount++;
+        }
+        return approvalCount >= completedSteps;
     }
 
     private void advanceExpertStep(Suggestion suggestion) {
