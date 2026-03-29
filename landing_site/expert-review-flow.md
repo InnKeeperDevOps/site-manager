@@ -22,7 +22,8 @@ stateDiagram-v2
     PLANNED --> APPROVED : Admin approves
     PLANNED --> DENIED : Admin rejects
 
-    APPROVED --> IN_PROGRESS : Execution starts
+    APPROVED --> APPROVED : Queued (at capacity)
+    APPROVED --> IN_PROGRESS : Slot available
 
     IN_PROGRESS --> TESTING : Tasks complete
     TESTING --> DEV_COMPLETE : Tests pass
@@ -394,3 +395,42 @@ flowchart LR
 ### Round-Aware Reviewer Behavior
 
 In re-review rounds (`round > 1`), the reviewer's acceptance bar is raised: only changes fixing **critical regressions** introduced by recent plan updates are approved. All other changes are rejected to ensure convergence.
+
+---
+
+## Suggestion Execution Concurrency
+
+After admin approval, suggestion execution is gated by a configurable concurrency limit (`maxConcurrentSuggestions`, default **1**). This ensures only N suggestions run tasks at a time.
+
+```mermaid
+flowchart TD
+    A[Admin approves suggestion] --> B[approveSuggestion\nSet status = APPROVED]
+    B --> C{Active suggestions\n< maxConcurrentSuggestions?}
+
+    C -- Yes --> D[Set status = IN_PROGRESS\nClone repo, create branch\nStart executing tasks]
+
+    C -- No --> E[Stay APPROVED\nPhase: Queued — waiting for a slot]
+
+    D --> F[Tasks execute sequentially...]
+    F --> G[Suggestion exits active pipeline\nDEV_COMPLETE / DENIED / etc.]
+
+    G --> H[tryStartNextQueuedSuggestion]
+    H --> I{Any APPROVED\nsuggestions queued?}
+    I -- Yes --> J[Pick oldest approved suggestion]
+    J --> C
+    I -- No --> K[Nothing to start]
+
+    E -.->|Slot freed later| H
+```
+
+### How it works
+
+- **Active suggestions** are counted as those with status `IN_PROGRESS` or `TESTING`
+- When a suggestion is approved, the system checks if the active count is below the limit
+- If at capacity, the suggestion stays `APPROVED` with a "queued" message and phase
+- When any suggestion exits the active pipeline (dev complete, denied, failed), `tryStartNextQueuedSuggestion()` picks the oldest queued `APPROVED` suggestion and starts it
+- On startup, `IN_PROGRESS`/`TESTING` suggestions resume first, then `APPROVED` suggestions are started respecting the limit
+
+### Configuration
+
+The limit is configurable in the **Settings** page under **Max Concurrent Suggestions** (default: 1). It is stored in `site_settings.max_concurrent_suggestions`.
