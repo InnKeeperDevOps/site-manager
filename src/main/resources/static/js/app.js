@@ -144,7 +144,7 @@ const app = {
             if (!state || !state.status) return;
             const btn = document.getElementById('project-def-btn');
             if (state.status === 'COMPLETED' || state.status === 'PR_OPEN') {
-                if (btn) btn.textContent = 'Update Definition';
+                if (btn) btn.textContent = 'View Definition';
             } else if (['ACTIVE', 'GENERATING', 'SAVING'].includes(state.status)) {
                 if (btn) btn.textContent = state.isEdit ? 'Update Definition' : 'Project Definition';
                 this.showProjectDefinitionModal(state);
@@ -166,9 +166,13 @@ const app = {
                 existingState = await res.json();
             }
 
-            const isTerminal = existingState && ['COMPLETED', 'PR_OPEN', 'FAILED'].includes(existingState.status);
+            const isComplete = existingState && ['COMPLETED', 'PR_OPEN'].includes(existingState.status);
+            const shouldStartNew = needsNewSession || (existingState && existingState.status === 'FAILED');
 
-            if (needsNewSession || isTerminal) {
+            if (isComplete) {
+                // Show existing completion view with Download/Import buttons
+                this.showProjectDefinitionModal(existingState);
+            } else if (shouldStartNew) {
                 const startRes = await fetch('/api/project-definition/start', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
                 if (!startRes.ok) {
                     const err = await startRes.json().catch(() => ({}));
@@ -184,6 +188,25 @@ const app = {
             } else if (existingState) {
                 this.showProjectDefinitionModal(existingState);
             }
+        } catch (e) {
+            this.showToast('Could not connect to the server.');
+        }
+    },
+
+    async startNewProjectDefinition() {
+        try {
+            const startRes = await fetch('/api/project-definition/start', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+            if (!startRes.ok) {
+                const err = await startRes.json().catch(() => ({}));
+                if (startRes.status === 409) {
+                    this.showToast('A session is already in progress.');
+                    return;
+                }
+                this.showToast(err.error || 'Could not start session.');
+                return;
+            }
+            const state = await startRes.json();
+            this.showProjectDefinitionModal(state);
         } catch (e) {
             this.showToast('Could not connect to the server.');
         }
