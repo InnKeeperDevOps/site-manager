@@ -48,6 +48,9 @@ class ProjectDefinitionServiceTest {
     /** Service subclass that stubs out git process execution. */
     private ProjectDefinitionService service;
 
+    @TempDir
+    Path tempRepoDir;
+
     private static final Long SESSION_ID = 1L;
     private static final String REPO_URL = "https://github.com/owner/repo";
     private static final String TOKEN = "ghp_test";
@@ -64,7 +67,7 @@ class ProjectDefinitionServiceTest {
 
         when(userRepository.findByRole(any())).thenReturn(List.of());
         when(claudeService.generateSessionId()).thenReturn("app-session-uuid");
-        when(claudeService.getMainRepoDir()).thenReturn("/workspace/main-repo");
+        when(claudeService.getMainRepoDir()).thenReturn(tempRepoDir.toString());
 
         // Use a spy/subclass to avoid real git ProcessBuilder calls
         service = new ProjectDefinitionService(
@@ -177,6 +180,36 @@ class ProjectDefinitionServiceTest {
         when(sessionRepository.findFirstByStatusIn(anyList())).thenReturn(Optional.of(existing));
 
         assertThrows(IllegalStateException.class, () -> service.startSession());
+    }
+
+    @Test
+    void startSession_allowsNewSession_whenPreviousSessionIsCompleted() {
+        when(sessionRepository.findFirstByStatusIn(anyList())).thenReturn(Optional.empty());
+
+        ProjectDefinitionSession saved = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        saved.setClaudeSessionId("app-session-uuid");
+        saved.setConversationHistory("[]");
+        when(sessionRepository.save(any())).thenReturn(saved);
+
+        when(claudeService.continueConversation(any(), any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(questionJson(1)));
+
+        ProjectDefinitionStateResponse resp = service.startSession();
+
+        assertNotNull(resp);
+        assertEquals(ProjectDefinitionStatus.ACTIVE, resp.getStatus());
+    }
+
+    @Test
+    void nonTerminalStatuses_doesNotIncludePrOpen() {
+        assertFalse(ProjectDefinitionService.NON_TERMINAL_STATUSES.contains(ProjectDefinitionStatus.PR_OPEN),
+                "PR_OPEN should not block new session creation");
+    }
+
+    @Test
+    void nonTerminalStatuses_doesNotIncludeCompleted() {
+        assertFalse(ProjectDefinitionService.NON_TERMINAL_STATUSES.contains(ProjectDefinitionStatus.COMPLETED),
+                "COMPLETED should not block new session creation");
     }
 
     // ─── submitAnswer ────────────────────────────────────────────────────────────
@@ -788,6 +821,7 @@ class ProjectDefinitionServiceTest {
     @Test
     void getState_returnsStateResponse_whenSessionExists() {
         ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        session.setConversationHistory("[]");
         when(sessionRepository.findTopByOrderByCreatedAtDesc()).thenReturn(Optional.of(session));
 
         ProjectDefinitionStateResponse resp = service.getState();
@@ -802,6 +836,35 @@ class ProjectDefinitionServiceTest {
         when(sessionRepository.findTopByOrderByCreatedAtDesc()).thenReturn(Optional.empty());
 
         assertNull(service.getState());
+    }
+
+    @Test
+    void getState_returnsCurrentQuestion_forActiveSessionWithHistory() {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        String history = "[{\"role\":\"assistant\",\"content\":\"{\\\"type\\\":\\\"question\\\",\\\"questionType\\\":\\\"open\\\",\\\"question\\\":\\\"What is the project about?\\\",\\\"options\\\":[],\\\"progress\\\":10}\"}]";
+        session.setConversationHistory(history);
+        when(sessionRepository.findTopByOrderByCreatedAtDesc()).thenReturn(Optional.of(session));
+
+        ProjectDefinitionStateResponse resp = service.getState();
+
+        assertNotNull(resp);
+        assertEquals(ProjectDefinitionStatus.ACTIVE, resp.getStatus());
+        assertEquals("What is the project about?", resp.getCurrentQuestion());
+        assertEquals("open", resp.getQuestionType());
+        assertEquals(10, resp.getProgressPercent());
+    }
+
+    @Test
+    void getState_returnsBaseResponse_forCompletedSession() {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.COMPLETED);
+        session.setGeneratedContent("# Project\nContent");
+        when(sessionRepository.findTopByOrderByCreatedAtDesc()).thenReturn(Optional.of(session));
+
+        ProjectDefinitionStateResponse resp = service.getState();
+
+        assertNotNull(resp);
+        assertEquals(ProjectDefinitionStatus.COMPLETED, resp.getStatus());
+        assertNull(resp.getCurrentQuestion());
     }
 
     // ─── resetSession ─────────────────────────────────────────────────────────────
@@ -1061,22 +1124,30 @@ class ProjectDefinitionServiceTest {
     void buildInterviewPrompt_withNullExistingDefinition_returnsConversationalNewPrompt() {
         String prompt = service.buildInterviewPrompt(null);
 
-        // Should instruct conversational interview style
         assertTrue(prompt.contains("conversational"), "Prompt should mention conversational style");
-        // Should not contain rigid numbered question list
-        assertFalse(prompt.contains("question 1") || prompt.contains("9 questions"),
-                "New-mode prompt should not impose a rigid question list");
-        // Should include JSON format instructions
         assertTrue(prompt.contains("\"type\":\"question\""), "Prompt should include JSON question format");
         assertTrue(prompt.contains("\"type\":\"complete\""), "Prompt should include JSON complete format");
-        // Should instruct Claude to avoid technical jargon
-        assertTrue(prompt.toLowerCase().contains("technical jargon") || prompt.toLowerCase().contains("plain, everyday language"),
+        assertTrue(prompt.toLowerCase().contains("plain, everyday language"),
                 "Prompt must instruct Claude to use plain language");
-        // Should cover key topic areas
-        assertTrue(prompt.contains("what the project does") || prompt.contains("what they are building"),
+        assertTrue(prompt.contains("What is the project about") || prompt.contains("what the project"),
                 "Prompt should ask about what project does");
-        // Progress field should be described
         assertTrue(prompt.contains("progress"), "Prompt should mention progress field");
+    }
+
+    @Test
+    void buildInterviewPrompt_newMode_hasFiveStartingQuestions() {
+        String prompt = service.buildInterviewPrompt(null);
+
+        assertTrue(prompt.contains("1."), "Should have numbered starting question 1");
+        assertTrue(prompt.contains("2."), "Should have numbered starting question 2");
+        assertTrue(prompt.contains("3."), "Should have numbered starting question 3");
+        assertTrue(prompt.contains("4."), "Should have numbered starting question 4");
+        assertTrue(prompt.contains("5."), "Should have numbered starting question 5");
+        assertTrue(prompt.toLowerCase().contains("users") || prompt.toLowerCase().contains("audience"),
+                "Should ask about target users");
+        assertTrue(prompt.toLowerCase().contains("success"), "Should ask about what success looks like");
+        assertTrue(prompt.toLowerCase().contains("constraints") || prompt.toLowerCase().contains("limitations"),
+                "Should ask about constraints or limitations");
     }
 
     @Test
@@ -1084,19 +1155,14 @@ class ProjectDefinitionServiceTest {
         String existingContent = "# Project Definition\n## Overview\nThis is a task manager app.";
         String prompt = service.buildInterviewPrompt(existingContent);
 
-        // Should include the existing definition content
         assertTrue(prompt.contains(existingContent), "Prompt should embed the existing definition");
-        // Should instruct Claude to summarize and ask what to update
         assertTrue(prompt.contains("summar"), "Prompt should ask Claude to summarize the existing definition");
-        assertTrue(prompt.contains("update") || prompt.contains("improve"),
-                "Prompt should ask what user wants to update or improve");
-        // Should include JSON format instructions
+        assertTrue(prompt.toLowerCase().contains("changed"),
+                "Prompt should ask if anything has changed");
         assertTrue(prompt.contains("\"type\":\"question\""), "Prompt should include JSON question format");
         assertTrue(prompt.contains("\"type\":\"complete\""), "Prompt should include JSON complete format");
-        // Should instruct Claude to avoid technical jargon
-        assertTrue(prompt.toLowerCase().contains("technical jargon") || prompt.toLowerCase().contains("plain, everyday language"),
+        assertTrue(prompt.toLowerCase().contains("plain, everyday language"),
                 "Prompt must instruct Claude to use plain language");
-        // Progress field should be described
         assertTrue(prompt.contains("progress"), "Prompt should mention progress field");
     }
 
@@ -1104,11 +1170,10 @@ class ProjectDefinitionServiceTest {
     void buildInterviewPrompt_newMode_promptIncludesKeyTopicAreas() {
         String prompt = service.buildInterviewPrompt(null);
 
-        // All key areas should be covered in the topic list
-        assertTrue(prompt.contains("who will use") || prompt.contains("Who will use"),
+        assertTrue(prompt.toLowerCase().contains("users") || prompt.toLowerCase().contains("audience"),
                 "Should ask about target users");
-        assertTrue(prompt.contains("goals") || prompt.contains("motivation"),
-                "Should ask about goals or motivation");
+        assertTrue(prompt.toLowerCase().contains("constraints") || prompt.toLowerCase().contains("limitations"),
+                "Should ask about constraints or limitations");
         assertTrue(prompt.contains("success"), "Should ask about what success looks like");
     }
 
@@ -1117,7 +1182,6 @@ class ProjectDefinitionServiceTest {
         String definition = "# My App\nIt does stuff.";
         String prompt = service.buildInterviewPrompt(definition);
 
-        // Should guide the user toward refining vague areas
         assertTrue(prompt.contains("incomplete") || prompt.contains("vague") || prompt.contains("lack detail"),
                 "Edit prompt should guide toward refining incomplete or vague content");
     }
@@ -1142,7 +1206,6 @@ class ProjectDefinitionServiceTest {
     void buildInterviewPrompt_newMode_instructsToStartAsking() {
         String prompt = service.buildInterviewPrompt(null);
 
-        // Should tell Claude to start asking right away
         assertTrue(prompt.toLowerCase().contains("start by asking"),
                 "New-mode prompt should instruct Claude to start asking");
     }
@@ -1151,9 +1214,16 @@ class ProjectDefinitionServiceTest {
     void buildInterviewPrompt_editMode_instructsToStartWithSummary() {
         String prompt = service.buildInterviewPrompt("# Existing\nContent.");
 
-        // Should tell Claude to start with a summary
         assertTrue(prompt.toLowerCase().contains("start by summar"),
                 "Edit-mode prompt should instruct Claude to start by summarizing");
+    }
+
+    @Test
+    void buildInterviewPrompt_editMode_asksIfAnythingHasChanged() {
+        String prompt = service.buildInterviewPrompt("# Existing\nContent.");
+
+        assertTrue(prompt.toLowerCase().contains("has anything changed"),
+                "Edit-mode prompt should ask if anything has changed");
     }
 
     // ─── Test helper methods ──────────────────────────────────────────────────────
