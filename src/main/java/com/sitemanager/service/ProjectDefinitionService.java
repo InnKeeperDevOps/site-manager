@@ -34,6 +34,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Manual QA smoke-test checklist:
@@ -112,21 +113,38 @@ public class ProjectDefinitionService {
         final String claudeSessionId = session.getClaudeSessionId();
         final String prompt = buildInterviewPrompt(existingDefinition);
 
-        claudeService.continueConversation(claudeSessionId, prompt, null,
-                claudeService.getMainRepoDir(), null)
-                .thenAccept(response -> handleClaudeResponse(sessionId, response))
-                .exceptionally(ex -> {
-                    log.error("Async Claude call failed for session {}: {}", sessionId, ex.getMessage(), ex);
-                    markFailed(sessionId, "Something went wrong while starting the interview");
-                    return null;
-                });
+        try {
+            String response = claudeService.continueConversation(claudeSessionId, prompt, null,
+                    claudeService.getMainRepoDir(), null)
+                    .get(5, TimeUnit.MINUTES);
 
-        return toStateResponse(session);
+            String json = extractJsonBlock(response);
+            JsonNode root = null;
+            if (json != null) {
+                try {
+                    root = objectMapper.readTree(json);
+                } catch (Exception parseEx) {
+                    log.debug("Could not parse Claude response as JSON for session {}: {}",
+                            sessionId, parseEx.getMessage());
+                }
+            }
+
+            session.setConversationHistory(appendMessage(session.getConversationHistory(), "assistant", response));
+            session = sessionRepository.save(session);
+            broadcastState(session, root);
+
+            return toStateResponseWithQuestion(session, root);
+        } catch (Exception e) {
+            log.error("Synchronous Claude call failed for session {}: {}", sessionId, e.getMessage(), e);
+            markFailed(sessionId, "Something went wrong while starting the interview");
+            throw new RuntimeException("Failed to start interview session", e);
+        }
     }
 
     /**
      * Submit an answer to the current interview question.
-     * The next question (or completion notice) arrives via WebSocket broadcast.
+     * Calls Claude synchronously and returns the next question (or GENERATING state)
+     * directly in the HTTP response. WebSocket broadcast is also sent as a secondary update.
      */
     public ProjectDefinitionStateResponse submitAnswer(Long sessionId, String answer) {
         ProjectDefinitionSession session = sessionRepository.findById(sessionId)
@@ -137,25 +155,48 @@ public class ProjectDefinitionService {
         }
 
         session.setConversationHistory(appendMessage(session.getConversationHistory(), "user", answer));
-        sessionRepository.save(session);
+        session = sessionRepository.save(session);
 
-        final Long sid = session.getId();
+        try {
+            String response = claudeService.continueConversation(session.getClaudeSessionId(), answer,
+                    session.getConversationHistory(), claudeService.getMainRepoDir(), null)
+                    .get(5, TimeUnit.MINUTES);
 
-        claudeService.continueConversation(session.getClaudeSessionId(), answer,
-                session.getConversationHistory(), claudeService.getMainRepoDir(), null)
-                .thenAccept(response -> handleClaudeResponse(sid, response))
-                .exceptionally(ex -> {
-                    log.error("Async Claude call failed for session {}: {}", sid, ex.getMessage(), ex);
-                    markFailed(sid, "Something went wrong while processing your answer");
-                    return null;
-                });
+            String json = extractJsonBlock(response);
+            JsonNode root = null;
+            if (json != null) {
+                try {
+                    root = objectMapper.readTree(json);
+                } catch (Exception parseEx) {
+                    log.debug("Could not parse Claude response as JSON for session {}: {}",
+                            sessionId, parseEx.getMessage());
+                }
+            }
 
-        return toStateResponse(session);
+            String type = root != null ? root.path("type").asText("question") : "question";
+            session.setConversationHistory(appendMessage(session.getConversationHistory(), "assistant", response));
+
+            if ("complete".equals(type)) {
+                session.setStatus(ProjectDefinitionStatus.GENERATING);
+                session = sessionRepository.save(session);
+                broadcastState(session, root);
+                generateAndSave(session);
+                return toStateResponse(session);
+            } else {
+                session = sessionRepository.save(session);
+                broadcastState(session, root);
+                return toStateResponseWithQuestion(session, root);
+            }
+        } catch (Exception e) {
+            log.error("Synchronous Claude call failed for session {}: {}", sessionId, e.getMessage(), e);
+            markFailed(sessionId, "Something went wrong while processing your answer");
+            throw new RuntimeException("Failed to process answer", e);
+        }
     }
 
     /**
-     * Called from the async Claude callback after each conversation turn.
-     * Parses the JSON response and transitions the session state accordingly.
+     * Parses a raw Claude response and transitions the session state accordingly.
+     * Used by WebSocket-path callers; submitAnswer now handles this inline.
      */
     void handleClaudeResponse(Long sessionId, String rawResponse) {
         ProjectDefinitionSession session = sessionRepository.findById(sessionId).orElse(null);
@@ -431,6 +472,28 @@ public class ProjectDefinitionService {
         resp.setPrUrl(session.getPrUrl());
         resp.setErrorMessage(session.getErrorMessage());
         resp.setIsEdit(session.isHasExistingDefinition());
+        return resp;
+    }
+
+    ProjectDefinitionStateResponse toStateResponseWithQuestion(ProjectDefinitionSession session, JsonNode questionNode) {
+        ProjectDefinitionStateResponse resp = toStateResponse(session);
+        if (questionNode != null) {
+            String type = questionNode.path("type").asText("question");
+            if (!"complete".equals(type)) {
+                resp.setCurrentQuestion(questionNode.path("question").asText(""));
+                resp.setQuestionType(questionNode.path("questionType").asText("open"));
+                resp.setProgressPercent(questionNode.path("progress").asInt(0));
+
+                JsonNode optionsNode = questionNode.path("options");
+                List<String> options = new ArrayList<>();
+                if (optionsNode.isArray()) {
+                    for (JsonNode opt : optionsNode) {
+                        options.add(opt.asText());
+                    }
+                }
+                resp.setOptions(options);
+            }
+        }
         return resp;
     }
 
