@@ -17,11 +17,13 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpSession;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 
 import java.util.Map;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -81,6 +83,29 @@ class RecommendationControllerTest {
         return session;
     }
 
+    private String startTask(MockHttpSession session) throws Exception {
+        MvcResult result = mockMvc.perform(post("/api/recommendations")
+                        .session(session)
+                        .contentType(MediaType.APPLICATION_JSON))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.taskId").exists())
+                .andReturn();
+        return objectMapper.readTree(result.getResponse().getContentAsString()).get("taskId").asText();
+    }
+
+    private String pollUntilDone(String taskId, int maxAttempts) throws Exception {
+        for (int i = 0; i < maxAttempts; i++) {
+            Thread.sleep(200);
+            MvcResult poll = mockMvc.perform(get("/api/recommendations/status/" + taskId))
+                    .andExpect(status().isOk())
+                    .andReturn();
+            String body = poll.getResponse().getContentAsString();
+            String status = objectMapper.readTree(body).get("status").asText();
+            if (!"pending".equals(status)) return body;
+        }
+        throw new AssertionError("Task did not complete within " + maxAttempts + " polls");
+    }
+
     @Test
     void getRecommendations_withoutSession_returns403() throws Exception {
         mockMvc.perform(post("/api/recommendations")
@@ -93,70 +118,79 @@ class RecommendationControllerTest {
     void getRecommendations_asAdmin_returnsRecommendations() throws Exception {
         when(claudeService.getRecommendations(any())).thenReturn(VALID_RESPONSE);
 
-        mockMvc.perform(post("/api/recommendations")
-                        .session(adminSession())
-                        .contentType(MediaType.APPLICATION_JSON))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$").isArray())
-                .andExpect(jsonPath("$.length()").value(5))
-                .andExpect(jsonPath("$[0].title").value("Add email notifications"))
-                .andExpect(jsonPath("$[0].description").value("Notify users when their suggestions are approved."));
+        String taskId = startTask(adminSession());
+        String result = pollUntilDone(taskId, 50);
+
+        var tree = objectMapper.readTree(result);
+        assert "done".equals(tree.get("status").asText());
+        assert tree.get("data").isArray();
+        assert tree.get("data").size() == 5;
+        assert "Add email notifications".equals(tree.get("data").get(0).get("title").asText());
     }
 
     @Test
     void getRecommendations_asRootAdmin_returnsRecommendations() throws Exception {
         when(claudeService.getRecommendations(any())).thenReturn(VALID_RESPONSE);
 
-        mockMvc.perform(post("/api/recommendations")
-                        .session(rootAdminSession())
-                        .contentType(MediaType.APPLICATION_JSON))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$").isArray())
-                .andExpect(jsonPath("$.length()").value(5));
+        String taskId = startTask(rootAdminSession());
+        String result = pollUntilDone(taskId, 50);
+
+        var tree = objectMapper.readTree(result);
+        assert "done".equals(tree.get("status").asText());
+        assert tree.get("data").isArray();
+        assert tree.get("data").size() == 5;
     }
 
     @Test
-    void getRecommendations_onTimeout_returns504() throws Exception {
+    void getRecommendations_onTimeout_returnsError() throws Exception {
         when(claudeService.getRecommendations(any())).thenThrow(new RuntimeException("Claude CLI timed out after 30 minutes"));
 
-        mockMvc.perform(post("/api/recommendations")
-                        .session(adminSession())
-                        .contentType(MediaType.APPLICATION_JSON))
-                .andExpect(status().isGatewayTimeout())
-                .andExpect(jsonPath("$.error").value("The AI took too long to respond. Please try again in a moment."));
+        String taskId = startTask(adminSession());
+        String result = pollUntilDone(taskId, 50);
+
+        var tree = objectMapper.readTree(result);
+        assert "error".equals(tree.get("status").asText());
+        assert tree.get("error").asText().contains("too long");
     }
 
     @Test
-    void getRecommendations_onMalformedResponse_returns500() throws Exception {
+    void getRecommendations_onMalformedResponse_returnsError() throws Exception {
         when(claudeService.getRecommendations(any())).thenReturn("This is not JSON at all");
 
-        mockMvc.perform(post("/api/recommendations")
-                        .session(adminSession())
-                        .contentType(MediaType.APPLICATION_JSON))
-                .andExpect(status().isInternalServerError())
-                .andExpect(jsonPath("$.error").value("The AI returned an unexpected response. Please try again."));
+        String taskId = startTask(adminSession());
+        String result = pollUntilDone(taskId, 50);
+
+        var tree = objectMapper.readTree(result);
+        assert "error".equals(tree.get("status").asText());
+        assert tree.get("error").asText().contains("unexpected response");
     }
 
     @Test
-    void getRecommendations_onEmptyResponse_returns500() throws Exception {
+    void getRecommendations_onEmptyResponse_returnsError() throws Exception {
         when(claudeService.getRecommendations(any())).thenReturn("");
 
-        mockMvc.perform(post("/api/recommendations")
-                        .session(adminSession())
-                        .contentType(MediaType.APPLICATION_JSON))
-                .andExpect(status().isInternalServerError())
-                .andExpect(jsonPath("$.error").exists());
+        String taskId = startTask(adminSession());
+        String result = pollUntilDone(taskId, 50);
+
+        var tree = objectMapper.readTree(result);
+        assert "error".equals(tree.get("status").asText());
     }
 
     @Test
-    void getRecommendations_onUnexpectedException_returns500() throws Exception {
+    void getRecommendations_onUnexpectedException_returnsError() throws Exception {
         when(claudeService.getRecommendations(any())).thenThrow(new RuntimeException("API error: status 503"));
 
-        mockMvc.perform(post("/api/recommendations")
-                        .session(adminSession())
-                        .contentType(MediaType.APPLICATION_JSON))
-                .andExpect(status().isInternalServerError())
-                .andExpect(jsonPath("$.error").exists());
+        String taskId = startTask(adminSession());
+        String result = pollUntilDone(taskId, 50);
+
+        var tree = objectMapper.readTree(result);
+        assert "error".equals(tree.get("status").asText());
+    }
+
+    @Test
+    void getStatus_unknownTaskId_returns404() throws Exception {
+        mockMvc.perform(get("/api/recommendations/status/nonexistent"))
+                .andExpect(status().isNotFound());
     }
 
     @Test
@@ -167,29 +201,26 @@ class RecommendationControllerTest {
 
         when(claudeService.getRecommendations(any())).thenReturn(VALID_RESPONSE);
 
-        mockMvc.perform(post("/api/recommendations")
-                        .session(adminSession())
-                        .contentType(MediaType.APPLICATION_JSON))
-                .andExpect(status().isOk());
+        String taskId = startTask(adminSession());
+        pollUntilDone(taskId, 50);
 
-        // Verify ClaudeService was called (captured indirectly via result)
         org.mockito.Mockito.verify(claudeService).getRecommendations(
                 org.mockito.ArgumentMatchers.contains("My Awesome Site"));
     }
 
     @Test
     void getRecommendations_withPartialValidResponse_returnsValidItems() throws Exception {
-        // Response with only some items having titles — still parses what it can
         String partialResponse = "[{\"title\":\"Valid title\",\"description\":\"Valid desc\"}," +
                 "{\"description\":\"Missing title - should be skipped\"}]";
         when(claudeService.getRecommendations(any())).thenReturn(partialResponse);
 
-        mockMvc.perform(post("/api/recommendations")
-                        .session(adminSession())
-                        .contentType(MediaType.APPLICATION_JSON))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(1))
-                .andExpect(jsonPath("$[0].title").value("Valid title"));
+        String taskId = startTask(adminSession());
+        String result = pollUntilDone(taskId, 50);
+
+        var tree = objectMapper.readTree(result);
+        assert "done".equals(tree.get("status").asText());
+        assert tree.get("data").size() == 1;
+        assert "Valid title".equals(tree.get("data").get(0).get("title").asText());
     }
 
     @Test

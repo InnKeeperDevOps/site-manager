@@ -1803,29 +1803,28 @@ const app = {
         const modal = document.getElementById('recommendationsModal');
         const content = document.getElementById('recommendationsContent');
         modal.style.display = '';
-        content.innerHTML = '<div class="loading" style="padding:2rem;text-align:center">Getting suggestions from AI...</div>';
+        content.innerHTML = '<div class="loading" style="padding:2rem;text-align:center">Getting suggestions from AI...<br><span style="font-size:0.85rem;color:var(--text-muted)">This may take a couple of minutes</span></div>';
 
         try {
-            const res = await fetch('/api/recommendations', {
+            // Start the async task
+            const startRes = await fetch('/api/recommendations', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
             });
 
-            if (res.status === 504) {
+            if (!startRes.ok) {
+                const err = await startRes.json().catch(() => ({}));
                 content.innerHTML = this.renderRecommendationsError(
-                    'The AI took too long to respond. Please try again in a moment.'
+                    (err && err.error) ? err.error : 'Unable to get recommendations right now.'
                 );
                 return;
             }
 
-            const data = await res.json();
+            const { taskId } = await startRes.json();
 
-            if (!res.ok) {
-                content.innerHTML = this.renderRecommendationsError(
-                    (data && data.error) ? data.error : 'Unable to get recommendations right now.'
-                );
-                return;
-            }
+            // Poll for results
+            const data = await this.pollRecommendationTask(taskId, content);
+            if (!data) return; // error already rendered
 
             if (!Array.isArray(data) || data.length === 0) {
                 content.innerHTML = this.renderRecommendationsError(
@@ -1847,6 +1846,40 @@ const app = {
                 'Unable to connect. Please check your connection and try again.'
             );
         }
+    },
+
+    async pollRecommendationTask(taskId, content) {
+        const maxPolls = 120; // 10 minutes max (120 * 5s)
+        for (let i = 0; i < maxPolls; i++) {
+            await new Promise(r => setTimeout(r, 5000));
+
+            // Stop polling if modal was closed
+            const modal = document.getElementById('recommendationsModal');
+            if (modal && modal.style.display === 'none') return null;
+
+            try {
+                const res = await fetch('/api/recommendations/status/' + taskId);
+                if (!res.ok) {
+                    content.innerHTML = this.renderRecommendationsError(
+                        'Lost track of the recommendation task. Please try again.'
+                    );
+                    return null;
+                }
+                const result = await res.json();
+                if (result.status === 'pending') continue;
+                if (result.status === 'error') {
+                    content.innerHTML = this.renderRecommendationsError(result.error);
+                    return null;
+                }
+                return result.data;
+            } catch (e) {
+                // Network blip — keep polling
+            }
+        }
+        content.innerHTML = this.renderRecommendationsError(
+            'The AI is taking unusually long. Please try again.'
+        );
+        return null;
     },
 
     renderRecommendationsError(message) {

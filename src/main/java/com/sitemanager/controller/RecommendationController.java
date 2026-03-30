@@ -19,6 +19,9 @@ import org.springframework.web.bind.annotation.*;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
 @RestController
@@ -32,6 +35,8 @@ public class RecommendationController {
     private final SuggestionRepository suggestionRepository;
     private final ClaudeService claudeService;
     private final ObjectMapper objectMapper;
+    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final Map<String, TaskResult> tasks = new ConcurrentHashMap<>();
 
     public RecommendationController(PermissionService permissionService,
                                     SiteSettingsService settingsService,
@@ -51,43 +56,62 @@ public class RecommendationController {
             return ResponseEntity.status(403).body(Map.of("error", "Admin access required"));
         }
 
+        String taskId = UUID.randomUUID().toString();
+        tasks.put(taskId, new TaskResult("pending", null, null));
+
         SiteSettings settings = settingsService.getSettings();
         List<Suggestion> suggestions = suggestionRepository.findAllByOrderByCreatedAtDesc();
-
         Map<SuggestionStatus, Long> statusCounts = suggestions.stream()
                 .collect(Collectors.groupingBy(Suggestion::getStatus, Collectors.counting()));
+        int total = suggestions.size();
 
-        ensureMainRepoAvailable(settings);
-
-        String projectDefinition = readProjectDefinition();
-        String prompt = buildPrompt(settings, statusCounts, suggestions.size(), projectDefinition);
-
-        try {
-            String rawResponse = claudeService.getRecommendations(prompt);
-            List<Map<String, String>> recommendations = parseRecommendations(rawResponse);
-            return ResponseEntity.ok(recommendations);
-        } catch (IllegalStateException e) {
-            log.warn("[RECOMMENDATIONS] Failed to parse response: {}", e.getMessage());
-            return ResponseEntity.status(500).body(Map.of(
-                    "error", "The AI returned an unexpected response. Please try again."
-            ));
-        } catch (RuntimeException e) {
-            if (e.getMessage() != null && e.getMessage().contains("timed out")) {
-                log.warn("[RECOMMENDATIONS] Request timed out: {}", e.getMessage());
-                return ResponseEntity.status(504).body(Map.of(
-                        "error", "The AI took too long to respond. Please try again in a moment."
-                ));
+        executor.submit(() -> {
+            try {
+                ensureMainRepoAvailable(settings);
+                String projectDefinition = readProjectDefinition();
+                String prompt = buildPrompt(settings, statusCounts, total, projectDefinition);
+                String rawResponse = claudeService.getRecommendations(prompt);
+                List<Map<String, String>> recommendations = parseRecommendations(rawResponse);
+                tasks.put(taskId, new TaskResult("done", recommendations, null));
+            } catch (IllegalStateException e) {
+                log.warn("[RECOMMENDATIONS] Failed to parse response: {}", e.getMessage());
+                tasks.put(taskId, new TaskResult("error", null,
+                        "The AI returned an unexpected response. Please try again."));
+            } catch (RuntimeException e) {
+                if (e.getMessage() != null && e.getMessage().contains("timed out")) {
+                    log.warn("[RECOMMENDATIONS] Request timed out: {}", e.getMessage());
+                    tasks.put(taskId, new TaskResult("error", null,
+                            "The AI took too long to respond. Please try again in a moment."));
+                } else {
+                    log.error("[RECOMMENDATIONS] Unexpected error: {}", e.getMessage(), e);
+                    tasks.put(taskId, new TaskResult("error", null,
+                            "Unable to get recommendations right now. Please try again."));
+                }
+            } catch (Exception e) {
+                log.error("[RECOMMENDATIONS] Unexpected error: {}", e.getMessage(), e);
+                tasks.put(taskId, new TaskResult("error", null,
+                        "Unable to get recommendations right now. Please try again."));
             }
-            log.error("[RECOMMENDATIONS] Unexpected error: {}", e.getMessage(), e);
-            return ResponseEntity.status(500).body(Map.of(
-                    "error", "Unable to get recommendations right now. Please try again."
-            ));
-        } catch (Exception e) {
-            log.error("[RECOMMENDATIONS] Unexpected error: {}", e.getMessage(), e);
-            return ResponseEntity.status(500).body(Map.of(
-                    "error", "Unable to get recommendations right now. Please try again."
-            ));
+        });
+
+        return ResponseEntity.accepted().body(Map.of("taskId", taskId));
+    }
+
+    @GetMapping("/status/{taskId}")
+    public ResponseEntity<?> getStatus(@PathVariable String taskId) {
+        TaskResult result = tasks.get(taskId);
+        if (result == null) {
+            return ResponseEntity.notFound().build();
         }
+        if ("pending".equals(result.status)) {
+            return ResponseEntity.ok(Map.of("status", "pending"));
+        }
+        // Clean up completed task
+        tasks.remove(taskId);
+        if ("error".equals(result.status)) {
+            return ResponseEntity.ok(Map.of("status", "error", "error", result.error));
+        }
+        return ResponseEntity.ok(Map.of("status", "done", "data", result.data));
     }
 
     /**
@@ -208,6 +232,18 @@ public class RecommendationController {
             throw e;
         } catch (Exception e) {
             throw new IllegalStateException("Malformed response from AI: " + e.getMessage(), e);
+        }
+    }
+
+    private static class TaskResult {
+        final String status;
+        final Object data;
+        final String error;
+
+        TaskResult(String status, Object data, String error) {
+            this.status = status;
+            this.data = data;
+            this.error = error;
         }
     }
 }
