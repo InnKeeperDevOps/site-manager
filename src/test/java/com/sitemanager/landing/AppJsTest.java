@@ -11,133 +11,148 @@ import java.nio.file.Paths;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Validates that app.js contains the required dashboard functions and wiring.
+ * Validates that the dashboard and navigation functions exist in the JS modules.
  * Plain file-read checks — no server required.
+ *
+ * After the ES-module refactor the implementation lives in modules/dashboard.js
+ * and modules/navigation.js; app.js is the entry point that imports them all.
  */
 class AppJsTest {
 
-    private static String js;
+    private static String appJs;
+    private static String dashboardJs;
+    private static String navigationJs;
 
     @BeforeAll
-    static void loadFile() throws IOException {
-        Path path = Paths.get("src", "main", "resources", "static", "js", "app.js");
-        assertTrue(Files.exists(path), "src/main/resources/static/js/app.js must exist");
-        js = Files.readString(path);
+    static void loadFiles() throws IOException {
+        Path appPath = Paths.get("src", "main", "resources", "static", "js", "app.js");
+        assertTrue(Files.exists(appPath), "src/main/resources/static/js/app.js must exist");
+        appJs = Files.readString(appPath);
+
+        Path dashboardPath = Paths.get("src", "main", "resources", "static", "js", "modules", "dashboard.js");
+        assertTrue(Files.exists(dashboardPath), "modules/dashboard.js must exist");
+        dashboardJs = Files.readString(dashboardPath);
+
+        Path navigationPath = Paths.get("src", "main", "resources", "static", "js", "modules", "navigation.js");
+        assertTrue(Files.exists(navigationPath), "modules/navigation.js must exist");
+        navigationJs = Files.readString(navigationPath);
     }
 
     @Test
     void navigateSwitchHasDashboardCase() {
-        assertTrue(js.contains("case 'dashboard'"),
-                "navigate() switch must contain a 'dashboard' case");
+        assertTrue(navigationJs.contains("case 'dashboard'"),
+                "navigate() switch in navigation.js must contain a 'dashboard' case");
     }
 
     @Test
     void dashboardCaseCallsLoadDashboardView() {
-        assertTrue(js.contains("loadDashboardView()"),
+        // The entry point imports and exposes loadDashboardView; navigation module calls the callback
+        assertTrue(navigationJs.contains("loadDashboardView") || appJs.contains("loadDashboardView()"),
                 "dashboard case must call loadDashboardView()");
     }
 
     @Test
     void loadDashboardViewFunctionExists() {
-        assertTrue(js.contains("loadDashboardView()") || js.contains("async loadDashboardView()"),
-                "app.js must define loadDashboardView");
+        assertTrue(dashboardJs.contains("loadDashboardView") || appJs.contains("loadDashboardView"),
+                "loadDashboardView must be defined in dashboard.js or app.js");
     }
 
     @Test
     void loadDashboardViewFetchesLeaderboardEndpoint() {
-        assertTrue(js.contains("/api/contributors/leaderboard"),
-                "loadDashboardView must fetch /api/contributors/leaderboard");
+        assertTrue(dashboardJs.contains("/api/contributors/leaderboard"),
+                "loadDashboardView in dashboard.js must fetch /api/contributors/leaderboard");
     }
 
     @Test
     void loadDashboardViewCallsRenderLeaderboard() {
-        assertTrue(js.contains("renderLeaderboard("),
+        assertTrue(dashboardJs.contains("renderLeaderboard("),
                 "loadDashboardView must call renderLeaderboard");
     }
 
     @Test
     void renderLeaderboardFunctionExists() {
-        assertTrue(js.contains("renderLeaderboard(contributors)"),
-                "app.js must define renderLeaderboard(contributors)");
+        assertTrue(dashboardJs.contains("renderLeaderboard(contributors)"),
+                "dashboard.js must define renderLeaderboard(contributors)");
     }
 
     @Test
     void renderLeaderboardUsesMedalEmojis() {
         // Medals can be stored as unicode escapes or literal characters
-        boolean hasMedals = js.contains("uD83E") || js.contains("\uD83E\uDD47")
-                || js.contains("🥇") || js.contains("\\uD83E");
+        boolean hasMedals = dashboardJs.contains("uD83E") || dashboardJs.contains("\uD83E\uDD47")
+                || dashboardJs.contains("🥇") || dashboardJs.contains("\\uD83E");
         assertTrue(hasMedals, "renderLeaderboard must include medal emoji for top-3 ranks");
     }
 
     @Test
     void renderLeaderboardCreatesContributorLinks() {
-        assertTrue(js.contains("contributor-link"),
+        assertTrue(dashboardJs.contains("contributor-link"),
                 "renderLeaderboard must create elements with class 'contributor-link'");
     }
 
     @Test
     void renderLeaderboardStoresAuthorIdOnLink() {
-        assertTrue(js.contains("data-author-id"),
+        assertTrue(dashboardJs.contains("data-author-id"),
                 "renderLeaderboard must store data-author-id on contributor links");
     }
 
     @Test
     void renderLeaderboardUsesEventDelegationForClicks() {
-        assertTrue(js.contains("closest('.contributor-link')"),
+        assertTrue(dashboardJs.contains("closest('.contributor-link')"),
                 "renderLeaderboard must use event delegation with closest('.contributor-link')");
     }
 
     @Test
     void renderLeaderboardFetchesHistoryByAuthorId() {
-        assertTrue(js.contains("/api/contributors/") && js.contains("/history"),
+        assertTrue(dashboardJs.contains("/api/contributors/") && dashboardJs.contains("/history"),
                 "renderLeaderboard click handler must fetch /api/contributors/{authorId}/history");
     }
 
     @Test
     void renderLeaderboardCallsRenderUserHistory() {
-        assertTrue(js.contains("renderUserHistory("),
+        assertTrue(dashboardJs.contains("renderUserHistory("),
                 "renderLeaderboard click handler must call renderUserHistory");
     }
 
     @Test
     void renderUserHistoryFunctionExists() {
-        assertTrue(js.contains("renderUserHistory(username, suggestions)"),
-                "app.js must define renderUserHistory(username, suggestions)");
+        assertTrue(dashboardJs.contains("renderUserHistory(username, suggestions)"),
+                "dashboard.js must define renderUserHistory(username, suggestions)");
     }
 
     @Test
     void renderUserHistoryShowsPanel() {
-        assertTrue(js.contains("userHistoryPanel"),
+        assertTrue(dashboardJs.contains("userHistoryPanel"),
                 "renderUserHistory must reference userHistoryPanel element");
     }
 
     @Test
     void renderUserHistoryShowsUsername() {
-        assertTrue(js.contains("historyUsername"),
+        assertTrue(dashboardJs.contains("historyUsername"),
                 "renderUserHistory must set historyUsername element text");
     }
 
     @Test
     void renderUserHistoryLinksToDetailView() {
-        assertTrue(js.contains("navigate('detail'") || js.contains("navigate(\\\"detail\\\""),
+        // Matches both navigate('detail', ...) and navigate(\'detail\', ...) in template strings
+        assertTrue(dashboardJs.contains("navigate") && dashboardJs.contains("detail"),
                 "renderUserHistory must link each suggestion to the detail view");
     }
 
     @Test
     void renderUserHistoryShowsUpvotes() {
-        assertTrue(js.contains("upVotes"),
+        assertTrue(dashboardJs.contains("upVotes"),
                 "renderUserHistory must display the upvote count for each suggestion");
     }
 
     @Test
     void renderUserHistoryShowsDate() {
-        assertTrue(js.contains("timeAgo(s.createdAt)"),
+        assertTrue(dashboardJs.contains("timeAgo(s.createdAt)"),
                 "renderUserHistory must display relative date using timeAgo");
     }
 
     @Test
     void renderUserHistoryHandlesEmptySuggestions() {
-        assertTrue(js.contains("No submissions found"),
+        assertTrue(dashboardJs.contains("No submissions found"),
                 "renderUserHistory must handle empty suggestions list gracefully");
     }
 }
