@@ -1085,7 +1085,7 @@ class ProjectDefinitionServiceTest {
                 sessionRepository, claudeService, settingsService, notificationHandler, userRepository) {
             @Override protected String detectDefaultBranch(String repoDir) { return "main"; }
             @Override protected void runGitCommand(String repoDir, String... command) {}
-            @Override protected String readExistingProjectDefinition() { return "# Existing Definition\nContent."; }
+            @Override public String readExistingProjectDefinition() { return "# Existing Definition\nContent."; }
         };
 
         svcWithExisting.startSession();
@@ -1110,7 +1110,7 @@ class ProjectDefinitionServiceTest {
                 sessionRepository, claudeService, settingsService, notificationHandler, userRepository) {
             @Override protected String detectDefaultBranch(String repoDir) { return "main"; }
             @Override protected void runGitCommand(String repoDir, String... command) {}
-            @Override protected String readExistingProjectDefinition() { return null; }
+            @Override public String readExistingProjectDefinition() { return null; }
         };
 
         svcWithoutExisting.startSession();
