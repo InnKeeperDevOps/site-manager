@@ -61,8 +61,7 @@ public class ProjectDefinitionService {
     static final List<ProjectDefinitionStatus> NON_TERMINAL_STATUSES = List.of(
             ProjectDefinitionStatus.ACTIVE,
             ProjectDefinitionStatus.GENERATING,
-            ProjectDefinitionStatus.SAVING,
-            ProjectDefinitionStatus.PR_OPEN
+            ProjectDefinitionStatus.SAVING
     );
 
     private final ProjectDefinitionSessionRepository sessionRepository;
@@ -352,11 +351,47 @@ public class ProjectDefinitionService {
 
     /**
      * Return the most recent session's state, or null if no sessions exist.
+     * For ACTIVE sessions, reconstructs the current question from conversation history
+     * so the modal can resume where it left off.
      */
     public ProjectDefinitionStateResponse getState() {
         return sessionRepository.findTopByOrderByCreatedAtDesc()
-                .map(this::toStateResponse)
+                .map(session -> {
+                    if (session.getStatus() == ProjectDefinitionStatus.ACTIVE) {
+                        JsonNode lastQuestion = extractLastAssistantQuestion(session.getConversationHistory());
+                        return toStateResponseWithQuestion(session, lastQuestion);
+                    }
+                    return toStateResponse(session);
+                })
                 .orElse(null);
+    }
+
+    /**
+     * Walks the conversation history backwards to find the last assistant message
+     * that contains a parseable JSON question block. Returns null if none found.
+     */
+    private JsonNode extractLastAssistantQuestion(String conversationHistory) {
+        if (conversationHistory == null || conversationHistory.isBlank()) return null;
+        try {
+            ArrayNode history = (ArrayNode) objectMapper.readTree(conversationHistory);
+            for (int i = history.size() - 1; i >= 0; i--) {
+                JsonNode msg = history.get(i);
+                if ("assistant".equals(msg.path("role").asText())) {
+                    String json = extractJsonBlock(msg.path("content").asText());
+                    if (json != null) {
+                        try {
+                            JsonNode parsed = objectMapper.readTree(json);
+                            if ("question".equals(parsed.path("type").asText())) {
+                                return parsed;
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Could not extract last question from history: {}", e.getMessage());
+        }
+        return null;
     }
 
     /**
@@ -398,7 +433,8 @@ public class ProjectDefinitionService {
 
     String buildInterviewPrompt(String existingDefinition) {
         String jsonFormat =
-                "For each response, reply in JSON using one of these formats:\n" +
+                "For each response, reply ONLY with JSON — no other text. " +
+                "Use one of these formats:\n" +
                 "Open-ended question: {\"type\":\"question\",\"questionType\":\"open\"," +
                 "\"question\":\"...\",\"options\":[],\"progress\":<0-100>}\n" +
                 "Multiple choice question: {\"type\":\"question\",\"questionType\":\"multiple_choice\"," +
@@ -409,37 +445,45 @@ public class ProjectDefinitionService {
                 "file names, code terms, or developer-specific terminology in your messages.\n" +
                 "- Describe everything from the user's perspective, not a developer's.\n" +
                 "- Set progress (0-100) based on how much useful information has been gathered.\n" +
-                "- Send {\"type\":\"complete\"} when the user says they are satisfied " +
-                "or when you have gathered enough to write a thorough project description.";
+                "- Ask one question at a time. Keep questions short and friendly.\n" +
+                "- Adapt your follow-up questions based on what the user tells you — " +
+                "explore interesting areas further and skip topics already covered.\n" +
+                "- Send {\"type\":\"complete\"} when the user says they are satisfied, " +
+                "says \"done\", or when you have gathered enough to write a thorough project description.";
 
         if (existingDefinition == null) {
-            return "You are helping a user describe their software project. " +
+            return "You are helping a user describe their software project for the first time. " +
                     "Have a friendly, conversational interview to understand what they are building.\n\n" +
-                    "Cover these areas naturally — adapt the order and follow-up questions based on their answers:\n" +
-                    "- What the project does and what problem it solves\n" +
-                    "- Who will use it\n" +
-                    "- The goals and motivation behind building it\n" +
-                    "- The most important things it should be able to do\n" +
-                    "- Any limitations or constraints to keep in mind\n" +
-                    "- What success looks like\n\n" +
-                    "Ask one question at a time. Keep questions short and friendly. " +
-                    "Adapt your next question based on what the user tells you — " +
-                    "explore interesting areas further and skip topics already covered.\n\n" +
+                    "You must cover these 5 areas as your starting questions (ask them in order, " +
+                    "one at a time, and follow up on interesting answers before moving to the next):\n" +
+                    "1. What is the project about? What problem does it solve?\n" +
+                    "2. Who are the main users or audience for this project?\n" +
+                    "3. What are the most important things it needs to be able to do?\n" +
+                    "4. Are there any constraints or limitations to keep in mind " +
+                    "(budget, timeline, technology, team size, etc.)?\n" +
+                    "5. What does success look like for this project? How will you know it is working well?\n\n" +
+                    "After these 5 areas are covered, ask follow-up questions on anything " +
+                    "that could use more detail. When the user is satisfied or you have gathered " +
+                    "enough information, send the complete signal.\n\n" +
                     jsonFormat + "\n\n" +
                     "Start by asking what the project is about.";
         } else {
-            return "You are helping a user review and improve their existing project description. " +
+            return "You are helping a user review and update their existing project description. " +
                     "Here is the current description:\n\n" +
                     "---\n" + existingDefinition + "\n---\n\n" +
-                    "Start by briefly summarizing what you see in plain terms (2-3 sentences). " +
-                    "Then ask the user what they would like to update or improve. " +
-                    "Guide them through refining any areas that seem incomplete, vague, or outdated, such as:\n" +
-                    "- Areas that lack detail or are hard to understand\n" +
+                    "Start by briefly summarizing what you see in the current description (2-3 sentences, " +
+                    "in plain language), then ask: \"Has anything changed since this was written? " +
+                    "Is there anything you would like to update or add?\"\n\n" +
+                    "Based on the user's response, guide them through updating the description. " +
+                    "Look for areas that may need attention:\n" +
+                    "- Parts that seem incomplete, vague, or hard to understand\n" +
                     "- Goals or features that could be described more clearly\n" +
-                    "- Anything that may have changed since this was written\n\n" +
-                    "Ask one question at a time. When the user is happy with the updates, send the complete signal.\n\n" +
+                    "- Anything that may have changed or become outdated\n" +
+                    "- New capabilities or users that should be included\n\n" +
+                    "Ask one question at a time. When the user is happy with the updates " +
+                    "or says nothing has changed, send the complete signal.\n\n" +
                     jsonFormat + "\n\n" +
-                    "Start by summarizing what you see and asking what they would like to change.";
+                    "Start by summarizing what you see and asking if anything has changed.";
         }
     }
 

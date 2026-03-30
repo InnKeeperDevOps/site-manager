@@ -138,16 +138,15 @@ const app = {
         if (!isAdmin) return;
         try {
             const res = await fetch('/api/project-definition/state');
-            if (res.status === 204) return; // no active session
+            if (res.status === 204) return;
             if (!res.ok) return;
             const state = await res.json();
             if (!state || !state.status) return;
+            const btn = document.getElementById('project-def-btn');
             if (state.status === 'COMPLETED' || state.status === 'PR_OPEN') {
-                const btn = document.getElementById('project-def-btn');
-                if (btn) btn.textContent = 'View Definition';
+                if (btn) btn.textContent = 'Update Definition';
             } else if (['ACTIVE', 'GENERATING', 'SAVING'].includes(state.status)) {
-                const btn = document.getElementById('project-def-btn');
-                if (btn && state.isEdit) btn.textContent = 'Update Definition';
+                if (btn) btn.textContent = state.isEdit ? 'Update Definition' : 'Project Definition';
                 this.showProjectDefinitionModal(state);
             }
         } catch (e) {
@@ -160,8 +159,16 @@ const app = {
         if (!modal) return;
         try {
             const res = await fetch('/api/project-definition/state');
-            if (res.status === 204) {
-                // No session — start one
+            const needsNewSession = res.status === 204;
+            let existingState = null;
+
+            if (res.ok) {
+                existingState = await res.json();
+            }
+
+            const isTerminal = existingState && ['COMPLETED', 'PR_OPEN', 'FAILED'].includes(existingState.status);
+
+            if (needsNewSession || isTerminal) {
                 const startRes = await fetch('/api/project-definition/start', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
                 if (!startRes.ok) {
                     const err = await startRes.json().catch(() => ({}));
@@ -174,9 +181,8 @@ const app = {
                 }
                 const state = await startRes.json();
                 this.showProjectDefinitionModal(state);
-            } else if (res.ok) {
-                const state = await res.json();
-                this.showProjectDefinitionModal(state);
+            } else if (existingState) {
+                this.showProjectDefinitionModal(existingState);
             }
         } catch (e) {
             this.showToast('Could not connect to the server.');
@@ -233,7 +239,9 @@ const app = {
             const errSection = document.getElementById('pd-error-section');
             if (errSection) {
                 errSection.style.display = '';
-                errSection.textContent = state.errorMessage || 'An error occurred. Please try again.';
+                errSection.innerHTML = (state.errorMessage || 'An error occurred.') +
+                    '<br><button class="btn btn-primary btn-sm" style="margin-top:0.75rem" ' +
+                    'onclick="app.retryProjectDefinition()">Try Again</button>';
             }
         } else {
             // ACTIVE — show question
@@ -244,7 +252,7 @@ const app = {
             const textInput = document.getElementById('pd-text-input');
             const textSubmit = document.getElementById('pd-text-submit-area');
 
-            if (state.questionType === 'MULTIPLE_CHOICE' && state.options && state.options.length > 0) {
+            if ((state.questionType === 'MULTIPLE_CHOICE' || state.questionType === 'multiple_choice') && state.options && state.options.length > 0) {
                 if (textInput) textInput.style.display = 'none';
                 if (textSubmit) textSubmit.style.display = 'none';
                 if (optionsEl) {
@@ -368,6 +376,22 @@ const app = {
     closeProjectDefinitionModal() {
         const modal = document.getElementById('project-def-modal');
         if (modal) modal.style.display = 'none';
+    },
+
+    async retryProjectDefinition() {
+        try {
+            await fetch('/api/project-definition/reset', { method: 'POST' });
+            const startRes = await fetch('/api/project-definition/start', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+            if (!startRes.ok) {
+                const err = await startRes.json().catch(() => ({}));
+                this.showToast(err.error || 'Could not start a new session.');
+                return;
+            }
+            const state = await startRes.json();
+            this.showProjectDefinitionModal(state);
+        } catch (e) {
+            this.showToast('Could not connect to the server.');
+        }
     },
 
     onProjectDefinitionUpdate(wsData) {
