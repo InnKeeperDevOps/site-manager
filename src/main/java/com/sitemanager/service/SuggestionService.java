@@ -1739,6 +1739,10 @@ public class SuggestionService {
         Suggestion suggestion = suggestionRepository.findById(suggestionId)
                 .orElseThrow(() -> new IllegalArgumentException("Suggestion not found"));
 
+        if (suggestion.getStatus() == SuggestionStatus.DENIED) {
+            throw new IllegalStateException("Cannot approve a denied suggestion (id: " + suggestionId + ")");
+        }
+
         suggestion.setStatus(SuggestionStatus.APPROVED);
         suggestion.setCurrentPhase("Approved — getting ready to start");
         suggestionRepository.save(suggestion);
