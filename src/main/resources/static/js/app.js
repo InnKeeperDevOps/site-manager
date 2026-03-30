@@ -211,11 +211,14 @@ const app = {
 
         const noDefActions = document.getElementById('pd-no-def-actions');
 
+        const actionsEl = document.getElementById('pd-actions');
+
         // Hide all sections first
         if (spinner) spinner.style.display = 'none';
         if (questionArea) questionArea.style.display = '';
         if (completeView) completeView.style.display = 'none';
         if (noDefActions) noDefActions.style.display = 'none';
+        if (actionsEl) actionsEl.style.display = 'none';
 
         if (state.status === 'GENERATING') {
             if (statusEl) statusEl.textContent = 'Creating your project definition document...';
@@ -365,7 +368,7 @@ const app = {
             const hasContent = !!(state.generatedContent);
             const downloadBtn = document.getElementById('pd-download-btn');
             if (downloadBtn) downloadBtn.style.display = hasContent ? '' : 'none';
-            actionsEl.style.display = '';
+            actionsEl.style.display = 'flex';
         }
 
         // Update button label

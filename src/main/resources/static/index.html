@@ -646,15 +646,16 @@
                     <a href="#" onclick="app.expandProjectDefinitionContent(event)" style="font-size:0.85rem;color:var(--primary)">View Full Document</a>
                 </div>
             </div>
-            <div id="pd-actions" style="display:flex;gap:0.5rem;margin-top:1rem;flex-wrap:wrap">
-                <button id="pd-download-btn" class="btn btn-outline btn-sm" onclick="app.downloadProjectDefinition()">Download</button>
-                <button id="pd-import-btn" class="btn btn-outline btn-sm" onclick="app.openImportDefinitionModal()">Import</button>
-            </div>
             <div id="pd-error-section" style="display:none;margin-top:0.75rem;color:#dc2626;font-size:0.9rem"></div>
         </div>
         <!-- Import actions shown when no definition exists -->
         <div id="pd-no-def-actions" style="display:none;margin-top:1rem">
             <button class="btn btn-outline btn-sm" onclick="app.openImportDefinitionModal()">Import Definition</button>
+        </div>
+        <!-- Download / Import actions at modal level -->
+        <div id="pd-actions" style="display:none;gap:0.5rem;margin-top:1rem;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:1rem">
+            <button id="pd-download-btn" class="btn btn-outline btn-sm" onclick="app.downloadProjectDefinition()">Download</button>
+            <button id="pd-import-btn" class="btn btn-outline btn-sm" onclick="app.openImportDefinitionModal()">Import</button>
         </div>
     </div>
 </div>
