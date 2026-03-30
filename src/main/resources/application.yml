@@ -3,7 +3,8 @@ spring:
     url: jdbc:sqlite:./data/sitemanager.db
     driver-class-name: org.sqlite.JDBC
     hikari:
-      maximum-pool-size: 1
+      maximum-pool-size: 3
+      connection-init-sql: "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;"
   flyway:
     enabled: true
     baseline-on-migrate: true
