@@ -1,0 +1,47 @@
+export const state = {
+    loggedIn: false,
+    username: '',
+    role: '',
+    setupRequired: false,
+    permissions: [],
+    currentSuggestion: null,
+    currentStatus: null,
+    settings: {},
+    ws: null,
+    notificationWs: null,
+    notificationWsReconnectTimeout: null,
+    recommendations: [],
+    clarification: {
+        questions: [],
+        answers: [],
+        currentIndex: 0,
+        active: false
+    },
+    tasks: [],
+    taskTimer: null,
+    expertReview: {
+        currentStep: -1,
+        totalSteps: 0,
+        experts: [],
+        active: false,
+        notes: []
+    },
+    expertClarification: {
+        questions: [],
+        answers: [],
+        currentIndex: 0,
+        active: false,
+        expertName: ''
+    },
+    approvalPendingCount: 0,
+    myDraftsMode: false,
+    listFilters: {
+        search: '',
+        status: '',
+        priority: '',
+        sortBy: 'created',
+        sortDir: 'desc'
+    },
+    searchDebounceTimer: null,
+    executionQueue: { maxConcurrent: 1, activeCount: 0, queuedCount: 0, queued: [] }
+};
