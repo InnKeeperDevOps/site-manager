@@ -26,8 +26,8 @@ class ExpertRoleTest {
     }
 
     @Test
-    void reviewBatches_hasFiveBatches() {
-        assertThat(ExpertRole.reviewBatches().length).isEqualTo(5);
+    void reviewBatches_hasOneBatchPerExpert() {
+        assertThat(ExpertRole.reviewBatches().length).isEqualTo(ExpertRole.reviewOrder().length);
     }
 
     @Test

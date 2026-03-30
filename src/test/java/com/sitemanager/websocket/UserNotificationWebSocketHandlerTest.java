@@ -7,6 +7,7 @@ import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 
+import java.net.URI;
 import java.security.Principal;
 import java.util.Map;
 
@@ -32,15 +33,28 @@ class UserNotificationWebSocketHandlerTest {
     }
 
     @Test
-    void afterConnectionEstablished_noPrincipal_closesSession() throws Exception {
+    void afterConnectionEstablished_noPrincipalNoUsername_closesSession() throws Exception {
         WebSocketSession session = mock(WebSocketSession.class);
         when(session.getPrincipal()).thenReturn(null);
+        when(session.getUri()).thenReturn(new URI("/ws/notifications"));
         when(session.getId()).thenReturn("session1");
 
         handler.afterConnectionEstablished(session);
 
         verify(session).close(CloseStatus.POLICY_VIOLATION);
         assertEquals(0, handler.getConnectionCount(""));
+    }
+
+    @Test
+    void afterConnectionEstablished_usernameQueryParam_registersSession() throws Exception {
+        WebSocketSession session = mock(WebSocketSession.class);
+        when(session.getPrincipal()).thenReturn(null);
+        when(session.getUri()).thenReturn(new URI("/ws/notifications?username=bob"));
+        when(session.getId()).thenReturn("session1");
+
+        handler.afterConnectionEstablished(session);
+
+        assertEquals(1, handler.getConnectionCount("bob"));
     }
 
     @Test

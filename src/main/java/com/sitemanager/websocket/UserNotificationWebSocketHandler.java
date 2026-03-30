@@ -10,6 +10,7 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.io.IOException;
+import java.net.URI;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -28,16 +29,16 @@ public class UserNotificationWebSocketHandler extends TextWebSocketHandler {
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
-        if (session.getPrincipal() == null) {
-            log.warn("Notification WebSocket connection rejected — no authenticated principal: {}", session.getId());
+        String username = extractUsername(session);
+        if (username == null) {
+            log.warn("Notification WebSocket connection rejected — no username provided: {}", session.getId());
             try {
                 session.close(CloseStatus.POLICY_VIOLATION);
             } catch (IOException e) {
-                log.error("Error closing unauthenticated session {}: {}", session.getId(), e.getMessage());
+                log.error("Error closing session without username {}: {}", session.getId(), e.getMessage());
             }
             return;
         }
-        String username = session.getPrincipal().getName();
         userSessions
                 .computeIfAbsent(username, k -> ConcurrentHashMap.newKeySet())
                 .add(session);
@@ -46,8 +47,8 @@ public class UserNotificationWebSocketHandler extends TextWebSocketHandler {
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-        if (session.getPrincipal() == null) return;
-        String username = session.getPrincipal().getName();
+        String username = extractUsername(session);
+        if (username == null) return;
         Set<WebSocketSession> sessions = userSessions.get(username);
         if (sessions != null) {
             sessions.remove(session);
@@ -116,5 +117,22 @@ public class UserNotificationWebSocketHandler extends TextWebSocketHandler {
     public int getConnectionCount(String username) {
         Set<WebSocketSession> sessions = userSessions.get(username);
         return sessions != null ? sessions.size() : 0;
+    }
+
+    private String extractUsername(WebSocketSession session) {
+        // Try principal first (if auth is configured)
+        if (session.getPrincipal() != null) {
+            return session.getPrincipal().getName();
+        }
+        // Fall back to username query parameter
+        URI uri = session.getUri();
+        if (uri == null || uri.getQuery() == null) return null;
+        for (String param : uri.getQuery().split("&")) {
+            String[] kv = param.split("=", 2);
+            if (kv.length == 2 && "username".equals(kv[0]) && !kv[1].isEmpty()) {
+                return kv[1];
+            }
+        }
+        return null;
     }
 }
