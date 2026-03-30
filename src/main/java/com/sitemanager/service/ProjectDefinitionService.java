@@ -247,7 +247,7 @@ public class ProjectDefinitionService {
     @Async
     public void generateAndSave(ProjectDefinitionSession session) {
         try {
-            String compilationPrompt = buildCompilationPrompt();
+            String compilationPrompt = buildCompilationPrompt(session.isHasExistingDefinition());
 
             String generatedContent = claudeService.continueConversation(
                     session.getClaudeSessionId(),
@@ -297,7 +297,9 @@ public class ProjectDefinitionService {
                     session.getGeneratedContent());
 
             runGitCommand(mainRepoDir, "git", "add", "PROJECT_DEFINITION.md");
-            runGitCommand(mainRepoDir, "git", "commit", "-m", "Add PROJECT_DEFINITION.md");
+            String commitMsg = session.isHasExistingDefinition()
+                    ? "Update PROJECT_DEFINITION.md" : "Add PROJECT_DEFINITION.md";
+            runGitCommand(mainRepoDir, "git", "commit", "-m", commitMsg);
             runGitCommand(mainRepoDir, "git", "push", "origin", branchName);
 
             session.setBranchName(branchName);
@@ -314,9 +316,11 @@ public class ProjectDefinitionService {
                 return;
             }
 
+            String prTitle = session.isHasExistingDefinition()
+                    ? "Update Project Definition" : "Add Project Definition";
             Map<String, Object> prResult = claudeService.createGitHubPullRequest(
                     repoUrl, branchName,
-                    "Add Project Definition",
+                    prTitle,
                     session.getGeneratedContent(),
                     githubToken
             );
@@ -468,26 +472,57 @@ public class ProjectDefinitionService {
                     jsonFormat + "\n\n" +
                     "Start by asking what the project is about.";
         } else {
-            return "You are helping a user review and update their existing project description. " +
+            return "You are helping a user refine and grow their existing project description. " +
+                    "Your goal is to make the description more complete, detailed, and useful " +
+                    "by asking targeted follow-up questions about areas that need more depth.\n\n" +
                     "Here is the current description:\n\n" +
                     "---\n" + existingDefinition + "\n---\n\n" +
-                    "Start by briefly summarizing what you see in the current description (2-3 sentences, " +
-                    "in plain language), then ask: \"Has anything changed since this was written? " +
-                    "Is there anything you would like to update or add?\"\n\n" +
-                    "Based on the user's response, guide them through updating the description. " +
-                    "Look for areas that may need attention:\n" +
-                    "- Parts that seem incomplete, vague, or hard to understand\n" +
-                    "- Goals or features that could be described more clearly\n" +
-                    "- Anything that may have changed or become outdated\n" +
-                    "- New capabilities or users that should be included\n\n" +
-                    "Ask one question at a time. When the user is happy with the updates " +
-                    "or says nothing has changed, send the complete signal.\n\n" +
+                    "Start by briefly summarizing what you see (2-3 sentences, in plain language), " +
+                    "then immediately ask a specific follow-up question about an area of the " +
+                    "description that could benefit from more detail.\n\n" +
+                    "Analyze the current description and proactively ask questions to expand it. " +
+                    "Focus on:\n" +
+                    "- Areas that are mentioned but lack detail — ask for specifics\n" +
+                    "- Missing perspectives — who else uses this? What edge cases exist?\n" +
+                    "- Goals that could be more concrete — what does success look like in numbers?\n" +
+                    "- Features mentioned briefly — how should they actually work?\n" +
+                    "- Things that may have evolved — any new plans, users, or capabilities?\n" +
+                    "- Technical details that could help guide development\n" +
+                    "- Priorities and trade-offs that aren't captured yet\n\n" +
+                    "Do NOT just ask \"has anything changed?\" — instead, pick a specific area " +
+                    "that needs more depth and ask a focused question about it. Keep asking " +
+                    "follow-up questions to grow the description until the user says they are " +
+                    "satisfied or says \"done\".\n\n" +
+                    "Ask one question at a time. Each question should target a specific gap " +
+                    "or opportunity to add useful detail to the project description.\n\n" +
                     jsonFormat + "\n\n" +
-                    "Start by summarizing what you see and asking if anything has changed.";
+                    "Start by summarizing what you see and asking your first refinement question.";
         }
     }
 
-    private String buildCompilationPrompt() {
+    private String buildCompilationPrompt(boolean isRefinement) {
+        if (isRefinement) {
+            return "Based on our conversation, please produce an updated and expanded " +
+                    "PROJECT_DEFINITION.md document. Merge all the new information we " +
+                    "discussed into the existing definition — keep everything that is still " +
+                    "accurate, update anything that has changed, and add the new details " +
+                    "we covered.\n\n" +
+                    "Structure the document with these sections:\n" +
+                    "# Project Definition\n" +
+                    "## Overview\n" +
+                    "## Motivation\n" +
+                    "## Goals\n" +
+                    "## Target Users\n" +
+                    "## How Users Will Interact With It\n" +
+                    "## Current Stage\n" +
+                    "## Key Features\n" +
+                    "## Technical Constraints\n" +
+                    "## 6-Month Vision\n\n" +
+                    "The result should be a single, cohesive document that reads as a " +
+                    "complete project description — not a changelog or diff. " +
+                    "Write the complete markdown document. " +
+                    "Do not include any JSON wrapper or preamble — output only the markdown.";
+        }
         return "Based on our conversation so far, please compile a comprehensive " +
                 "PROJECT_DEFINITION.md document that captures everything we discussed " +
                 "about this software project.\n\n" +

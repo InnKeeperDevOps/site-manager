@@ -1151,14 +1151,14 @@ class ProjectDefinitionServiceTest {
     }
 
     @Test
-    void buildInterviewPrompt_withExistingDefinition_returnsEditPromptContainingDefinition() {
+    void buildInterviewPrompt_withExistingDefinition_returnsRefinementPromptContainingDefinition() {
         String existingContent = "# Project Definition\n## Overview\nThis is a task manager app.";
         String prompt = service.buildInterviewPrompt(existingContent);
 
         assertTrue(prompt.contains(existingContent), "Prompt should embed the existing definition");
         assertTrue(prompt.contains("summar"), "Prompt should ask Claude to summarize the existing definition");
-        assertTrue(prompt.toLowerCase().contains("changed"),
-                "Prompt should ask if anything has changed");
+        assertTrue(prompt.toLowerCase().contains("refine") || prompt.toLowerCase().contains("grow"),
+                "Prompt should mention refining or growing the definition");
         assertTrue(prompt.contains("\"type\":\"question\""), "Prompt should include JSON question format");
         assertTrue(prompt.contains("\"type\":\"complete\""), "Prompt should include JSON complete format");
         assertTrue(prompt.toLowerCase().contains("plain, everyday language"),
@@ -1178,12 +1178,12 @@ class ProjectDefinitionServiceTest {
     }
 
     @Test
-    void buildInterviewPrompt_editMode_mentionsIncompleteOrVagueAreas() {
+    void buildInterviewPrompt_editMode_mentionsAreasNeedingMoreDetail() {
         String definition = "# My App\nIt does stuff.";
         String prompt = service.buildInterviewPrompt(definition);
 
-        assertTrue(prompt.contains("incomplete") || prompt.contains("vague") || prompt.contains("lack detail"),
-                "Edit prompt should guide toward refining incomplete or vague content");
+        assertTrue(prompt.contains("detail") || prompt.contains("depth") || prompt.contains("specifics"),
+                "Edit prompt should guide toward adding more detail to areas that need it");
     }
 
     @Test
@@ -1214,16 +1214,26 @@ class ProjectDefinitionServiceTest {
     void buildInterviewPrompt_editMode_instructsToStartWithSummary() {
         String prompt = service.buildInterviewPrompt("# Existing\nContent.");
 
-        assertTrue(prompt.toLowerCase().contains("start by summar"),
+        assertTrue(prompt.toLowerCase().contains("start by") && prompt.toLowerCase().contains("summar"),
                 "Edit-mode prompt should instruct Claude to start by summarizing");
     }
 
     @Test
-    void buildInterviewPrompt_editMode_asksIfAnythingHasChanged() {
+    void buildInterviewPrompt_editMode_asksProactiveFollowUpQuestions() {
         String prompt = service.buildInterviewPrompt("# Existing\nContent.");
 
-        assertTrue(prompt.toLowerCase().contains("has anything changed"),
-                "Edit-mode prompt should ask if anything has changed");
+        assertTrue(prompt.toLowerCase().contains("follow-up") || prompt.toLowerCase().contains("follow up"),
+                "Edit-mode prompt should instruct Claude to ask follow-up questions");
+        assertTrue(prompt.toLowerCase().contains("specific") || prompt.toLowerCase().contains("targeted"),
+                "Edit-mode prompt should ask targeted/specific questions rather than generic ones");
+    }
+
+    @Test
+    void buildInterviewPrompt_editMode_doesNotPassivelyAskIfAnythingChanged() {
+        String prompt = service.buildInterviewPrompt("# Existing\nContent.");
+
+        assertFalse(prompt.contains("Has anything changed since this was written?"),
+                "Edit-mode prompt should NOT passively ask if anything changed — it should proactively ask refinement questions");
     }
 
     // ─── Test helper methods ──────────────────────────────────────────────────────
