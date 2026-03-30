@@ -19,6 +19,7 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -261,6 +262,108 @@ class ProjectDefinitionControllerTest {
         mockMvc.perform(post("/api/project-definition/reset")
                         .session(userSession()))
                 .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").exists());
+    }
+
+    // ---- GET /download ----
+
+    @Test
+    void download_asAdmin_withDefinition_returnsFile() throws Exception {
+        when(projectDefinitionService.readExistingProjectDefinition())
+                .thenReturn("# Project Definition\n## Overview\nTest project.");
+
+        mockMvc.perform(get("/api/project-definition/download")
+                        .session(adminSession()))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Content-Disposition", "attachment; filename=\"PROJECT_DEFINITION.md\""));
+    }
+
+    @Test
+    void download_asAdmin_withNoDefinition_returns404() throws Exception {
+        when(projectDefinitionService.readExistingProjectDefinition()).thenReturn(null);
+
+        mockMvc.perform(get("/api/project-definition/download")
+                        .session(adminSession()))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").exists());
+    }
+
+    @Test
+    void download_withoutSession_returns403() throws Exception {
+        mockMvc.perform(get("/api/project-definition/download"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void download_asRegularUser_returns403() throws Exception {
+        mockMvc.perform(get("/api/project-definition/download")
+                        .session(userSession()))
+                .andExpect(status().isForbidden());
+    }
+
+    // ---- POST /import ----
+
+    @Test
+    void import_asAdmin_withContent_returns200() throws Exception {
+        doNothing().when(projectDefinitionService).importProjectDefinition(anyString());
+
+        mockMvc.perform(multipart("/api/project-definition/import")
+                        .param("content", "# My Project\n## Overview\nA test.")
+                        .session(adminSession()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.message").exists());
+
+        verify(projectDefinitionService).importProjectDefinition(org.mockito.ArgumentMatchers.contains("My Project"));
+    }
+
+    @Test
+    void import_asAdmin_withFile_returns200() throws Exception {
+        doNothing().when(projectDefinitionService).importProjectDefinition(anyString());
+
+        org.springframework.mock.web.MockMultipartFile file = new org.springframework.mock.web.MockMultipartFile(
+                "file", "PROJECT_DEFINITION.md", "text/markdown", "# Uploaded\nContent here.".getBytes());
+
+        mockMvc.perform(multipart("/api/project-definition/import")
+                        .file(file)
+                        .session(adminSession()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.message").exists());
+
+        verify(projectDefinitionService).importProjectDefinition(org.mockito.ArgumentMatchers.contains("Uploaded"));
+    }
+
+    @Test
+    void import_asAdmin_withNoContent_returns400() throws Exception {
+        mockMvc.perform(multipart("/api/project-definition/import")
+                        .session(adminSession()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").exists());
+    }
+
+    @Test
+    void import_withoutSession_returns403() throws Exception {
+        mockMvc.perform(multipart("/api/project-definition/import")
+                        .param("content", "# Test"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void import_asRegularUser_returns403() throws Exception {
+        mockMvc.perform(multipart("/api/project-definition/import")
+                        .param("content", "# Test")
+                        .session(userSession()))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void import_whenServiceThrows_returns500() throws Exception {
+        doThrow(new IllegalStateException("The target repository has not been cloned yet."))
+                .when(projectDefinitionService).importProjectDefinition(anyString());
+
+        mockMvc.perform(multipart("/api/project-definition/import")
+                        .param("content", "# Test Content")
+                        .session(adminSession()))
+                .andExpect(status().isInternalServerError())
                 .andExpect(jsonPath("$.error").exists());
     }
 }

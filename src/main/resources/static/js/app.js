@@ -209,10 +209,13 @@ const app = {
         const questionArea = document.getElementById('pd-question-area');
         const completeView = document.getElementById('pd-complete-view');
 
+        const noDefActions = document.getElementById('pd-no-def-actions');
+
         // Hide all sections first
         if (spinner) spinner.style.display = 'none';
         if (questionArea) questionArea.style.display = '';
         if (completeView) completeView.style.display = 'none';
+        if (noDefActions) noDefActions.style.display = 'none';
 
         if (state.status === 'GENERATING') {
             if (statusEl) statusEl.textContent = 'Creating your project definition document...';
@@ -330,6 +333,7 @@ const app = {
         const contentText = document.getElementById('pd-content-text');
         const contentExpander = document.getElementById('pd-content-expander');
         const errSection = document.getElementById('pd-error-section');
+        const actionsEl = document.getElementById('pd-actions');
 
         if (errSection) errSection.style.display = 'none';
 
@@ -355,6 +359,13 @@ const app = {
             } else {
                 if (contentExpander) contentExpander.style.display = 'none';
             }
+        }
+
+        if (actionsEl) {
+            const hasContent = !!(state.generatedContent);
+            const downloadBtn = document.getElementById('pd-download-btn');
+            if (downloadBtn) downloadBtn.style.display = hasContent ? '' : 'none';
+            actionsEl.style.display = '';
         }
 
         // Update button label
@@ -391,6 +402,160 @@ const app = {
             this.showProjectDefinitionModal(state);
         } catch (e) {
             this.showToast('Could not connect to the server.');
+        }
+    },
+
+    async downloadProjectDefinition() {
+        try {
+            const res = await fetch('/api/project-definition/download');
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                this.showToast(err.error || 'Could not download project definition.');
+                return;
+            }
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'PROJECT_DEFINITION.md';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (e) {
+            this.showToast('Could not connect to the server.');
+        }
+    },
+
+    openImportDefinitionModal() {
+        const modal = document.getElementById('pd-import-modal');
+        if (!modal) return;
+        modal.style.display = '';
+        const textArea = document.getElementById('pd-import-text');
+        if (textArea) textArea.value = '';
+        const fileInput = document.getElementById('pd-import-file');
+        if (fileInput) fileInput.value = '';
+        const fileInfo = document.getElementById('pd-import-file-info');
+        if (fileInfo) fileInfo.style.display = 'none';
+        const errEl = document.getElementById('pd-import-error');
+        if (errEl) errEl.style.display = 'none';
+        this._importFileContent = null;
+
+        const dropzone = document.getElementById('pd-import-dropzone');
+        if (dropzone && !dropzone._listenersAttached) {
+            dropzone._listenersAttached = true;
+            dropzone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dropzone.style.borderColor = 'var(--primary)';
+                dropzone.style.background = 'rgba(59,130,246,0.05)';
+            });
+            dropzone.addEventListener('dragleave', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dropzone.style.borderColor = 'var(--border)';
+                dropzone.style.background = '';
+            });
+            dropzone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dropzone.style.borderColor = 'var(--border)';
+                dropzone.style.background = '';
+                if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    this.processImportFile(e.dataTransfer.files[0]);
+                }
+            });
+        }
+    },
+
+    closeImportDefinitionModal() {
+        const modal = document.getElementById('pd-import-modal');
+        if (modal) modal.style.display = 'none';
+        this._importFileContent = null;
+    },
+
+    handleImportFileSelect(event) {
+        const file = event.target.files && event.target.files[0];
+        if (file) this.processImportFile(file);
+    },
+
+    processImportFile(file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            this._importFileContent = e.target.result;
+            const fileInfo = document.getElementById('pd-import-file-info');
+            const fileName = document.getElementById('pd-import-file-name');
+            if (fileInfo) fileInfo.style.display = '';
+            if (fileName) fileName.textContent = file.name + ' (' + this.formatFileSize(file.size) + ')';
+            const textArea = document.getElementById('pd-import-text');
+            if (textArea) textArea.value = '';
+        };
+        reader.readAsText(file);
+    },
+
+    clearImportFile(event) {
+        if (event) event.preventDefault();
+        this._importFileContent = null;
+        const fileInfo = document.getElementById('pd-import-file-info');
+        if (fileInfo) fileInfo.style.display = 'none';
+        const fileInput = document.getElementById('pd-import-file');
+        if (fileInput) fileInput.value = '';
+    },
+
+    formatFileSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / 1048576).toFixed(1) + ' MB';
+    },
+
+    async submitImportDefinition() {
+        const errEl = document.getElementById('pd-import-error');
+        const submitBtn = document.getElementById('pd-import-submit');
+
+        const pastedContent = (document.getElementById('pd-import-text') || {}).value || '';
+        const content = this._importFileContent || pastedContent;
+
+        if (!content || !content.trim()) {
+            if (errEl) {
+                errEl.textContent = 'Please upload a file or paste the definition content.';
+                errEl.style.display = '';
+            }
+            return;
+        }
+
+        if (errEl) errEl.style.display = 'none';
+        if (submitBtn) submitBtn.disabled = true;
+
+        try {
+            const formData = new FormData();
+            formData.append('content', content);
+
+            const res = await fetch('/api/project-definition/import', {
+                method: 'POST',
+                body: formData
+            });
+
+            const data = await res.json().catch(() => ({}));
+
+            if (!res.ok) {
+                if (errEl) {
+                    errEl.textContent = data.error || 'Import failed. Please try again.';
+                    errEl.style.display = '';
+                }
+                if (submitBtn) submitBtn.disabled = false;
+                return;
+            }
+
+            this.closeImportDefinitionModal();
+            this.showToast('Project definition imported successfully.');
+            const btn = document.getElementById('project-def-btn');
+            if (btn) btn.textContent = 'Update Definition';
+        } catch (e) {
+            if (errEl) {
+                errEl.textContent = 'Could not connect to the server.';
+                errEl.style.display = '';
+            }
+            if (submitBtn) submitBtn.disabled = false;
         }
     },
 

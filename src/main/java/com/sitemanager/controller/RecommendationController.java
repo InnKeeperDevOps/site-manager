@@ -16,6 +16,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -55,7 +57,10 @@ public class RecommendationController {
         Map<SuggestionStatus, Long> statusCounts = suggestions.stream()
                 .collect(Collectors.groupingBy(Suggestion::getStatus, Collectors.counting()));
 
-        String prompt = buildPrompt(settings, statusCounts, suggestions.size());
+        ensureMainRepoAvailable(settings);
+
+        String projectDefinition = readProjectDefinition();
+        String prompt = buildPrompt(settings, statusCounts, suggestions.size(), projectDefinition);
 
         try {
             String rawResponse = claudeService.getRecommendations(prompt);
@@ -85,30 +90,90 @@ public class RecommendationController {
         }
     }
 
-    String buildPrompt(SiteSettings settings, Map<SuggestionStatus, Long> statusCounts, int total) {
+    /**
+     * Pull or clone the main repository so Claude has up-to-date source to analyze.
+     */
+    private void ensureMainRepoAvailable(SiteSettings settings) {
+        String repoUrl = settings.getTargetRepoUrl();
+        if (repoUrl == null || repoUrl.isBlank()) {
+            return;
+        }
+        try {
+            claudeService.pullMainRepository(repoUrl);
+        } catch (Exception e) {
+            log.warn("[RECOMMENDATIONS] Could not update main-repo (will use existing state): {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Read PROJECT_DEFINITION.md from the main-repo directory, if it exists.
+     */
+    String readProjectDefinition() {
+        try {
+            java.nio.file.Path filePath = Paths.get(claudeService.getMainRepoDir(), "PROJECT_DEFINITION.md");
+            return Files.readString(filePath);
+        } catch (java.nio.file.NoSuchFileException e) {
+            return null;
+        } catch (Exception e) {
+            log.warn("[RECOMMENDATIONS] Could not read PROJECT_DEFINITION.md: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    String buildPrompt(SiteSettings settings, Map<SuggestionStatus, Long> statusCounts,
+                        int total, String projectDefinition) {
         StringBuilder sb = new StringBuilder();
-        sb.append("You are a product advisor helping improve a website called: ")
-                .append(settings.getSiteName() != null ? settings.getSiteName() : "Site Suggestion Platform")
+
+        sb.append("You are a technical advisor analyzing a software project to identify gaps between ");
+        sb.append("the intended vision and the current implementation.\n\n");
+
+        sb.append("Project: ")
+                .append(settings.getSiteName() != null ? settings.getSiteName() : "Software Project")
                 .append("\n");
         if (settings.getTargetRepoUrl() != null && !settings.getTargetRepoUrl().isBlank()) {
             sb.append("Repository: ").append(settings.getTargetRepoUrl()).append("\n");
         }
+
+        if (projectDefinition != null && !projectDefinition.isBlank()) {
+            sb.append("\n=== PROJECT DEFINITION (the intended vision) ===\n");
+            sb.append(projectDefinition);
+            sb.append("\n=== END PROJECT DEFINITION ===\n");
+        }
+
         sb.append("\nCurrent suggestion statistics (total: ").append(total).append("):\n");
         statusCounts.forEach((status, count) ->
                 sb.append("  ").append(status.name()).append(": ").append(count).append("\n"));
-        sb.append("\nFeature configuration:\n");
-        sb.append("  Anonymous suggestions: ")
-                .append(settings.isAllowAnonymousSuggestions() ? "enabled" : "disabled").append("\n");
-        sb.append("  Voting: ").append(settings.isAllowVoting() ? "enabled" : "disabled").append("\n");
-        sb.append("  Require admin approval: ").append(settings.isRequireApproval() ? "yes" : "no").append("\n");
-        sb.append("  Auto-merge pull requests: ").append(settings.isAutoMergePr() ? "yes" : "no").append("\n");
-        sb.append("\nBased on this information, suggest exactly 5 concrete improvements to the site or workflow. ");
-        sb.append("Each suggestion should be specific, actionable, and valuable to the team.\n\n");
+
+        sb.append("\nINSTRUCTIONS:\n");
+        sb.append("You are running in the project's repository directory. ");
+        sb.append("Explore the codebase — read key files, understand the architecture, ");
+        sb.append("and examine what has been implemented so far.\n\n");
+
+        if (projectDefinition != null && !projectDefinition.isBlank()) {
+            sb.append("Compare the PROJECT DEFINITION above against the ACTUAL implementation in the repository. ");
+            sb.append("Identify the most important gaps — features described in the definition that are ");
+            sb.append("missing, incomplete, or differ significantly from what was envisioned.\n\n");
+            sb.append("Focus on:\n");
+            sb.append("- Features or capabilities described in the definition that are not yet implemented\n");
+            sb.append("- Features that are partially implemented but missing key aspects\n");
+            sb.append("- Architectural or design discrepancies between vision and reality\n");
+            sb.append("- Quality gaps (e.g. missing tests, error handling, performance concerns mentioned in the definition)\n\n");
+        } else {
+            sb.append("There is no PROJECT_DEFINITION.md yet. Analyze the codebase and suggest the most ");
+            sb.append("impactful improvements based on what you find in the code.\n\n");
+            sb.append("Focus on:\n");
+            sb.append("- Missing features that would make the project more complete\n");
+            sb.append("- Code quality improvements (tests, error handling, documentation)\n");
+            sb.append("- Architectural improvements\n");
+            sb.append("- User experience enhancements\n\n");
+        }
+
+        sb.append("Suggest exactly 5 concrete, actionable improvements ranked by impact.\n\n");
         sb.append("Respond ONLY with a valid JSON array of exactly 5 objects. ");
         sb.append("Each object must have a \"title\" (short, under 100 characters) and a \"description\" (1-2 sentences). ");
         sb.append("Do not include any text before or after the JSON array.\n");
         sb.append("Example: [{\"title\": \"Add email notifications\", ");
-        sb.append("\"description\": \"Send email alerts when suggestions change status.\"}]");
+        sb.append("\"description\": \"The project definition calls for email alerts on status changes, but no notification system exists in the codebase.\"}]");
         return sb.toString();
     }
 

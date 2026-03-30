@@ -418,9 +418,8 @@ public class ProjectDefinitionService {
     /**
      * Reads PROJECT_DEFINITION.md from the main repo directory.
      * Returns the file content if it exists, or null if it does not.
-     * Protected for testability.
      */
-    protected String readExistingProjectDefinition() {
+    public String readExistingProjectDefinition() {
         String mainRepoDir = claudeService.getMainRepoDir();
         java.nio.file.Path filePath = Paths.get(mainRepoDir, "PROJECT_DEFINITION.md");
         try {
@@ -430,6 +429,26 @@ public class ProjectDefinitionService {
         } catch (Exception e) {
             log.warn("Could not read PROJECT_DEFINITION.md from {}: {}", filePath, e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * Import a project definition by writing it to PROJECT_DEFINITION.md in main-repo.
+     * Does not commit or push — writes to the local working copy only.
+     */
+    public void importProjectDefinition(String content) {
+        String mainRepoDir = claudeService.getMainRepoDir();
+        java.nio.file.Path filePath = Paths.get(mainRepoDir, "PROJECT_DEFINITION.md");
+        File dir = new File(mainRepoDir);
+        if (!dir.exists()) {
+            throw new IllegalStateException(
+                    "The target repository has not been cloned yet. Please configure a repository in Settings first.");
+        }
+        try {
+            Files.writeString(filePath, content);
+            log.info("Imported PROJECT_DEFINITION.md to {}", filePath);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to write PROJECT_DEFINITION.md: " + e.getMessage(), e);
         }
     }
 
