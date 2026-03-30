@@ -350,6 +350,9 @@
             <div id="adminActions" class="admin-actions" style="display:none">
                 <button class="btn btn-success btn-sm" onclick="app.approve()">Approve</button>
                 <button class="btn btn-danger btn-sm" onclick="app.deny()">Deny</button>
+                <button class="btn btn-sm" id="forceReApprovalBtn"
+                        style="background:#7c3aed;color:#fff;margin-left:0.5rem"
+                        onclick="app.forceReApproval()">Force Re-approval</button>
             </div>
             <div id="retryPrActions" style="display:none;margin-top:1rem">
                 <button class="btn btn-primary btn-sm" onclick="app.retryPr()">Retry Review Request</button>
