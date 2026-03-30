@@ -90,7 +90,7 @@ public class ClaudeService {
     }
 
     @jakarta.annotation.PostConstruct
-    private void initRateLimiter() {
+    void initRateLimiter() {
         // Re-initialize semaphore with configured concurrency limit
         claudeGate.drainPermits();
         claudeGate.release(claudeMaxConcurrent);
@@ -180,7 +180,7 @@ public class ClaudeService {
      * the calling thread sleeps for exactly the time needed until the oldest call expires,
      * while holding the fair lock so all other callers wait behind it in FIFO order.
      */
-    private void acquireRateLimit() throws InterruptedException {
+    void acquireRateLimit() throws InterruptedException {
         rateLimitLock.lockInterruptibly(); // FIFO: threads queue in arrival order
         try {
             int windowSize = callTimestamps.length;
@@ -936,7 +936,7 @@ public class ClaudeService {
                 (trimmed.contains("\"result\"") || trimmed.contains("\"system\""));
     }
 
-    private boolean isDeadSessionError(String output) {
+    boolean isDeadSessionError(String output) {
         return output != null && (
                 output.contains("No conversation found") ||
                 output.contains("session not found") ||
@@ -971,7 +971,7 @@ public class ClaudeService {
      * Extract the outermost JSON object from output that may contain
      * non-JSON lines (warnings, verbose output, etc.) before or after the JSON.
      */
-    private String extractJsonObject(String raw) {
+    String extractJsonObject(String raw) {
         int start = raw.indexOf('{');
         if (start < 0) return null;
 
