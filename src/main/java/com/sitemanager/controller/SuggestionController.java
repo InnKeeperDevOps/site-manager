@@ -247,7 +247,13 @@ public class SuggestionController {
         if (!permissionService.hasPermission(session, Permission.APPROVE_DENY_SUGGESTIONS)) {
             return ResponseEntity.status(403).body(Map.of("error", "Admin access required"));
         }
-        return ResponseEntity.ok(suggestionService.approveSuggestion(id));
+        try {
+            return ResponseEntity.ok(suggestionService.approveSuggestion(id));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.notFound().build();
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(409).body(Map.of("error", e.getMessage()));
+        }
     }
 
     @PostMapping("/{id}/deny")
