@@ -260,13 +260,14 @@ public class ClaudeService {
     }
 
     /**
-     * Get AI recommendations using the Claude CLI.
-     * Uses {@code --max-turns 1} since recommendations need no tool use.
+     * Get AI recommendations by having Claude analyze the project repository.
+     * Runs in {@code main-repo/} so Claude can read source files and compare
+     * the project definition against the actual implementation.
      */
     public String getRecommendations(String prompt) throws Exception {
         String sessionId = generateSessionId();
         String model = resolveModel();
-        return sendToClaudeGated(prompt, sessionId, workspaceDir, null, null, "recommendations", model, 1);
+        return sendToClaudeGated(prompt, sessionId, getMainRepoDir(), null, null, "recommendations", model, 0);
     }
 
     /**

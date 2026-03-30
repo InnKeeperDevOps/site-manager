@@ -58,10 +58,11 @@ class RecommendationControllerTest {
             "{\"title\":\"Dashboard metrics\",\"description\":\"Show a summary of suggestion activity on the main page.\"}]";
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws Exception {
         suggestionRepository.deleteAll();
         settingsRepository.deleteAll();
         userRepository.deleteAll();
+        when(claudeService.getMainRepoDir()).thenReturn("/tmp/test-main-repo");
     }
 
     private MockHttpSession adminSession() {
@@ -209,16 +210,45 @@ class RecommendationControllerTest {
                 SuggestionStatus.APPROVED, 2L
         );
 
-        String prompt = controller.buildPrompt(settings, statusCounts, 5);
+        String prompt = controller.buildPrompt(settings, statusCounts, 5, null);
 
         assert prompt.contains("Test Site");
         assert prompt.contains("https://github.com/example/repo");
         assert prompt.contains("DRAFT");
         assert prompt.contains("APPROVED");
         assert prompt.contains("5");
-        assert prompt.contains("Anonymous suggestions: enabled");
-        assert prompt.contains("Voting: disabled");
-        assert prompt.contains("Require admin approval: yes");
+    }
+
+    @Test
+    void buildPrompt_withProjectDefinition_includesDefinitionAndComparisonInstructions() {
+        RecommendationController controller = new RecommendationController(
+                null, null, null, null, objectMapper);
+
+        SiteSettings settings = new SiteSettings();
+        settings.setSiteName("Test Site");
+
+        String definition = "# Project Definition\n## Overview\nA task management tool.";
+        String prompt = controller.buildPrompt(settings, Map.of(), 0, definition);
+
+        assert prompt.contains("PROJECT DEFINITION");
+        assert prompt.contains("A task management tool.");
+        assert prompt.contains("Compare the PROJECT DEFINITION");
+        assert prompt.contains("gaps");
+    }
+
+    @Test
+    void buildPrompt_withoutProjectDefinition_suggestsCodebaseImprovements() {
+        RecommendationController controller = new RecommendationController(
+                null, null, null, null, objectMapper);
+
+        SiteSettings settings = new SiteSettings();
+        settings.setSiteName("Test Site");
+
+        String prompt = controller.buildPrompt(settings, Map.of(), 0, null);
+
+        assert !prompt.contains("PROJECT DEFINITION");
+        assert prompt.contains("no PROJECT_DEFINITION.md");
+        assert prompt.contains("Analyze the codebase");
     }
 
     @Test
