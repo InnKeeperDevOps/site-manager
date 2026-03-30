@@ -101,11 +101,63 @@ class ProjectDefinitionServiceTest {
         assertEquals(SESSION_ID, resp.getSessionId());
         assertEquals(ProjectDefinitionStatus.ACTIVE, resp.getStatus());
 
-        verify(sessionRepository).save(argThat(s ->
+        // First question is now returned synchronously in the HTTP response
+        assertNotNull(resp.getCurrentQuestion());
+        assertEquals("Question 1?", resp.getCurrentQuestion());
+        assertEquals("open", resp.getQuestionType());
+        assertEquals(11, resp.getProgressPercent());
+
+        // Initial session save (with empty history) should have occurred
+        verify(sessionRepository, atLeastOnce()).save(argThat(s ->
                 s.getStatus() == ProjectDefinitionStatus.ACTIVE &&
-                "[]".equals(s.getConversationHistory()) &&
                 "app-session-uuid".equals(s.getClaudeSessionId())
         ));
+    }
+
+    @Test
+    void startSession_returnsFirstQuestion_withOptionsPopulated() {
+        when(sessionRepository.findFirstByStatusIn(anyList())).thenReturn(Optional.empty());
+
+        ProjectDefinitionSession saved = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        saved.setClaudeSessionId("app-session-uuid");
+        saved.setConversationHistory("[]");
+        when(sessionRepository.save(any())).thenReturn(saved);
+
+        String mcQuestion = "{\"type\":\"question\",\"questionType\":\"multiple_choice\"," +
+                "\"question\":\"Which best describes your project?\",\"options\":[\"App\",\"API\",\"Tool\"]," +
+                "\"progress\":10}";
+        when(claudeService.continueConversation(any(), any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(mcQuestion));
+
+        ProjectDefinitionStateResponse resp = service.startSession();
+
+        assertEquals("Which best describes your project?", resp.getCurrentQuestion());
+        assertEquals("multiple_choice", resp.getQuestionType());
+        assertNotNull(resp.getOptions());
+        assertEquals(3, resp.getOptions().size());
+        assertEquals("App", resp.getOptions().get(0));
+    }
+
+    @Test
+    void startSession_throwsRuntimeException_andMarksSessionFailed_whenClaudeFails() {
+        when(sessionRepository.findFirstByStatusIn(anyList())).thenReturn(Optional.empty());
+
+        ProjectDefinitionSession saved = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        saved.setClaudeSessionId("app-session-uuid");
+        saved.setConversationHistory("[]");
+        when(sessionRepository.save(any())).thenReturn(saved);
+        when(sessionRepository.findById(SESSION_ID)).thenReturn(Optional.of(saved));
+
+        CompletableFuture<String> failed = new CompletableFuture<>();
+        failed.completeExceptionally(new RuntimeException("Claude unavailable"));
+        when(claudeService.continueConversation(any(), any(), any(), any(), any()))
+                .thenReturn(failed);
+
+        assertThrows(RuntimeException.class, () -> service.startSession());
+
+        // Session must be marked FAILED
+        assertEquals(ProjectDefinitionStatus.FAILED, saved.getStatus());
+        assertNotNull(saved.getErrorMessage());
     }
 
     @Test
@@ -144,6 +196,8 @@ class ProjectDefinitionServiceTest {
 
         assertNotNull(resp);
         assertEquals(ProjectDefinitionStatus.ACTIVE, resp.getStatus());
+        // Next question is returned synchronously in the HTTP response
+        assertNotNull(resp.getCurrentQuestion());
 
         verify(claudeService).continueConversation(
                 eq("app-session-uuid"), eq("My answer"), any(), any(), any());
@@ -165,6 +219,209 @@ class ProjectDefinitionServiceTest {
         when(sessionRepository.findById(SESSION_ID)).thenReturn(Optional.of(session));
 
         assertThrows(IllegalStateException.class, () -> service.submitAnswer(SESSION_ID, "answer"));
+    }
+
+    @Test
+    void submitAnswer_returnsNextQuestion_synchronously() {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        session.setClaudeSessionId("app-session-uuid");
+        session.setConversationHistory("[]");
+
+        when(sessionRepository.findById(SESSION_ID)).thenReturn(Optional.of(session));
+        when(sessionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(claudeService.continueConversation(any(), any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(questionJson(2)));
+
+        ProjectDefinitionStateResponse resp = service.submitAnswer(SESSION_ID, "My answer");
+
+        assertNotNull(resp.getCurrentQuestion());
+        assertEquals("Question 2?", resp.getCurrentQuestion());
+        assertEquals("open", resp.getQuestionType());
+        assertEquals(22, resp.getProgressPercent());
+        assertEquals(ProjectDefinitionStatus.ACTIVE, resp.getStatus());
+    }
+
+    @Test
+    void submitAnswer_returnsNextQuestion_withMultipleChoiceOptions() {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        session.setClaudeSessionId("app-session-uuid");
+        session.setConversationHistory("[]");
+
+        when(sessionRepository.findById(SESSION_ID)).thenReturn(Optional.of(session));
+        when(sessionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        String mcResponse = "{\"type\":\"question\",\"questionType\":\"multiple_choice\"," +
+                "\"question\":\"Pick one?\",\"options\":[\"Alpha\",\"Beta\"],\"progress\":50}";
+        when(claudeService.continueConversation(any(), any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(mcResponse));
+
+        ProjectDefinitionStateResponse resp = service.submitAnswer(SESSION_ID, "Some answer");
+
+        assertEquals("Pick one?", resp.getCurrentQuestion());
+        assertEquals("multiple_choice", resp.getQuestionType());
+        assertNotNull(resp.getOptions());
+        assertEquals(2, resp.getOptions().size());
+        assertEquals("Alpha", resp.getOptions().get(0));
+        assertEquals("Beta", resp.getOptions().get(1));
+    }
+
+    @Test
+    void submitAnswer_withCompleteResponse_transitionsToGenerating() throws Exception {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        session.setClaudeSessionId("app-session-uuid");
+        session.setConversationHistory("[]");
+
+        when(sessionRepository.findById(SESSION_ID)).thenReturn(Optional.of(session));
+
+        // Capture the GENERATING status as it passes through before generateAndSave completes
+        java.util.concurrent.atomic.AtomicBoolean seenGenerating = new java.util.concurrent.atomic.AtomicBoolean(false);
+        when(sessionRepository.save(any())).thenAnswer(inv -> {
+            ProjectDefinitionSession s = inv.getArgument(0);
+            if (s.getStatus() == ProjectDefinitionStatus.GENERATING) {
+                seenGenerating.set(true);
+            }
+            return s;
+        });
+
+        // First call returns complete signal; second call is for the compilation
+        when(claudeService.continueConversation(any(), any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(completeJson()))
+                .thenReturn(CompletableFuture.completedFuture("# Project Definition\nContent."));
+
+        SiteSettings settings = settingsWithAutoMerge(false);
+        settings.setTargetRepoUrl(REPO_URL);
+        settings.setGithubToken(TOKEN);
+        when(settingsService.getSettings()).thenReturn(settings);
+
+        Map<String, Object> prResult = Map.of("html_url", PR_URL, "number", PR_NUMBER);
+        when(claudeService.createGitHubPullRequest(any(), any(), any(), any(), any()))
+                .thenReturn(prResult);
+
+        service.submitAnswer(SESSION_ID, "done");
+
+        // GENERATING is an intermediate state set before generateAndSave runs
+        assertTrue(seenGenerating.get(), "Expected GENERATING status to be saved");
+        // No next question since the interview is complete
+        verify(claudeService, atLeast(2)).continueConversation(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void submitAnswer_throwsRuntimeException_andMarksSessionFailed_whenClaudeFails() {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        session.setClaudeSessionId("app-session-uuid");
+        session.setConversationHistory("[]");
+
+        when(sessionRepository.findById(SESSION_ID)).thenReturn(Optional.of(session));
+        when(sessionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        CompletableFuture<String> failedFuture = new CompletableFuture<>();
+        failedFuture.completeExceptionally(new RuntimeException("Claude unavailable"));
+        when(claudeService.continueConversation(any(), any(), any(), any(), any()))
+                .thenReturn(failedFuture);
+
+        assertThrows(RuntimeException.class, () -> service.submitAnswer(SESSION_ID, "My answer"));
+
+        assertEquals(ProjectDefinitionStatus.FAILED, session.getStatus());
+        assertNotNull(session.getErrorMessage());
+    }
+
+    @Test
+    void submitAnswer_appendsAssistantMessageToHistory_afterClaudeResponds() {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        session.setClaudeSessionId("app-session-uuid");
+        session.setConversationHistory("[]");
+
+        when(sessionRepository.findById(SESSION_ID)).thenReturn(Optional.of(session));
+        when(sessionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(claudeService.continueConversation(any(), any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(questionJson(3)));
+
+        service.submitAnswer(SESSION_ID, "My answer");
+
+        assertTrue(session.getConversationHistory().contains("\"role\":\"user\""));
+        assertTrue(session.getConversationHistory().contains("\"role\":\"assistant\""));
+    }
+
+    // ─── startSession: broadcastState after Claude responds ──────────────────────
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void startSession_broadcastsQuestionToAdmins_afterClaudeResponds() {
+        when(sessionRepository.findFirstByStatusIn(anyList())).thenReturn(Optional.empty());
+
+        ProjectDefinitionSession saved = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        saved.setClaudeSessionId("app-session-uuid");
+        saved.setConversationHistory("[]");
+        when(sessionRepository.save(any())).thenReturn(saved);
+
+        when(claudeService.continueConversation(any(), any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(questionJson(1)));
+
+        User admin = adminUser("admin1");
+        when(userRepository.findByRole(UserRole.ROOT_ADMIN)).thenReturn(List.of(admin));
+        when(userRepository.findByRole(UserRole.ADMIN)).thenReturn(List.of());
+
+        service.startSession();
+
+        verify(notificationHandler).sendNotificationToUser(eq("admin1"), argThat(payload -> {
+            if (!"PROJECT_DEFINITION_UPDATE".equals(payload.get("type"))) return false;
+            Map<String, Object> data = (Map<String, Object>) payload.get("data");
+            return data != null && data.containsKey("currentQuestion") && data.containsKey("progressPercent");
+        }));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void startSession_broadcastPayload_containsSessionIdAndActiveStatus() {
+        when(sessionRepository.findFirstByStatusIn(anyList())).thenReturn(Optional.empty());
+
+        ProjectDefinitionSession saved = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        saved.setClaudeSessionId("app-session-uuid");
+        saved.setConversationHistory("[]");
+        when(sessionRepository.save(any())).thenReturn(saved);
+
+        when(claudeService.continueConversation(any(), any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(questionJson(1)));
+
+        User admin = adminUser("admin2");
+        when(userRepository.findByRole(UserRole.ROOT_ADMIN)).thenReturn(List.of());
+        when(userRepository.findByRole(UserRole.ADMIN)).thenReturn(List.of(admin));
+
+        service.startSession();
+
+        verify(notificationHandler).sendNotificationToUser(eq("admin2"), argThat(payload -> {
+            Map<String, Object> data = (Map<String, Object>) payload.get("data");
+            return data != null
+                    && SESSION_ID.equals(data.get("sessionId"))
+                    && "ACTIVE".equals(data.get("status"));
+        }));
+    }
+
+    // ─── submitAnswer: broadcastState after Claude responds ──────────────────────
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void submitAnswer_broadcastsNextQuestion_toAdminsAfterClaudeResponds() {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        session.setClaudeSessionId("app-session-uuid");
+        session.setConversationHistory("[]");
+
+        when(sessionRepository.findById(SESSION_ID)).thenReturn(Optional.of(session));
+        when(sessionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(claudeService.continueConversation(any(), any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(questionJson(3)));
+
+        User admin = adminUser("admin3");
+        when(userRepository.findByRole(UserRole.ROOT_ADMIN)).thenReturn(List.of(admin));
+        when(userRepository.findByRole(UserRole.ADMIN)).thenReturn(List.of());
+
+        service.submitAnswer(SESSION_ID, "My answer");
+
+        verify(notificationHandler).sendNotificationToUser(eq("admin3"), argThat(payload -> {
+            if (!"PROJECT_DEFINITION_UPDATE".equals(payload.get("type"))) return false;
+            Map<String, Object> data = (Map<String, Object>) payload.get("data");
+            return data != null && data.containsKey("currentQuestion") && data.containsKey("progressPercent");
+        }));
     }
 
     // ─── handleClaudeResponse: ACTIVE → ACTIVE (question) ────────────────────────
@@ -412,6 +669,96 @@ class ProjectDefinitionServiceTest {
 
         assertEquals(ProjectDefinitionStatus.FAILED, session.getStatus());
         assertNotNull(session.getErrorMessage());
+    }
+
+    // ─── toStateResponseWithQuestion ─────────────────────────────────────────────
+
+    @Test
+    void toStateResponseWithQuestion_populatesQuestionFields_fromJsonNode() throws Exception {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        com.fasterxml.jackson.databind.JsonNode node = mapper.readTree(questionJson(3));
+
+        ProjectDefinitionStateResponse resp = service.toStateResponseWithQuestion(session, node);
+
+        assertEquals("Question 3?", resp.getCurrentQuestion());
+        assertEquals("open", resp.getQuestionType());
+        assertEquals(33, resp.getProgressPercent());
+        assertNotNull(resp.getOptions());
+    }
+
+    @Test
+    void toStateResponseWithQuestion_withNullNode_returnsBaseResponse() {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+
+        ProjectDefinitionStateResponse resp = service.toStateResponseWithQuestion(session, null);
+
+        assertNotNull(resp);
+        assertEquals(SESSION_ID, resp.getSessionId());
+        assertNull(resp.getCurrentQuestion());
+    }
+
+    @Test
+    void toStateResponseWithQuestion_withCompleteType_doesNotPopulateQuestion() throws Exception {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        com.fasterxml.jackson.databind.JsonNode node = mapper.readTree(completeJson());
+
+        ProjectDefinitionStateResponse resp = service.toStateResponseWithQuestion(session, node);
+
+        assertNull(resp.getCurrentQuestion());
+    }
+
+    @Test
+    void toStateResponseWithQuestion_withMultipleChoiceOptions_populatesOptionsList() throws Exception {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        String mcJson = "{\"type\":\"question\",\"questionType\":\"multiple_choice\"," +
+                "\"question\":\"Pick one?\",\"options\":[\"Alpha\",\"Beta\",\"Gamma\"],\"progress\":50}";
+        com.fasterxml.jackson.databind.JsonNode node = mapper.readTree(mcJson);
+
+        ProjectDefinitionStateResponse resp = service.toStateResponseWithQuestion(session, node);
+
+        assertEquals("Pick one?", resp.getCurrentQuestion());
+        assertEquals("multiple_choice", resp.getQuestionType());
+        assertEquals(50, resp.getProgressPercent());
+        assertNotNull(resp.getOptions());
+        assertEquals(3, resp.getOptions().size());
+        assertEquals("Alpha", resp.getOptions().get(0));
+        assertEquals("Beta", resp.getOptions().get(1));
+        assertEquals("Gamma", resp.getOptions().get(2));
+    }
+
+    @Test
+    void toStateResponseWithQuestion_withMissingFields_usesDefaults() throws Exception {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        // Minimal question node with no optional fields
+        com.fasterxml.jackson.databind.JsonNode node = mapper.readTree("{\"type\":\"question\",\"question\":\"What?\"}");
+
+        ProjectDefinitionStateResponse resp = service.toStateResponseWithQuestion(session, node);
+
+        assertEquals("What?", resp.getCurrentQuestion());
+        assertEquals("open", resp.getQuestionType());   // default
+        assertEquals(0, resp.getProgressPercent());     // default
+        assertNotNull(resp.getOptions());
+        assertTrue(resp.getOptions().isEmpty());
+    }
+
+    @Test
+    void toStateResponseWithQuestion_preservesBaseSessionFields() {
+        ProjectDefinitionSession session = sessionWithId(SESSION_ID, ProjectDefinitionStatus.ACTIVE);
+        session.setHasExistingDefinition(true);
+        session.setPrUrl(PR_URL);
+        session.setErrorMessage("some error");
+
+        ProjectDefinitionStateResponse resp = service.toStateResponseWithQuestion(session, null);
+
+        assertEquals(SESSION_ID, resp.getSessionId());
+        assertEquals(ProjectDefinitionStatus.ACTIVE, resp.getStatus());
+        assertTrue(resp.isEdit());
+        assertEquals(PR_URL, resp.getPrUrl());
+        assertEquals("some error", resp.getErrorMessage());
     }
 
     // ─── toStateResponse: isEdit field ───────────────────────────────────────────
@@ -680,7 +1027,7 @@ class ProjectDefinitionServiceTest {
 
         svcWithExisting.startSession();
 
-        verify(sessionRepository).save(argThat(s -> s.isHasExistingDefinition()));
+        verify(sessionRepository, atLeastOnce()).save(argThat(s -> s.isHasExistingDefinition()));
     }
 
     @Test
@@ -705,7 +1052,7 @@ class ProjectDefinitionServiceTest {
 
         svcWithoutExisting.startSession();
 
-        verify(sessionRepository).save(argThat(s -> !s.isHasExistingDefinition()));
+        verify(sessionRepository, atLeastOnce()).save(argThat(s -> !s.isHasExistingDefinition()));
     }
 
     // ─── buildInterviewPrompt ─────────────────────────────────────────────────────
