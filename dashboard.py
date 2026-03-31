@@ -683,8 +683,6 @@ def build_commands_panel():
     t.append("\n  Claude\n", style="bold underline")
     t.append("  [c] <msg>  ", style="bold cyan"); t.append("Send message\n")
     t.append("  [c]        ", style="bold cyan"); t.append("Multi-line mode\n")
-    t.append("\n")
-    t.append("  > ", style="bold blue")
     return Panel(t, title="[bold]Commands", border_style="green")
 
 
@@ -744,7 +742,7 @@ def build_help():
 # ── Main views ──────────────────────────────────────────────────────
 
 
-def _available_height(reserved_lines=4):
+def _available_height(reserved_lines=2):
     """Return the height available for the layout, reserving lines for cmd bar and prompt."""
     term_h = shutil.get_terminal_size((80, 24)).lines
     return max(12, term_h - reserved_lines)
@@ -754,17 +752,15 @@ def render_dashboard(conn, settings, claude_session=None):
     avail = _available_height()
     header_h = 3
     top_h = min(14, max(8, (avail - header_h) * 4 // 10))
-    services_h = min(12, max(7, avail // 5))
-    claude_h = min(10, max(7, avail // 6))
-    middle_h = avail - header_h - top_h - services_h - claude_h
+    commands_h = min(14, max(10, avail // 4))
+    mid_h = avail - header_h - top_h - commands_h
 
     layout = Layout(size=avail)
     layout.split_column(
         Layout(name="header", size=header_h),
         Layout(name="top", size=top_h),
-        Layout(name="middle", size=max(4, middle_h)),
-        Layout(name="claude", size=claude_h),
-        Layout(name="services", size=services_h),
+        Layout(name="mid", size=max(4, mid_h)),
+        Layout(name="commands", size=commands_h),
     )
     layout["header"].update(build_header(settings))
     layout["top"].split_row(
@@ -772,13 +768,13 @@ def render_dashboard(conn, settings, claude_session=None):
         Layout(build_task_summary(conn), name="tasks"),
         Layout(build_activity_summary(conn), name="activity"),
     )
-    activity_limit = max(3, middle_h - 3)
-    layout["middle"].split_row(
-        Layout(build_recent_activity(conn, limit=activity_limit), name="recent_activity", ratio=2),
-        Layout(build_commands_panel(), name="commands", ratio=1),
+    activity_limit = max(3, mid_h - 3)
+    layout["mid"].split_row(
+        Layout(build_recent_activity(conn, limit=activity_limit), name="recent_activity", ratio=3),
+        Layout(build_services_panel(), name="services", ratio=2),
+        Layout(build_claude_panel(claude_session), name="claude", ratio=2),
     )
-    layout["claude"].update(build_claude_panel(claude_session))
-    layout["services"].update(build_services_panel())
+    layout["commands"].update(build_commands_panel())
     return layout
 
 
@@ -928,7 +924,7 @@ def main():
 
     while True:
         try:
-            cmd = Prompt.ask("").strip()
+            cmd = Prompt.ask("[bold blue]>[/]").strip()
         except (KeyboardInterrupt, EOFError):
             break
 
