@@ -97,7 +97,9 @@ public class SuggestionMessagingHelper {
                 ",\"planDisplaySummary\":\"" + escapeJson(
                         suggestion.getPlanDisplaySummary() != null ? suggestion.getPlanDisplaySummary() : "") + "\"" +
                 ",\"planSummary\":\"" + escapeJson(
-                        suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : "") + "\"}");
+                        suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : "") + "\"" +
+                ",\"failureReason\":\"" + escapeJson(
+                        suggestion.getFailureReason() != null ? suggestion.getFailureReason() : "") + "\"}");
     }
 
     /**

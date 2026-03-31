@@ -274,6 +274,19 @@ public class SuggestionController {
         return ResponseEntity.ok(suggestionService.retryPrCreation(id));
     }
 
+    @PostMapping("/{id}/retry")
+    public ResponseEntity<?> retry(@PathVariable Long id, HttpSession session) {
+        String username = (String) session.getAttribute("username");
+        if (username == null) {
+            return ResponseEntity.status(401).body(Map.of("error", "You must be logged in to retry a suggestion."));
+        }
+        try {
+            return ResponseEntity.ok(suggestionService.retrySuggestion(id, username));
+        } catch (org.springframework.web.server.ResponseStatusException e) {
+            return ResponseEntity.status(e.getStatusCode()).body(Map.of("error", e.getReason()));
+        }
+    }
+
     @PostMapping("/{id}/retry-execution")
     public ResponseEntity<?> retryExecution(@PathVariable Long id, HttpSession session) {
         if (!permissionService.hasPermission(session, Permission.APPROVE_DENY_SUGGESTIONS)) {

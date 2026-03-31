@@ -150,6 +150,35 @@ class SuggestionMessagingHelperTest {
         ));
     }
 
+    @Test
+    void broadcastUpdate_withFailureReason_includesFailureReasonInPayload() {
+        Suggestion suggestion = new Suggestion();
+        suggestion.setId(9L);
+        suggestion.setStatus(SuggestionStatus.IN_PROGRESS);
+        suggestion.setFailureReason("Task 'Build form' failed: connection timed out");
+
+        helper.broadcastUpdate(suggestion);
+
+        verify(webSocketHandler).sendToSuggestion(eq(9L), argThat(msg ->
+                msg.contains("\"failureReason\"") &&
+                msg.contains("connection timed out")
+        ));
+    }
+
+    @Test
+    void broadcastUpdate_nullFailureReason_usesEmptyString() {
+        Suggestion suggestion = new Suggestion();
+        suggestion.setId(10L);
+        suggestion.setStatus(SuggestionStatus.IN_PROGRESS);
+        // failureReason not set — should be null
+
+        helper.broadcastUpdate(suggestion);
+
+        verify(webSocketHandler).sendToSuggestion(eq(10L), argThat(msg ->
+                msg.contains("\"failureReason\":\"\"")
+        ));
+    }
+
     // --- broadcastClarificationQuestions ---
 
     @Test
