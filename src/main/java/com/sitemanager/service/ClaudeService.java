@@ -73,7 +73,7 @@ public class ClaudeService {
     @Value("${app.claude-model-expert:}")
     private String claudeModelExpertDefault;
 
-    @Value("${app.claude-max-turns-expert:3}")
+    @Value("${app.claude-max-turns-expert:6}")
     private int claudeMaxTurnsExpertDefault;
 
     @Value("${app.claude-max-concurrent:2}")
