@@ -172,6 +172,9 @@ function handleWsMessage(data) {
             const canRetryPr2 = isAdmin && data.currentPhase === 'Done — review request failed';
             document.getElementById('retryPrActions').style.display = canRetryPr2 ? '' : 'none';
 
+            const canRetryExec = isAdmin && data.currentPhase && data.currentPhase.includes('can retry');
+            document.getElementById('retryExecutionActions').style.display = canRetryExec ? '' : 'none';
+
             const wsStatusAllowsReply = ['DRAFT', 'DISCUSSING', 'PLANNED'].includes(data.status);
             const wsHasReplyPermission = isAdmin || state.permissions.includes('REPLY');
             const canReply = wsStatusAllowsReply && wsHasReplyPermission;

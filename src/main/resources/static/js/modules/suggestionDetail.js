@@ -155,6 +155,10 @@ export async function loadDetail(id) {
     const canRetryPr = isAdmin && suggestion.currentPhase === 'Done — review request failed';
     document.getElementById('retryPrActions').style.display = canRetryPr ? '' : 'none';
 
+    // Retry execution action
+    const canRetryExecution = isAdmin && suggestion.currentPhase && suggestion.currentPhase.includes('can retry');
+    document.getElementById('retryExecutionActions').style.display = canRetryExecution ? '' : 'none';
+
     // Reply box visibility
     const statusAllowsReply = ['DRAFT', 'DISCUSSING', 'PLANNED'].includes(suggestion.status);
     const hasReplyPermission = isAdmin || state.permissions.includes('REPLY');
@@ -280,6 +284,24 @@ export async function submitDenySuggestion(id) {
         _callbacks.updateApprovalBanner();
     }
     await loadSuggestions();
+}
+
+export async function retryExecution() {
+    if (!confirm('This will retry the execution from scratch. Continue?')) return;
+    const btn = document.querySelector('#retryExecutionActions button');
+    btn.disabled = true;
+    btn.textContent = 'Retrying...';
+    try {
+        const result = await api('/suggestions/' + state.currentSuggestion + '/retry-execution', { method: 'POST' });
+        if (result && result.error) {
+            alert('Retry failed: ' + result.error);
+        }
+    } catch (e) {
+        alert('Retry failed: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Retry Execution';
+    }
 }
 
 export async function retryPr() {

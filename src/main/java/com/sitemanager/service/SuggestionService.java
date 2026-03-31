@@ -2448,6 +2448,31 @@ public class SuggestionService {
         }
     }
 
+    public Suggestion retryExecution(Long suggestionId) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId)
+                .orElseThrow(() -> new IllegalStateException("Suggestion not found"));
+
+        String phase = suggestion.getCurrentPhase();
+        if (phase == null || !phase.contains("can retry")) {
+            throw new IllegalStateException("Suggestion is not in a retryable state");
+        }
+
+        log.info("[AI-FLOW] suggestion={} retrying execution (was: {})", suggestionId, phase);
+
+        // Reset to APPROVED so executeApprovedSuggestion picks it up cleanly
+        suggestion.setStatus(SuggestionStatus.APPROVED);
+        suggestion.setCurrentPhase("Retrying...");
+        suggestion.setWorkingDirectory(null);
+        suggestionRepository.save(suggestion);
+        broadcastUpdate(suggestion);
+
+        addMessage(suggestionId, SenderType.SYSTEM, "System",
+                "An admin has requested a retry. Re-starting execution...");
+
+        executeApprovedSuggestion(suggestion);
+        return suggestion;
+    }
+
     public Map<String, Object> retryPrCreation(Long suggestionId) {
         Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
         if (suggestion == null) {
