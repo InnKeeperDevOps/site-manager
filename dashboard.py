@@ -94,7 +94,7 @@ def get_service_pid(svc_key):
     try:
         result = subprocess.run(
             ["pgrep", "-f", svc["grep_pattern"]],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True,
         )
         if result.returncode == 0:
             pids = result.stdout.strip().split("\n")
@@ -112,7 +112,7 @@ def get_service_status(svc_key):
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "%cpu,%mem,rss,etime", "--no-headers"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True,
         )
         if result.returncode == 0:
             parts = result.stdout.strip().split()
@@ -138,7 +138,7 @@ def start_service(svc_key):
             Path(f).touch(exist_ok=True)
         result = subprocess.run(
             svc["start_cmd"], shell=True, capture_output=True, text=True,
-            timeout=10, cwd=SCRIPT_DIR,
+            cwd=SCRIPT_DIR,
         )
         new_pid = result.stdout.strip().split("\n")[-1].strip()
         return True, f"{svc['name']} started (PID {new_pid})"
@@ -224,14 +224,12 @@ class ClaudeSession:
                     "--model", "sonnet",
                     "--output-format", "text",
                 ],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True, text=True,
                 cwd=SCRIPT_DIR,
             )
             response = result.stdout.strip() if result.stdout else "(no response)"
             if result.returncode != 0 and result.stderr:
                 response += f"\n[stderr]: {result.stderr.strip()[:200]}"
-        except subprocess.TimeoutExpired:
-            response = "[timed out after 120s]"
         except Exception as e:
             response = f"[error: {e}]"
 
@@ -599,7 +597,7 @@ def build_services_panel():
 
     # System resources
     try:
-        result = subprocess.run(["free", "-m"], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["free", "-m"], capture_output=True, text=True)
         for line in result.stdout.splitlines():
             if line.startswith("Mem:"):
                 parts = line.split()
@@ -613,7 +611,7 @@ def build_services_panel():
         pass
 
     try:
-        result = subprocess.run(["df", "-h", "/home/claude"], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["df", "-h", "/home/claude"], capture_output=True, text=True)
         lines = result.stdout.strip().splitlines()
         if len(lines) >= 2:
             parts = lines[1].split()
