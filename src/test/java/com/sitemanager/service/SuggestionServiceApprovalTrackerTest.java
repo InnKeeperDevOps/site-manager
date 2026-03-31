@@ -29,7 +29,7 @@ class SuggestionServiceApprovalTrackerTest {
 
     private SuggestionRepository suggestionRepository;
     private ClaudeService claudeService;
-    private SuggestionService service;
+    private ExpertReviewService service;
 
     @BeforeEach
     void setUp() {
@@ -38,7 +38,6 @@ class SuggestionServiceApprovalTrackerTest {
         PlanTaskRepository planTaskRepository = mock(PlanTaskRepository.class);
         SuggestionWebSocketHandler webSocketHandler = mock(SuggestionWebSocketHandler.class);
         UserNotificationWebSocketHandler userNotificationHandler = mock(UserNotificationWebSocketHandler.class);
-        SiteSettingsService siteSettingsService = mock(SiteSettingsService.class);
         SlackNotificationService slackNotificationService = mock(SlackNotificationService.class);
         claudeService = mock(ClaudeService.class);
         UserRepository userRepository = mock(UserRepository.class);
@@ -56,12 +55,12 @@ class SuggestionServiceApprovalTrackerTest {
         when(claudeService.expertReview(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), any()))
                 .thenReturn(new CompletableFuture<>());
 
-        service = new SuggestionService(
+        service = new ExpertReviewService(
                 suggestionRepository,
                 messageRepository,
                 planTaskRepository,
                 claudeService,
-                siteSettingsService,
+                mock(SuggestionMessagingHelper.class),
                 webSocketHandler,
                 userNotificationHandler,
                 slackNotificationService,
@@ -485,7 +484,7 @@ class SuggestionServiceApprovalTrackerTest {
 
         when(suggestionRepository.findById(300L)).thenReturn(Optional.of(suggestion));
 
-        Method m = SuggestionService.class.getDeclaredMethod("startExpertReviewPipeline", Long.class);
+        Method m = ExpertReviewService.class.getDeclaredMethod("startExpertReviewPipeline", Long.class);
         m.setAccessible(true);
         m.invoke(service, 300L);
 
@@ -505,7 +504,7 @@ class SuggestionServiceApprovalTrackerTest {
 
         when(suggestionRepository.findById(301L)).thenReturn(Optional.of(suggestion));
 
-        Method m = SuggestionService.class.getDeclaredMethod("startExpertReviewPipeline", Long.class);
+        Method m = ExpertReviewService.class.getDeclaredMethod("startExpertReviewPipeline", Long.class);
         m.setAccessible(true);
         m.invoke(service, 301L);
 
@@ -519,21 +518,21 @@ class SuggestionServiceApprovalTrackerTest {
 
     private void invokeUpdateApprovalTracker(Suggestion suggestion, ExpertRole expert, String status, int round)
             throws Exception {
-        Method m = SuggestionService.class.getDeclaredMethod(
+        Method m = ExpertReviewService.class.getDeclaredMethod(
                 "updateApprovalTracker", Suggestion.class, ExpertRole.class, String.class, int.class);
         m.setAccessible(true);
         m.invoke(service, suggestion, expert, status, round);
     }
 
     private String invokeGetApprovalStatus(Suggestion suggestion, ExpertRole expert) throws Exception {
-        Method m = SuggestionService.class.getDeclaredMethod(
+        Method m = ExpertReviewService.class.getDeclaredMethod(
                 "getApprovalStatus", Suggestion.class, ExpertRole.class);
         m.setAccessible(true);
         return (String) m.invoke(service, suggestion, expert);
     }
 
     private void invokeClearApprovalTracker(Suggestion suggestion) throws Exception {
-        Method m = SuggestionService.class.getDeclaredMethod(
+        Method m = ExpertReviewService.class.getDeclaredMethod(
                 "clearApprovalTracker", Suggestion.class);
         m.setAccessible(true);
         m.invoke(service, suggestion);

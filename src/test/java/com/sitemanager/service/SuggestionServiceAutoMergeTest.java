@@ -7,7 +7,6 @@ import com.sitemanager.model.enums.SuggestionStatus;
 import com.sitemanager.repository.PlanTaskRepository;
 import com.sitemanager.repository.SuggestionMessageRepository;
 import com.sitemanager.repository.SuggestionRepository;
-import com.sitemanager.repository.UserRepository;
 import com.sitemanager.websocket.SuggestionWebSocketHandler;
 import com.sitemanager.websocket.UserNotificationWebSocketHandler;
 import org.junit.jupiter.api.BeforeEach;
@@ -16,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.Optional;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -25,16 +25,20 @@ import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
+/**
+ * Tests for auto-merge and PR-creation logic in PlanExecutionService.
+ * These tests were originally written against SuggestionService, but the
+ * auto-merge / PR-creation methods now live in PlanExecutionService.
+ */
 class SuggestionServiceAutoMergeTest {
 
     private SuggestionRepository suggestionRepository;
-    private SuggestionMessageRepository messageRepository;
-    private SuggestionWebSocketHandler webSocketHandler;
-    private UserNotificationWebSocketHandler userNotificationHandler;
     private SiteSettingsService siteSettingsService;
     private SlackNotificationService slackNotificationService;
     private ClaudeService claudeService;
-    private SuggestionService service;
+    private SuggestionMessagingHelper messagingHelper;
+    private SuggestionWebSocketHandler webSocketHandler;
+    private PlanExecutionService planExecutionService;
 
     private static final String REPO_URL = "https://github.com/owner/repo";
     private static final String TOKEN = "ghp_test";
@@ -44,37 +48,45 @@ class SuggestionServiceAutoMergeTest {
     @BeforeEach
     void setUp() {
         suggestionRepository = mock(SuggestionRepository.class);
-        messageRepository = mock(SuggestionMessageRepository.class);
-        webSocketHandler = mock(SuggestionWebSocketHandler.class);
-        userNotificationHandler = mock(UserNotificationWebSocketHandler.class);
         siteSettingsService = mock(SiteSettingsService.class);
         slackNotificationService = mock(SlackNotificationService.class);
         claudeService = mock(ClaudeService.class);
+        webSocketHandler = mock(SuggestionWebSocketHandler.class);
 
         when(slackNotificationService.sendNotification(any(), any()))
                 .thenReturn(CompletableFuture.completedFuture(null));
         when(slackNotificationService.sendApprovalNeededNotification(any()))
                 .thenReturn(CompletableFuture.completedFuture(null));
 
-        UserRepository userRepository = mock(UserRepository.class);
-        when(userRepository.findByRole(any())).thenReturn(java.util.List.of());
-
         SuggestionMessage savedMsg = mock(SuggestionMessage.class);
         when(savedMsg.getId()).thenReturn(0L);
+
+        SuggestionMessageRepository messageRepository = mock(SuggestionMessageRepository.class);
         when(messageRepository.save(any())).thenReturn(savedMsg);
 
-        when(suggestionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        SiteSettings defaultSettings = new SiteSettings();
+        when(siteSettingsService.getSettings()).thenReturn(defaultSettings);
 
-        service = new SuggestionService(
+        messagingHelper = new SuggestionMessagingHelper(
                 suggestionRepository,
                 messageRepository,
                 mock(PlanTaskRepository.class),
+                webSocketHandler,
+                mock(UserNotificationWebSocketHandler.class),
+                slackNotificationService,
+                siteSettingsService
+        );
+
+        when(suggestionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        planExecutionService = new PlanExecutionService(
+                suggestionRepository,
+                mock(PlanTaskRepository.class),
                 claudeService,
+                messagingHelper,
                 siteSettingsService,
                 webSocketHandler,
-                userNotificationHandler,
-                slackNotificationService,
-                userRepository
+                slackNotificationService
         );
     }
 
@@ -113,7 +125,7 @@ class SuggestionServiceAutoMergeTest {
         when(claudeService.mergePullRequest(eq(REPO_URL), eq(PR_NUMBER), eq(TOKEN)))
                 .thenReturn(true);
 
-        service.retryPrCreation(5L);
+        planExecutionService.retryPrCreation(5L);
 
         verify(claudeService).mergePullRequest(REPO_URL, PR_NUMBER, TOKEN);
         assert suggestion.getStatus() == SuggestionStatus.MERGED;
@@ -129,7 +141,7 @@ class SuggestionServiceAutoMergeTest {
         when(claudeService.mergePullRequest(eq(REPO_URL), eq(PR_NUMBER), eq(TOKEN)))
                 .thenReturn(true);
 
-        service.retryPrCreation(5L);
+        planExecutionService.retryPrCreation(5L);
 
         verify(slackNotificationService).sendNotification(eq(suggestion), contains("merged"));
     }
@@ -145,7 +157,7 @@ class SuggestionServiceAutoMergeTest {
         when(claudeService.mergePullRequest(eq(REPO_URL), eq(PR_NUMBER), eq(TOKEN)))
                 .thenReturn(false);
 
-        service.retryPrCreation(5L);
+        planExecutionService.retryPrCreation(5L);
 
         verify(claudeService).mergePullRequest(REPO_URL, PR_NUMBER, TOKEN);
         assert suggestion.getStatus() == SuggestionStatus.FINAL_REVIEW;
@@ -160,7 +172,7 @@ class SuggestionServiceAutoMergeTest {
         when(claudeService.mergePullRequest(eq(REPO_URL), eq(PR_NUMBER), eq(TOKEN)))
                 .thenReturn(false);
 
-        service.retryPrCreation(5L);
+        planExecutionService.retryPrCreation(5L);
 
         verify(slackNotificationService).sendNotification(eq(suggestion), contains("manual"));
     }
@@ -174,7 +186,7 @@ class SuggestionServiceAutoMergeTest {
         when(siteSettingsService.getSettings()).thenReturn(settingsWithAutoMerge(false));
         stubPrCreation();
 
-        service.retryPrCreation(5L);
+        planExecutionService.retryPrCreation(5L);
 
         verify(claudeService, never()).mergePullRequest(anyString(), anyInt(), anyString());
         assert suggestion.getStatus() == SuggestionStatus.FINAL_REVIEW;
@@ -286,8 +298,8 @@ class SuggestionServiceAutoMergeTest {
     }
 
     private void invokeCreatePrForSuggestion(Suggestion suggestion) throws Exception {
-        Method method = SuggestionService.class.getDeclaredMethod("createPrForSuggestion", Suggestion.class);
+        Method method = PlanExecutionService.class.getDeclaredMethod("createPrForSuggestion", Suggestion.class);
         method.setAccessible(true);
-        method.invoke(service, suggestion);
+        method.invoke(planExecutionService, suggestion);
     }
 }

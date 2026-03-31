@@ -37,7 +37,7 @@ class SuggestionServiceApprovedExpertFilterTest {
     private SuggestionMessageRepository messageRepository;
     private ClaudeService claudeService;
     private SlackNotificationService slackNotificationService;
-    private SuggestionService service;
+    private ExpertReviewService service;
 
     @BeforeEach
     void setUp() {
@@ -64,12 +64,22 @@ class SuggestionServiceApprovedExpertFilterTest {
         when(claudeService.expertReview(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), any()))
                 .thenReturn(new CompletableFuture<>());
 
-        service = new SuggestionService(
+        SuggestionMessagingHelper messagingHelper = new SuggestionMessagingHelper(
+                suggestionRepository,
+                messageRepository,
+                planTaskRepository,
+                webSocketHandler,
+                userNotificationHandler,
+                slackNotificationService,
+                siteSettingsService
+        );
+
+        service = new ExpertReviewService(
                 suggestionRepository,
                 messageRepository,
                 planTaskRepository,
                 claudeService,
-                siteSettingsService,
+                messagingHelper,
                 webSocketHandler,
                 userNotificationHandler,
                 slackNotificationService,
@@ -333,7 +343,7 @@ class SuggestionServiceApprovedExpertFilterTest {
 
     private void invokeRunNextExpertReview(Long suggestionId) {
         try {
-            Method m = SuggestionService.class.getDeclaredMethod("runNextExpertReview", Long.class);
+            Method m = ExpertReviewService.class.getDeclaredMethod("runNextExpertReview", Long.class);
             m.setAccessible(true);
             m.invoke(service, suggestionId);
         } catch (Exception e) {
