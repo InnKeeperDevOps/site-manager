@@ -13,6 +13,7 @@ import com.sitemanager.repository.SuggestionRepository;
 import com.sitemanager.repository.UserRepository;
 import com.sitemanager.websocket.SuggestionWebSocketHandler;
 import com.sitemanager.websocket.UserNotificationWebSocketHandler;
+import com.sitemanager.service.ExpertReviewService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -36,6 +37,9 @@ class SuggestionServiceNotificationTest {
     private SlackNotificationService slackNotificationService;
     private UserRepository userRepository;
     private SuggestionService service;
+    private ExpertReviewService expertReviewService;
+    private PlanExecutionService planExecutionService;
+    private SuggestionMessagingHelper messagingHelper;
 
     @BeforeEach
     void setUp() {
@@ -64,16 +68,48 @@ class SuggestionServiceNotificationTest {
         when(savedMsg.getId()).thenReturn(0L);
         when(messageRepository.save(any())).thenReturn(savedMsg);
 
+        messagingHelper = new SuggestionMessagingHelper(
+                suggestionRepository,
+                messageRepository,
+                mock(PlanTaskRepository.class),
+                webSocketHandler,
+                userNotificationHandler,
+                slackNotificationService,
+                siteSettingsService
+        );
+
+        expertReviewService = new ExpertReviewService(
+                suggestionRepository,
+                messageRepository,
+                mock(PlanTaskRepository.class),
+                mock(ClaudeService.class),
+                messagingHelper,
+                webSocketHandler,
+                userNotificationHandler,
+                slackNotificationService,
+                userRepository
+        );
+
+        planExecutionService = new PlanExecutionService(
+                suggestionRepository,
+                mock(PlanTaskRepository.class),
+                mock(ClaudeService.class),
+                messagingHelper,
+                siteSettingsService,
+                webSocketHandler,
+                slackNotificationService
+        );
+
         service = new SuggestionService(
                 suggestionRepository,
                 messageRepository,
                 mock(PlanTaskRepository.class),
                 mock(ClaudeService.class),
                 siteSettingsService,
-                webSocketHandler,
-                userNotificationHandler,
                 slackNotificationService,
-                userRepository
+                messagingHelper,
+                expertReviewService,
+                planExecutionService
         );
     }
 
@@ -209,13 +245,14 @@ class SuggestionServiceNotificationTest {
         when(suggestionRepository.findById(30L)).thenReturn(Optional.of(suggestion));
         when(suggestionRepository.save(any())).thenReturn(suggestion);
 
-        // Use a spy so we can stub createPrAsync and avoid its complex dependencies
-        SuggestionService spyService = spy(service);
-        doNothing().when(spyService).createPrAsync(any());
+        // Spy on PlanExecutionService (where handleExecutionResult now lives) so we
+        // can stub createPrAsync to avoid its complex git/PR dependencies
+        PlanExecutionService spyPes = spy(planExecutionService);
+        doNothing().when(spyPes).createPrAsync(any());
 
-        spyService.handleExecutionResult(30L, "COMPLETED — all done");
+        spyPes.handleExecutionResult(30L, "COMPLETED — all done");
 
-        verify(slackNotificationService).sendNotification(suggestion, "DEV_COMPLETE");
+        verify(slackNotificationService).sendNotification(eq(suggestion), eq("DEV_COMPLETE"));
     }
 
     @Test
@@ -225,7 +262,7 @@ class SuggestionServiceNotificationTest {
         when(suggestionRepository.findById(31L)).thenReturn(Optional.of(suggestion));
         when(suggestionRepository.save(any())).thenReturn(suggestion);
 
-        service.handleExecutionResult(31L, "FAILED — something went wrong");
+        planExecutionService.handleExecutionResult(31L, "FAILED — something went wrong");
 
         verify(slackNotificationService, never()).sendNotification(any(), eq("DEV_COMPLETE"));
     }
@@ -234,7 +271,7 @@ class SuggestionServiceNotificationTest {
     void handleExecutionResult_suggestionNotFound_doesNotSendAnyNotification() {
         when(suggestionRepository.findById(99L)).thenReturn(Optional.empty());
 
-        service.handleExecutionResult(99L, "COMPLETED");
+        planExecutionService.handleExecutionResult(99L, "COMPLETED");
 
         verify(slackNotificationService, never()).sendNotification(any(), any());
     }
@@ -351,16 +388,16 @@ class SuggestionServiceNotificationTest {
     }
 
     private void invokeBroadcastClarificationQuestions(Long suggestionId, List<String> questions) throws Exception {
-        Method method = SuggestionService.class.getDeclaredMethod(
+        Method method = SuggestionMessagingHelper.class.getDeclaredMethod(
                 "broadcastClarificationQuestions", Long.class, List.class);
         method.setAccessible(true);
-        method.invoke(service, suggestionId, questions);
+        method.invoke(messagingHelper, suggestionId, questions);
     }
 
     private void invokeNotifyAdminsApprovalNeeded(Suggestion suggestion) throws Exception {
-        Method method = SuggestionService.class.getDeclaredMethod(
+        Method method = ExpertReviewService.class.getDeclaredMethod(
                 "notifyAdminsApprovalNeeded", Suggestion.class);
         method.setAccessible(true);
-        method.invoke(service, suggestion);
+        method.invoke(expertReviewService, suggestion);
     }
 }

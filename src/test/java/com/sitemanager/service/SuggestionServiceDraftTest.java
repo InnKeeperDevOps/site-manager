@@ -12,6 +12,7 @@ import com.sitemanager.repository.SuggestionRepository;
 import com.sitemanager.repository.UserRepository;
 import com.sitemanager.websocket.SuggestionWebSocketHandler;
 import com.sitemanager.websocket.UserNotificationWebSocketHandler;
+import com.sitemanager.service.ExpertReviewService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.server.ResponseStatusException;
@@ -77,16 +78,26 @@ class SuggestionServiceDraftTest {
             return s;
         });
 
+        SuggestionMessagingHelper messagingHelper = new SuggestionMessagingHelper(
+                suggestionRepository,
+                messageRepository,
+                mock(PlanTaskRepository.class),
+                webSocketHandler,
+                userNotificationHandler,
+                slackNotificationService,
+                siteSettingsService
+        );
+
         service = new SuggestionService(
                 suggestionRepository,
                 messageRepository,
                 mock(PlanTaskRepository.class),
                 claudeService,
                 siteSettingsService,
-                webSocketHandler,
-                userNotificationHandler,
                 slackNotificationService,
-                userRepository
+                messagingHelper,
+                mock(ExpertReviewService.class),
+                mock(PlanExecutionService.class)
         );
     }
 

@@ -39,7 +39,7 @@ class SuggestionServiceUserGuidanceRestartTest {
     private SuggestionMessageRepository messageRepository;
     private ClaudeService claudeService;
     private SlackNotificationService slackNotificationService;
-    private SuggestionService service;
+    private ExpertReviewService service;
 
     @BeforeEach
     void setUp() {
@@ -48,7 +48,6 @@ class SuggestionServiceUserGuidanceRestartTest {
         PlanTaskRepository planTaskRepository = mock(PlanTaskRepository.class);
         SuggestionWebSocketHandler webSocketHandler = mock(SuggestionWebSocketHandler.class);
         UserNotificationWebSocketHandler userNotificationHandler = mock(UserNotificationWebSocketHandler.class);
-        SiteSettingsService siteSettingsService = mock(SiteSettingsService.class);
         slackNotificationService = mock(SlackNotificationService.class);
         claudeService = mock(ClaudeService.class);
         UserRepository userRepository = mock(UserRepository.class);
@@ -66,12 +65,12 @@ class SuggestionServiceUserGuidanceRestartTest {
         when(claudeService.expertReview(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), any()))
                 .thenReturn(new CompletableFuture<>());
 
-        service = new SuggestionService(
+        service = new ExpertReviewService(
                 suggestionRepository,
                 messageRepository,
                 planTaskRepository,
                 claudeService,
-                siteSettingsService,
+                mock(SuggestionMessagingHelper.class),
                 webSocketHandler,
                 userNotificationHandler,
                 slackNotificationService,

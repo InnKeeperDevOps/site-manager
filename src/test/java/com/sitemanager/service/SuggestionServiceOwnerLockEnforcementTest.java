@@ -37,10 +37,9 @@ class SuggestionServiceOwnerLockEnforcementTest {
     private PlanTaskRepository planTaskRepository;
     private SuggestionWebSocketHandler webSocketHandler;
     private UserNotificationWebSocketHandler userNotificationHandler;
-    private SiteSettingsService siteSettingsService;
     private SlackNotificationService slackNotificationService;
     private ClaudeService claudeService;
-    private SuggestionService service;
+    private ExpertReviewService service;
 
     @BeforeEach
     void setUp() {
@@ -49,7 +48,6 @@ class SuggestionServiceOwnerLockEnforcementTest {
         planTaskRepository = mock(PlanTaskRepository.class);
         webSocketHandler = mock(SuggestionWebSocketHandler.class);
         userNotificationHandler = mock(UserNotificationWebSocketHandler.class);
-        siteSettingsService = mock(SiteSettingsService.class);
         slackNotificationService = mock(SlackNotificationService.class);
         claudeService = mock(ClaudeService.class);
 
@@ -72,12 +70,12 @@ class SuggestionServiceOwnerLockEnforcementTest {
         when(claudeService.expertReview(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), any()))
                 .thenReturn(new CompletableFuture<>());
 
-        service = new SuggestionService(
+        service = new ExpertReviewService(
                 suggestionRepository,
                 messageRepository,
                 planTaskRepository,
                 claudeService,
-                siteSettingsService,
+                mock(SuggestionMessagingHelper.class),
                 webSocketHandler,
                 userNotificationHandler,
                 slackNotificationService,
