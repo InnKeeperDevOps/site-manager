@@ -74,7 +74,7 @@ log_file() {
 log() {
     local msg="$(date -u +"%Y-%m-%dT%H:%M:%SZ") [monitor] $*"
     echo "$msg" >> "$MONITOR_LOG"
-    $HEADLESS && echo "$msg"
+    $HEADLESS && echo "$msg" || true
 }
 
 # ─── Bar Drawing ────────────────────────────────────────────────────────────────
@@ -341,7 +341,7 @@ render_dashboard() {
     printf "\n"
     hr $cols "━" "$FG_CYAN"
     local footer_left="Log: $MONITOR_LOG"
-    local footer_right="Refresh: 30s │ Ctrl+C to stop"
+    local footer_right="Refresh: 1s │ Ctrl+C to stop │ Type below to talk to Claude"
     local footer_gap=$(( cols - ${#footer_left} - ${#footer_right} - pad * 2 ))
     (( footer_gap < 1 )) && footer_gap=1
     printf "   ${FG_DARK}${ITAL}%s${RST}" "$footer_left"
@@ -361,6 +361,14 @@ fi
 # ─── Build the Claude Prompt ───────────────────────────────────────────────────
 PROMPT=$(cat <<'PROMPT_EOF'
 You are managing the site-manager application at /home/claude/site-manager. Follow these instructions precisely.
+
+## CRITICAL RULE: ALL CODE CHANGES MUST BE COMMITTED AND PUSHED
+NEVER make a code change without immediately committing and pushing it to origin/main.
+NO EXCEPTIONS. Every file edit must be followed by:
+  git add <file>
+  git commit -m "<message>"
+  git push origin main
+Untracked, uncommitted, or unpushed changes are forbidden. If you make a change, push it.
 
 ## Phase 1: Start the application
 
@@ -491,11 +499,138 @@ cleanup() {
         printf "${FG_GRAY}Claude session (PID $CLAUDE_PID) is still running in background.${RST}\n"
         printf "${FG_GRAY}Monitoring cron jobs continue autonomously.${RST}\n"
     fi
-    rm -f "$DASHBOARD_STATE"
+    # Kill any running terminal Claude process
+    if [[ -f "$CLAUDE_TERMINAL_PID_FILE" ]]; then
+        local term_pid=$(cat "$CLAUDE_TERMINAL_PID_FILE" 2>/dev/null)
+        [[ -n "$term_pid" ]] && kill "$term_pid" 2>/dev/null || true
+    fi
+    rm -f "$DASHBOARD_STATE" "$CLAUDE_TERMINAL_LOG" "$CLAUDE_TERMINAL_PID_FILE" "$CLAUDE_TERMINAL_INPUT"
     printf "${FG_GREEN}Dashboard stopped. Logs saved to: ${BOLD}$MONITOR_LOG${RST}\n"
     exit 0
 }
 trap cleanup SIGINT SIGTERM
+
+# ── Claude Terminal State ──
+CLAUDE_TERMINAL_LOG="$SCRIPT_DIR/.claude-terminal.log"
+CLAUDE_TERMINAL_PID_FILE="$SCRIPT_DIR/.claude-terminal.pid"
+CLAUDE_TERMINAL_INPUT="$SCRIPT_DIR/.claude-terminal-input"
+> "$CLAUDE_TERMINAL_LOG"
+TERMINAL_HISTORY=()
+TERMINAL_PROMPT=""
+TERMINAL_CURSOR_VISIBLE=true
+
+render_claude_terminal() {
+    local cols=$(tput cols 2>/dev/null || echo 120)
+    local terminal_lines=10  # lines reserved for terminal output
+
+    printf "\n"
+    printf "   ${BOLD}${FG_CYAN}⬢ CLAUDE TERMINAL${RST}  ${FG_DARK}(ask for changes, restarts, etc.)${RST}\n"
+    hr $cols "─" "$FG_CYAN"
+
+    # Show recent terminal output (last N lines)
+    local output_lines=()
+    if [[ -f "$CLAUDE_TERMINAL_LOG" ]]; then
+        while IFS= read -r line; do
+            output_lines+=("$line")
+        done < <(tail -$terminal_lines "$CLAUDE_TERMINAL_LOG" 2>/dev/null)
+    fi
+
+    # Also show history entries
+    local total_history=${#TERMINAL_HISTORY[@]}
+    local show_count=$(( terminal_lines ))
+    local start_idx=0
+    (( total_history > show_count )) && start_idx=$(( total_history - show_count ))
+
+    # Combine: show history items, then log tail
+    local displayed=0
+    for (( i=start_idx; i<total_history; i++ )); do
+        local entry="${TERMINAL_HISTORY[$i]}"
+        printf "   %s\n" "${entry:0:$((cols - 4))}"
+        (( displayed++ ))
+    done
+
+    # Fill remaining lines from log if history didn't fill them
+    local remaining=$(( terminal_lines - displayed ))
+    if (( remaining > 0 )) && (( ${#output_lines[@]} > 0 )); then
+        local log_start=0
+        (( ${#output_lines[@]} > remaining )) && log_start=$(( ${#output_lines[@]} - remaining ))
+        for (( i=log_start; i<${#output_lines[@]}; i++ )); do
+            local line="${output_lines[$i]}"
+            # Color code output lines
+            local line_color="$FG_GRAY"
+            if [[ "$line" == ">>> "* ]]; then
+                line_color="${FG_CYAN}${BOLD}"
+            elif [[ "$line" == "[done]"* ]] || [[ "$line" == *"✓"* ]]; then
+                line_color="$FG_GREEN"
+            elif [[ "$line" == *"error"* ]] || [[ "$line" == *"Error"* ]]; then
+                line_color="$FG_RED"
+            fi
+            printf "   ${line_color}%s${RST}\n" "${line:0:$((cols - 4))}"
+            (( displayed++ ))
+        done
+    fi
+
+    # Pad empty lines
+    for (( i=displayed; i<terminal_lines; i++ )); do
+        printf "\n"
+    done
+
+    hr $cols "─" "$FG_CYAN"
+
+    # Show active command indicator
+    if [[ -f "$CLAUDE_TERMINAL_PID_FILE" ]]; then
+        local term_pid=$(cat "$CLAUDE_TERMINAL_PID_FILE" 2>/dev/null)
+        if [[ -n "$term_pid" ]] && kill -0 "$term_pid" 2>/dev/null; then
+            printf "   ${FG_YELLOW}${BOLD}⟳ Claude is working...${RST}  ${FG_DARK}(PID $term_pid)${RST}\n"
+            return
+        else
+            rm -f "$CLAUDE_TERMINAL_PID_FILE"
+        fi
+    fi
+
+    # Input prompt
+    printf "   ${FG_CYAN}${BOLD}claude ▸${RST} ${FG_WHITE}${TERMINAL_PROMPT}${RST}"
+    if $TERMINAL_CURSOR_VISIBLE; then
+        printf "█"
+    fi
+    printf "\n"
+}
+
+process_terminal_command() {
+    local cmd="$1"
+    [[ -z "$cmd" ]] && return
+
+    TERMINAL_HISTORY+=("${FG_CYAN}${BOLD}>>> ${RST}${FG_WHITE}$cmd")
+    log "TERMINAL command: $cmd"
+
+    # Launch Claude in background to handle the command
+    (
+        cd "$SCRIPT_DIR"
+        local response
+        response=$(claude \
+            --dangerously-skip-permissions \
+            -p "You are managing the site-manager app at /home/claude/site-manager. The user typed the following command/request in the monitor dashboard terminal. Execute it concisely and report what you did in 1-3 short lines.
+
+CRITICAL RULE: If you make ANY code changes, you MUST immediately commit and push them:
+  git add <file> && git commit -m '<message>' && git push origin main
+NEVER leave changes uncommitted or unpushed.
+
+User request: $cmd" \
+            --model sonnet \
+            2>&1) || true
+
+        # Append response to log
+        echo "$response" | tail -20 | while IFS= read -r line; do
+            echo "$line" >> "$CLAUDE_TERMINAL_LOG"
+        done
+        echo "[done] ✓ Completed: $cmd" >> "$CLAUDE_TERMINAL_LOG"
+        rm -f "$CLAUDE_TERMINAL_PID_FILE"
+    ) &
+    local bg_pid=$!
+    echo "$bg_pid" > "$CLAUDE_TERMINAL_PID_FILE"
+    TERMINAL_HISTORY+=("${FG_YELLOW}⟳ Processing... (PID $bg_pid)")
+    log "TERMINAL launched Claude PID $bg_pid for: $cmd"
+}
 
 while true; do
     render_dashboard
@@ -514,10 +649,19 @@ while true; do
         printf "\n  ${BOLD}${FG_BLUE}${SYM_GEAR} RECENT ACTIONS${RST}\n"
         hr $(tput cols 2>/dev/null || echo 80) "─" "$FG_DARK"
         echo "$local_actions" | while IFS= read -r line; do
-            local cols_now=$(tput cols 2>/dev/null || echo 80)
+            cols_now=$(tput cols 2>/dev/null || echo 80)
             printf "  ${FG_MAGENTA}%s${RST}\n" "${line:0:$((cols_now - 4))}"
         done
     fi
 
-    sleep 30
+    # Render Claude terminal
+    render_claude_terminal
+
+    # Read user input with 1-second timeout
+    TERMINAL_PROMPT=""
+    if read -r -t 1 user_input 2>/dev/null; then
+        if [[ -n "$user_input" ]]; then
+            process_terminal_command "$user_input"
+        fi
+    fi
 done
