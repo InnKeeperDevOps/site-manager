@@ -82,6 +82,15 @@ public class ClaudeService {
     @Value("${app.claude-max-calls-per-minute:10}")
     private int claudeMaxCallsPerMinute;
 
+    @Value("${app.claude-max-retries:3}")
+    private int claudeMaxRetries;
+
+    @Value("${app.claude-retry-base-delay-ms:2000}")
+    private long claudeRetryBaseDelayMs;
+
+    @Value("${app.claude-retry-max-delay-ms:30000}")
+    private long claudeRetryMaxDelayMs;
+
     public ClaudeService(SiteSettingsRepository settingsRepository) {
         this.settingsRepository = settingsRepository;
         // Defaults; @PostConstruct re-inits with configured values
@@ -731,6 +740,9 @@ public class ClaudeService {
         return CompletableFuture.supplyAsync(() -> {
             try {
                 return sendToClaude(prompt, sessionId, workingDir, conversationContext, progressCallback, operationType, model, maxTurns);
+            } catch (ClaudeExecutionException e) {
+                // Propagate typed execution failures so callers can inspect ClaudeFailureType
+                throw e;
             } catch (Exception e) {
                 log.error("[CLAUDE-{}] session={} ERROR: {}", operationType, sessionId, e.getMessage(), e);
                 return "{\"status\": \"ERROR\", \"message\": \"" +
@@ -761,8 +773,43 @@ public class ClaudeService {
                                  Consumer<String> progressCallback,
                                  String operationType, String model, int maxTurns) throws Exception {
         long requestId = requestCounter.incrementAndGet();
-        long startTime = System.currentTimeMillis();
         String logPrefix = String.format("[CLAUDE-REQ-%d][%s]", requestId, operationType);
+
+        ClaudeExecutionException lastException = null;
+        for (int attempt = 1; attempt <= claudeMaxRetries + 1; attempt++) {
+            try {
+                return executeClaudeProcess(prompt, sessionId, workingDir, conversationContext,
+                        progressCallback, operationType, model, maxTurns, logPrefix);
+            } catch (ClaudeExecutionException e) {
+                lastException = e;
+                boolean isPermanent = e.getType() == ClaudeFailureType.PERMANENT;
+                boolean isLastAttempt = attempt > claudeMaxRetries;
+                if (isPermanent || isLastAttempt) {
+                    throw new ClaudeExecutionException(e.getMessage(), e.getType(), attempt);
+                }
+                long delay = computeRetryDelay(attempt);
+                log.warn("{} transient failure on attempt {}/{}, retrying in {}ms: {}",
+                        logPrefix, attempt, claudeMaxRetries + 1, delay, e.getMessage());
+                Thread.sleep(delay);
+            }
+        }
+        // Should never reach here, but satisfy compiler
+        throw lastException;
+    }
+
+    long computeRetryDelay(int attempt) {
+        long exponential = claudeRetryBaseDelayMs * (1L << (attempt - 1));
+        long capped = Math.min(exponential, claudeRetryMaxDelayMs);
+        long jitter = (long) (capped * 0.2 * Math.random());
+        return capped + jitter;
+    }
+
+    private String executeClaudeProcess(String prompt, String sessionId, String workingDir,
+                                        String conversationContext,
+                                        Consumer<String> progressCallback,
+                                        String operationType, String model, int maxTurns,
+                                        String logPrefix) throws Exception {
+        long startTime = System.currentTimeMillis();
 
         // Expert reviews and feedback always get a fresh session (no resume)
         boolean isExpertOp = operationType.startsWith("expert-review:") || operationType.startsWith("review-feedback:");
@@ -823,7 +870,15 @@ public class ClaudeService {
             log.debug("{} prompt: {}", logPrefix, truncate(prompt, MAX_LOG_PROMPT_LENGTH));
         }
 
-        Process process = pb.start();
+        Process process;
+        try {
+            process = pb.start();
+        } catch (IOException e) {
+            log.error("{} failed to start Claude CLI process: {}", logPrefix, e.getMessage());
+            throw new ClaudeExecutionException(
+                    "Failed to start Claude CLI process: " + e.getMessage(),
+                    ClaudeFailureType.TRANSIENT, 1);
+        }
 
         StringBuilder output = new StringBuilder();
         try (BufferedReader reader = new BufferedReader(
@@ -838,6 +893,11 @@ public class ClaudeService {
                     progressCallback.accept(line);
                 }
             }
+        } catch (IOException e) {
+            log.error("{} error reading Claude CLI output: {}", logPrefix, e.getMessage());
+            throw new ClaudeExecutionException(
+                    "Error reading Claude CLI output: " + e.getMessage(),
+                    ClaudeFailureType.TRANSIENT, 1);
         }
 
         boolean completed = process.waitFor(claudeTimeoutMinutes, TimeUnit.MINUTES);
@@ -846,7 +906,9 @@ public class ClaudeService {
             long elapsed = System.currentTimeMillis() - startTime;
             log.error("{} TIMEOUT after {}ms (limit={}min) — process killed",
                     logPrefix, elapsed, claudeTimeoutMinutes);
-            throw new RuntimeException("Claude CLI timed out after " + claudeTimeoutMinutes + " minutes");
+            throw new ClaudeExecutionException(
+                    "Claude CLI timed out after " + claudeTimeoutMinutes + " minutes",
+                    ClaudeFailureType.TRANSIENT, 1);
         }
 
         int exitCode = process.exitValue();
@@ -885,8 +947,14 @@ public class ClaudeService {
                                 conversationContext, progressCallback, operationType, model, maxTurns);
                     }
                     log.warn("{} error response: {}", logPrefix, truncate(errorMsg, MAX_LOG_RESPONSE_LENGTH));
+                    ClaudeFailureType failureType = classifyFailure(rawOutput, exitCode, null);
+                    throw new ClaudeExecutionException(
+                            "Claude CLI returned is_error: " + truncate(errorMsg, 200),
+                            failureType, 1);
                 }
             }
+        } catch (ClaudeExecutionException e) {
+            throw e;
         } catch (Exception e) {
             log.debug("{} could not parse output as JSON: {}", logPrefix, e.getMessage());
         }
@@ -906,6 +974,10 @@ public class ClaudeService {
 
         if (exitCode != 0) {
             log.warn("{} non-zero exit code: {}", logPrefix, exitCode);
+            ClaudeFailureType failureType = classifyFailure(rawOutput, exitCode, null);
+            throw new ClaudeExecutionException(
+                    "Claude CLI exited with code " + exitCode,
+                    failureType, 1);
         }
 
         // Log response summary
@@ -1616,5 +1688,93 @@ public class ClaudeService {
 
     public void shutdown() {
         executor.shutdown();
+    }
+
+    // -------------------------------------------------------------------------
+    // Failure classification
+    // -------------------------------------------------------------------------
+
+    public enum ClaudeFailureType {
+        TRANSIENT, PERMANENT
+    }
+
+    public static class ClaudeExecutionException extends RuntimeException {
+        private final ClaudeFailureType type;
+        private final int attemptNumber;
+
+        public ClaudeExecutionException(String message, ClaudeFailureType type, int attemptNumber) {
+            super(message);
+            this.type = type;
+            this.attemptNumber = attemptNumber;
+        }
+
+        public ClaudeFailureType getType() { return type; }
+        public int getAttemptNumber() { return attemptNumber; }
+    }
+
+    /**
+     * Classify a Claude CLI failure as TRANSIENT (worth retrying) or PERMANENT (do not retry).
+     *
+     * <p>PERMANENT conditions:</p>
+     * <ul>
+     *   <li>exit code 2 (CLI usage / argument error)</li>
+     *   <li>{@code is_error} JSON flag combined with authentication or model-not-found messages</li>
+     *   <li>successful exit (code 0) with null or empty output</li>
+     * </ul>
+     *
+     * <p>TRANSIENT conditions (checked after PERMANENT):</p>
+     * <ul>
+     *   <li>{@link IOException} as the root cause</li>
+     *   <li>cause message or raw output containing "timed out"</li>
+     *   <li>raw output containing "rate limit" or "overloaded"</li>
+     *   <li>any other non-zero exit code</li>
+     * </ul>
+     */
+    ClaudeFailureType classifyFailure(String rawOutput, int exitCode, Throwable cause) {
+        // PERMANENT: exit code 2 indicates a CLI argument / usage error
+        if (exitCode == 2) {
+            return ClaudeFailureType.PERMANENT;
+        }
+
+        // PERMANENT: is_error with authentication or model-not-found messages
+        if (rawOutput != null && rawOutput.contains("is_error")) {
+            String lower = rawOutput.toLowerCase();
+            if (lower.contains("authentication") || lower.contains("unauthorized") ||
+                    lower.contains("invalid api key") || lower.contains("model not found") ||
+                    lower.contains("model_not_found") || lower.contains("invalid_api_key")) {
+                return ClaudeFailureType.PERMANENT;
+            }
+        }
+
+        // PERMANENT: successful exit but null/empty output (broken CLI or config issue)
+        if (exitCode == 0 && (rawOutput == null || rawOutput.isBlank())) {
+            return ClaudeFailureType.PERMANENT;
+        }
+
+        // TRANSIENT: IOException during process start or stream read
+        if (cause instanceof IOException) {
+            return ClaudeFailureType.TRANSIENT;
+        }
+
+        // TRANSIENT: timed out (from cause message or raw output)
+        if (cause != null && cause.getMessage() != null && cause.getMessage().contains("timed out")) {
+            return ClaudeFailureType.TRANSIENT;
+        }
+
+        // TRANSIENT: rate-limit or overload signals in output
+        if (rawOutput != null) {
+            String lower = rawOutput.toLowerCase();
+            if (lower.contains("rate limit") || lower.contains("overloaded")) {
+                return ClaudeFailureType.TRANSIENT;
+            }
+        }
+
+        // TRANSIENT: any remaining non-zero exit code (not auth, not exit-2)
+        if (exitCode != 0) {
+            return ClaudeFailureType.TRANSIENT;
+        }
+
+        // Default: TRANSIENT for unexpected conditions
+        return ClaudeFailureType.TRANSIENT;
     }
 }

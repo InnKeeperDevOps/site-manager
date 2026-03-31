@@ -132,4 +132,16 @@ class ClaudeServiceRateLimitTest {
         int head = (int) ReflectionTestUtils.getField(claudeService, "timestampHead");
         assertEquals(0, head, "timestampHead should be reset to 0 after reinitialization");
     }
+
+    // -------------------------------------------------------------------------
+    // Rate-limit keyword in output → classified as TRANSIENT
+    // -------------------------------------------------------------------------
+
+    @Test
+    void rateLimitKeywordInOutput_isClassifiedAsTransient() {
+        ClaudeService.ClaudeFailureType type =
+                claudeService.classifyFailure("Error: rate limit exceeded, please try again later", 1, null);
+        assertEquals(ClaudeService.ClaudeFailureType.TRANSIENT, type,
+                "Output containing 'rate limit' should be classified as TRANSIENT");
+    }
 }

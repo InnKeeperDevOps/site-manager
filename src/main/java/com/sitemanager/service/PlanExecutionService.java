@@ -269,11 +269,12 @@ public class PlanExecutionService {
 
             } catch (Exception e) {
                 log.error("Failed to execute suggestion {}: {}", suggestion.getId(), e.getMessage(), e);
-                messagingHelper.addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
-                        "Something went wrong while working on this suggestion. It can be retried.");
+                suggestion.setFailureReason(trimTo1000(e.getMessage() != null ? e.getMessage() : "Unexpected error during setup"));
                 suggestion.setCurrentPhase("Failed — can retry");
                 suggestionRepository.save(suggestion);
                 messagingHelper.broadcastUpdate(suggestion);
+                messagingHelper.addMessage(suggestion.getId(), SenderType.SYSTEM, "System",
+                        "Something went wrong while working on this suggestion. It can be retried.");
                 tryStartNextQueuedSuggestion();
             }
         }).start();
@@ -345,6 +346,7 @@ public class PlanExecutionService {
         String workDir = suggestion.getWorkingDirectory();
         String plan = suggestion.getPlanSummary() != null ? suggestion.getPlanSummary() : suggestion.getDescription();
 
+        final PlanTask taskSnapshot = nextTask;
         claudeService.executeSingleTask(
                 executionSessionId,
                 plan,
@@ -355,7 +357,11 @@ public class PlanExecutionService {
                 completedSummary,
                 workDir,
                 progress -> handleExecutionProgress(suggestionId, progress)
-        ).thenAccept(result -> handleSingleTaskResult(suggestionId, taskOrder, result));
+        ).thenAccept(result -> handleSingleTaskResult(suggestionId, taskOrder, result))
+         .exceptionally(ex -> {
+             handleTaskException(suggestionId, taskOrder, taskSnapshot, ex);
+             return null;
+         });
     }
 
     /**
@@ -382,10 +388,13 @@ public class PlanExecutionService {
                     "Task " + taskOrder + " implementation complete. Experts are now reviewing the work...");
             startTaskCompletionReview(suggestionId, taskOrder);
         } else if (task.getStatus() == TaskStatus.FAILED) {
+            String reason = extractFailureMessage(result);
+            task.setFailureReason(trimTo1000(reason));
             task.setStatusDetail("Implementation failed");
             planTaskRepository.save(task);
             messagingHelper.broadcastTaskUpdate(suggestionId, task);
             messagingHelper.addMessage(suggestionId, SenderType.AI, "Claude", result);
+            suggestion.setFailureReason("Task '" + task.getTitle() + "' failed: " + trimTo1000(reason));
             suggestion.setCurrentPhase("Task " + taskOrder + " failed — can retry");
             suggestionRepository.save(suggestion);
             messagingHelper.broadcastUpdate(suggestion);
@@ -1039,6 +1048,83 @@ public class PlanExecutionService {
             sb.append("\n");
         }
         return sb.toString();
+    }
+
+    /**
+     * Handle an infrastructure exception thrown by a task execution CompletableFuture.
+     * Applies retry logic for TRANSIENT failures and persists failure reasons for permanent ones.
+     */
+    private void handleTaskException(Long suggestionId, int taskOrder, PlanTask taskSnapshot, Throwable ex) {
+        Suggestion suggestion = suggestionRepository.findById(suggestionId).orElse(null);
+        if (suggestion == null) return;
+
+        Optional<PlanTask> optTask = planTaskRepository.findBySuggestionIdAndTaskOrder(suggestionId, taskOrder);
+        PlanTask task = optTask.orElse(taskSnapshot);
+
+        // Unwrap CompletionException to get the root cause
+        Throwable cause = ex instanceof java.util.concurrent.CompletionException && ex.getCause() != null
+                ? ex.getCause() : ex;
+
+        boolean isTransient = cause instanceof ClaudeService.ClaudeExecutionException &&
+                ((ClaudeService.ClaudeExecutionException) cause).getType() == ClaudeService.ClaudeFailureType.TRANSIENT;
+        boolean hasRetriesLeft = task.getRetryCount() < 3;
+
+        if (isTransient && hasRetriesLeft) {
+            int newRetryCount = task.getRetryCount() + 1;
+            task.setRetryCount(newRetryCount);
+            task.setStatus(TaskStatus.PENDING);
+            task.setStatusDetail("Waiting to retry (attempt " + newRetryCount + "/3)");
+            planTaskRepository.save(task);
+            messagingHelper.broadcastTaskUpdate(suggestionId, task);
+
+            messagingHelper.addMessage(suggestionId, SenderType.SYSTEM, "System",
+                    "Task " + taskOrder + " hit a temporary issue and will retry automatically (attempt " + newRetryCount + "/3).");
+
+            log.warn("[AI-FLOW] suggestion={} task={} transient failure, scheduling retry {}/3",
+                    suggestionId, taskOrder, newRetryCount);
+            executeNextTask(suggestionId);
+        } else {
+            String reason = cause.getMessage() != null ? trimTo1000(cause.getMessage()) : "Unexpected error";
+            task.setFailureReason(reason);
+            task.setStatus(TaskStatus.FAILED);
+            task.setStatusDetail("Permanently failed");
+            if (task.getCompletedAt() == null) task.setCompletedAt(Instant.now());
+            planTaskRepository.save(task);
+            messagingHelper.broadcastTaskUpdate(suggestionId, task);
+
+            suggestion.setFailureReason("Task '" + task.getTitle() + "' failed: " + reason);
+            suggestion.setCurrentPhase("Task " + taskOrder + " permanently failed");
+            suggestionRepository.save(suggestion);
+            messagingHelper.broadcastUpdate(suggestion);
+
+            messagingHelper.addMessage(suggestionId, SenderType.SYSTEM, "System",
+                    "Task " + taskOrder + " could not be completed and has permanently failed.");
+
+            log.error("[AI-FLOW] suggestion={} task={} permanently failed: {}", suggestionId, taskOrder, reason);
+        }
+    }
+
+    /**
+     * Trim a string to at most 1000 characters for safe storage in the failure_reason column.
+     */
+    static String trimTo1000(String s) {
+        if (s == null) return "";
+        return s.length() > 1000 ? s.substring(0, 1000) : s;
+    }
+
+    /**
+     * Extract a human-readable failure message from a Claude result JSON or raw string.
+     */
+    private String extractFailureMessage(String result) {
+        if (result == null) return "Unknown failure";
+        try {
+            String json = extractJsonBlock(result);
+            if (json != null) {
+                JsonNode node = objectMapper.readTree(json);
+                if (node.has("message")) return node.get("message").asText();
+            }
+        } catch (Exception ignored) {}
+        return result;
     }
 
     // -------------------------------------------------------------------------

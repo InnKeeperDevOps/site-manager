@@ -40,6 +40,12 @@ public class PlanTask {
     @Column
     private String statusDetail;
 
+    @Column(nullable = false)
+    private int retryCount = 0;
+
+    @Column(length = 1000)
+    private String failureReason;
+
     @Column
     private Instant startedAt;
 
@@ -68,6 +74,10 @@ public class PlanTask {
     public void setEstimatedMinutes(Integer estimatedMinutes) { this.estimatedMinutes = estimatedMinutes; }
     public String getStatusDetail() { return statusDetail; }
     public void setStatusDetail(String statusDetail) { this.statusDetail = statusDetail; }
+    public int getRetryCount() { return retryCount; }
+    public void setRetryCount(int retryCount) { this.retryCount = retryCount; }
+    public String getFailureReason() { return failureReason; }
+    public void setFailureReason(String failureReason) { this.failureReason = failureReason; }
     public Instant getStartedAt() { return startedAt; }
     public void setStartedAt(Instant startedAt) { this.startedAt = startedAt; }
     public Instant getCompletedAt() { return completedAt; }

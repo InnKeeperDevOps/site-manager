@@ -107,6 +107,9 @@ public class Suggestion {
     @Column(columnDefinition = "TEXT")
     private String expertApprovalTracker;
 
+    @Column(length = 1000)
+    private String failureReason;
+
     public Suggestion() {}
 
     @PrePersist
@@ -226,6 +229,8 @@ public class Suggestion {
 
     public String getExpertApprovalTracker() { return expertApprovalTracker; }
     public void setExpertApprovalTracker(String expertApprovalTracker) { this.expertApprovalTracker = expertApprovalTracker; }
+    public String getFailureReason() { return failureReason; }
+    public void setFailureReason(String failureReason) { this.failureReason = failureReason; }
 
     public Map<String, ExpertApprovalEntry> getExpertApprovalMap() {
         if (expertApprovalTracker == null || expertApprovalTracker.isBlank()) {

@@ -627,6 +627,43 @@ public class SuggestionService {
         return planExecutionService.getExecutionQueueStatus();
     }
 
+    @Transactional
+    public Suggestion retrySuggestion(Long id, String username) {
+        Suggestion suggestion = suggestionRepository.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Suggestion not found"));
+
+        if (!username.equals(suggestion.getAuthorName())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You do not own this suggestion");
+        }
+
+        boolean isInProgress = suggestion.getStatus() == SuggestionStatus.IN_PROGRESS;
+        boolean hasFailed = suggestion.getCurrentPhase() != null
+                && suggestion.getCurrentPhase().toLowerCase().contains("failed");
+        if (!isInProgress || !hasFailed) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Suggestion is not in a retryable failed state");
+        }
+
+        log.info("[AI-FLOW] suggestion={} user={} retrying failed tasks", id, username);
+
+        List<PlanTask> failedTasks = planTaskRepository.findBySuggestionIdAndStatus(id, TaskStatus.FAILED);
+        for (PlanTask task : failedTasks) {
+            task.setStatus(TaskStatus.PENDING);
+            task.setRetryCount(0);
+            task.setFailureReason(null);
+        }
+        planTaskRepository.saveAll(failedTasks);
+
+        suggestion.setFailureReason(null);
+        suggestion.setCurrentPhase("Retrying after failure");
+        suggestionRepository.save(suggestion);
+        messagingHelper.broadcastUpdate(suggestion);
+
+        planExecutionService.executeNextTask(suggestion.getId());
+
+        return suggestion;
+    }
+
     public Suggestion retryExecution(Long suggestionId) {
         Suggestion suggestion = suggestionRepository.findById(suggestionId)
                 .orElseThrow(() -> new IllegalStateException("Suggestion not found"));
