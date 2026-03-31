@@ -213,7 +213,8 @@ class ClaudeSession:
             "Available services: Spring Boot app (auto-update.sh), Error Extractor (extract-errors.sh). "
             "To restart the app: stop auto-update.sh processes, then relaunch. "
             "To commit: git add, git commit, git push origin main. "
-            "Current directory: /home/claude/site-manager"
+            "Current directory: /home/claude/site-manager "
+            "IMPORTANT: Do exactly what the user requests and nothing more. Do not get creative or make changes beyond what was explicitly asked. If the user asks to move something in a specific way, do only that exact move."
         )
 
         try:
