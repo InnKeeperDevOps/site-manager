@@ -311,52 +311,36 @@ public class ClaudeService {
                                                          String repoUrl, String sessionId,
                                                          String workingDir,
                                                          Consumer<String> progressCallback) {
-        String prompt = String.format(
-                "You are evaluating a site suggestion for a repository at: %s\n\n" +
+        String prompt = buildEvaluationPrompt(suggestionTitle, suggestionDescription, repoUrl);
+        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "evaluate", resolveModel(), 0);
+    }
+
+    String buildEvaluationPrompt(String suggestionTitle, String suggestionDescription, String repoUrl) {
+        return String.format(
+                "You are reviewing a suggestion for a website or application at: %s\n\n" +
                 "Suggestion Title: %s\n" +
                 "Suggestion Description: %s\n\n" +
-                "Please evaluate this suggestion:\n" +
-                "1. Is this suggestion detailed enough to implement? Does it clearly describe what changes are needed?\n" +
-                "2. If NOT detailed enough, ask specific clarifying questions to the user.\n" +
-                "3. If it IS detailed enough, look at the repository and create a concrete implementation plan.\n\n" +
-                "DUAL-LEVEL PLAN RULES:\n" +
-                "- The plan and tasks must have TWO levels of detail:\n" +
-                "  1. LOW-LEVEL (internal/technical): Detailed technical implementation specifics including file names, classes, methods, " +
-                "database changes, API endpoints, frameworks, and step-by-step coding instructions. This is what drives execution.\n" +
-                "  2. HIGH-LEVEL (user-facing display): Plain, non-technical language describing features, behaviors, and outcomes " +
-                "from the user's perspective. No programming languages, file names, class names, or technical details.\n" +
-                "- Questions to users should always be in plain, non-technical language about desired behavior and outcomes.\n\n" +
-                "Respond in this JSON format:\n" +
-                "If clarification needed:\n" +
+                "MANDATORY RULE: You MUST always respond with status \"NEEDS_CLARIFICATION\" on this initial evaluation. " +
+                "Do NOT respond with \"PLAN_READY\" at this stage, no matter how detailed the suggestion appears. " +
+                "A \"PLAN_READY\" response is only allowed after the user has answered your clarifying questions.\n\n" +
+                "Your job right now is to ask 2-4 plain-language questions that help you understand:\n" +
+                "- What outcome or result the user is hoping for\n" +
+                "- Who will use this feature and how they expect it to work\n" +
+                "- What the priority or scope is (e.g. simple version first, or full-featured from the start)\n" +
+                "- Any constraints, preferences, or things that should or should not change\n\n" +
+                "Keep questions focused on goals and desired behavior, not technical details. " +
+                "Write questions in plain, everyday language that any non-technical user can understand.\n\n" +
+                "Respond using this exact JSON format:\n" +
                 "{\"status\": \"NEEDS_CLARIFICATION\", " +
-                "\"message\": \"brief summary of what you need to know\", " +
-                "\"questions\": [\"specific question 1\", \"specific question 2\", ...]}\n\n" +
-                "If ready to plan:\n" +
-                "{\"status\": \"PLAN_READY\", " +
-                "\"message\": \"your response to the user (high-level, non-technical)\", " +
-                "\"plan\": \"detailed low-level technical implementation plan with file names, classes, methods, database schema changes, " +
-                "API endpoints, specific code changes needed, and technical approach\", " +
-                "\"planDisplaySummary\": \"brief high-level summary of the implementation in plain non-technical language for the user\", " +
-                "\"tasks\": [\n" +
-                "  {\"title\": \"low-level technical task name (e.g. Add emailNotifications column to site_settings table)\", " +
-                "\"description\": \"detailed technical description with specific files, classes, methods to modify and how\", " +
-                "\"displayTitle\": \"high-level user-facing task name (e.g. Add email notification option to settings)\", " +
-                "\"displayDescription\": \"plain language description of what this changes from the user's perspective\", " +
-                "\"estimatedMinutes\": number},\n" +
-                "  ...\n" +
-                "]}\n\n" +
-                "IMPORTANT: When status is NEEDS_CLARIFICATION, you MUST include a \"questions\" array with each clarifying question as a separate string element. Each question should be self-contained and specific.\n" +
-                "When status is PLAN_READY, you MUST include a \"tasks\" array that breaks the plan into ordered implementation steps. " +
-                "Each task should be a concrete, actionable unit of work with a realistic time estimate in minutes. " +
-                "The low-level title/description should include specific technical details (file paths, method names, database operations). " +
-                "The displayTitle/displayDescription should be completely non-technical. " +
-                "Order tasks by implementation sequence. Typically 3-8 tasks is appropriate.",
+                "\"message\": \"brief, friendly explanation of why you are asking these questions\", " +
+                "\"questions\": [\"question 1\", \"question 2\", ...]}\n\n" +
+                "IMPORTANT: You MUST include a \"questions\" array with 2-4 items. Each question must be a plain-language string " +
+                "focused on outcomes, priorities, scope, or constraints — never on technical implementation details. " +
+                "Do NOT include a \"plan\" or \"tasks\" field. Do NOT respond with status \"PLAN_READY\".",
                 repoUrl != null ? repoUrl : "not configured",
                 suggestionTitle,
                 suggestionDescription
         );
-
-        return sendToClaudeAsync(prompt, sessionId, workingDir, null, progressCallback, "evaluate", resolveModel(), 0);
     }
 
     public CompletableFuture<String> continueConversation(String sessionId, String userMessage,
