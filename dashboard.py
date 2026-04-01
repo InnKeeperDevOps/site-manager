@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
-"""Interactive Rich dashboard for the Site Manager application."""
+"""Textual TUI dashboard for the Site Manager application."""
 
 import sqlite3
 import os
 import sys
 import time
-import shutil
 import signal
 import subprocess
 import threading
-import queue
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rich.console import Console
-from rich.layout import Layout
-from rich.live import Live
-from rich.panel import Panel
-from rich.table import Table
+from textual.app import App, ComposeResult
+from textual.widgets import (
+    Header, Footer, TabbedContent, TabPane, DataTable,
+    Static, Input, Label, RichLog, Button, ProgressBar,
+)
+from textual.containers import Horizontal, Vertical, ScrollableContainer
+from textual.screen import Screen, ModalScreen
+from textual.reactive import reactive
+from textual import on, work
+from textual.binding import Binding
 from rich.text import Text
-from rich.align import Align
-from rich.columns import Columns
-from rich.prompt import Prompt, Confirm
+from rich.table import Table
 from rich import box
-from rich.markdown import Markdown
-from rich.spinner import Spinner
-from rich.status import Status
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sitemanager.db")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PID_FILE = "/tmp/site-manager-auto-update.pid"
 
 STATUS_COLORS = {
     "MERGED": "green",
@@ -45,20 +46,6 @@ PRIORITY_COLORS = {
     "MEDIUM": "yellow",
     "LOW": "dim white",
 }
-
-TASK_STATUS_COLORS = {
-    "COMPLETED": "green",
-    "PENDING": "yellow",
-    "IN_PROGRESS": "blue",
-    "REVIEWING": "cyan",
-    "FAILED": "red",
-}
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PID_FILE = "/tmp/site-manager-auto-update.pid"
-
-# ── Service definitions ────────────────────────────────────────────
-
 
 SERVICES = {
     "app": {
@@ -78,19 +65,62 @@ SERVICES = {
 }
 
 
+# ── DB helpers ──────────────────────────────────────────────────────
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def ts_to_str(ts):
+    if not ts:
+        return "N/A"
+    try:
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except (OSError, ValueError):
+        return "N/A"
+
+
+def time_ago(ts):
+    if not ts:
+        return "N/A"
+    try:
+        now = time.time() * 1000
+        diff_sec = (now - ts) / 1000
+        if diff_sec < 60:
+            return f"{int(diff_sec)}s ago"
+        elif diff_sec < 3600:
+            return f"{int(diff_sec / 60)}m ago"
+        elif diff_sec < 86400:
+            return f"{int(diff_sec / 3600)}h ago"
+        else:
+            return f"{int(diff_sec / 86400)}d ago"
+    except (OSError, ValueError):
+        return "N/A"
+
+
+def get_settings(conn):
+    c = conn.cursor()
+    c.execute("SELECT * FROM site_settings LIMIT 1")
+    row = c.fetchone()
+    if row:
+        return dict(row)
+    return {"site_name": "Site Manager", "claude_model": "unknown", "target_repo_url": ""}
+
+
+# ── Service management ───────────────────────────────────────────────
+
 def get_service_pid(svc_key):
-    """Get the PID of a managed service, or None if not running."""
     svc = SERVICES[svc_key]
-    # Try PID file first
     if svc["pid_file"] and os.path.exists(svc["pid_file"]):
         try:
             pid = int(open(svc["pid_file"]).read().strip())
-            # Check if process is alive
             os.kill(pid, 0)
             return pid
         except (ValueError, OSError, ProcessLookupError):
             pass
-    # Fall back to grep
     try:
         result = subprocess.run(
             ["pgrep", "-f", svc["grep_pattern"]],
@@ -105,7 +135,6 @@ def get_service_pid(svc_key):
 
 
 def get_service_status(svc_key):
-    """Return (is_running: bool, pid: int|None, info: dict)."""
     pid = get_service_pid(svc_key)
     if pid is None:
         return False, None, {}
@@ -127,13 +156,11 @@ def get_service_status(svc_key):
 
 
 def start_service(svc_key):
-    """Start a service. Returns (success, message)."""
     svc = SERVICES[svc_key]
     running, pid, _ = get_service_status(svc_key)
     if running:
         return False, f"{svc['name']} is already running (PID {pid})"
     try:
-        # Ensure log files exist
         for f in [os.path.join(SCRIPT_DIR, "app.log"), os.path.join(SCRIPT_DIR, "error.log")]:
             Path(f).touch(exist_ok=True)
         result = subprocess.run(
@@ -147,25 +174,20 @@ def start_service(svc_key):
 
 
 def stop_service(svc_key):
-    """Stop a service. Returns (success, message)."""
     svc = SERVICES[svc_key]
     running, pid, _ = get_service_status(svc_key)
     if not running:
         return False, f"{svc['name']} is not running"
     try:
-        # Try SIGTERM first
         os.kill(pid, signal.SIGTERM)
-        # Wait up to 10 seconds
         for _ in range(20):
             time.sleep(0.5)
             try:
                 os.kill(pid, 0)
             except OSError:
-                # Process is gone
                 if svc["pid_file"] and os.path.exists(svc["pid_file"]):
                     os.remove(svc["pid_file"])
                 return True, f"{svc['name']} stopped (was PID {pid})"
-        # Force kill
         os.kill(pid, signal.SIGKILL)
         if svc["pid_file"] and os.path.exists(svc["pid_file"]):
             os.remove(svc["pid_file"])
@@ -175,7 +197,6 @@ def stop_service(svc_key):
 
 
 def restart_service(svc_key):
-    """Restart a service. Returns (success, message)."""
     running, _, _ = get_service_status(svc_key)
     if running:
         ok, msg = stop_service(svc_key)
@@ -186,23 +207,824 @@ def restart_service(svc_key):
     return ok, msg
 
 
-# ── Claude Interactive Session ─────────────────────────────────────
+# ── Screens ──────────────────────────────────────────────────────────
+
+class DetailScreen(ModalScreen):
+    """Modal screen showing suggestion detail."""
+
+    BINDINGS = [Binding("escape,q", "dismiss", "Close")]
+
+    def __init__(self, suggestion_id: int):
+        super().__init__()
+        self.suggestion_id = suggestion_id
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="detail-container"):
+            yield Static(id="detail-content")
+            yield Button("Close [Esc]", id="close-btn", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#detail-content", Static).update(self._build_detail())
+
+    def _build_detail(self) -> Text:
+        conn = get_db()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT * FROM suggestions WHERE id = ?", (self.suggestion_id,))
+            row = c.fetchone()
+            if not row:
+                return Text(f"Suggestion #{self.suggestion_id} not found", style="red")
+
+            t = Text()
+            t.append(f"#{row['id']} ", style="bold dim")
+            t.append(f"{row['title']}\n", style="bold white")
+            t.append(f"\nStatus: ", style="dim")
+            t.append(f"{row['status']}\n", style=STATUS_COLORS.get(row["status"], "white"))
+            t.append(f"Priority: ", style="dim")
+            t.append(f"{row['priority'] or 'N/A'}\n", style=PRIORITY_COLORS.get(row["priority"] or "", "dim"))
+            t.append(f"Author: ", style="dim")
+            t.append(f"{row['author_name'] or 'N/A'}\n", style="white")
+            t.append(f"Created: ", style="dim")
+            t.append(f"{ts_to_str(row['created_at'])}\n", style="white")
+            t.append(f"Last Activity: ", style="dim")
+            t.append(f"{time_ago(row['last_activity_at'])}\n", style="white")
+
+            if row["pr_url"]:
+                t.append(f"PR: ", style="dim")
+                t.append(f"{row['pr_url']}\n", style="cyan underline")
+
+            if row["description"]:
+                desc = row["description"]
+                if len(desc) > 400:
+                    desc = desc[:397] + "..."
+                t.append(f"\n{desc}\n", style="white")
+
+            if row["plan_display_summary"]:
+                summary = row["plan_display_summary"]
+                if len(summary) > 500:
+                    summary = summary[:497] + "..."
+                t.append(f"\nPlan Summary:\n{summary}\n", style="dim")
+
+            c.execute(
+                "SELECT title, status FROM plan_tasks WHERE suggestion_id = ? ORDER BY task_order",
+                (self.suggestion_id,)
+            )
+            tasks = c.fetchall()
+            if tasks:
+                t.append(f"\nTasks ({len(tasks)}):\n", style="bold")
+                icons = {"COMPLETED": "✓", "PENDING": "○", "IN_PROGRESS": "►", "REVIEWING": "◎", "FAILED": "✗"}
+                icon_styles = {"COMPLETED": "green", "PENDING": "yellow", "IN_PROGRESS": "blue", "REVIEWING": "cyan", "FAILED": "red"}
+                for task in tasks:
+                    icon = icons.get(task["status"], "?")
+                    style = icon_styles.get(task["status"], "white")
+                    title = (task["title"] or "(untitled)")[:60]
+                    t.append(f"  {icon} ", style=style)
+                    t.append(f"{title}\n")
+
+            c.execute(
+                "SELECT sender_name, sender_type, content, created_at FROM suggestion_messages "
+                "WHERE suggestion_id = ? ORDER BY created_at DESC LIMIT 5",
+                (self.suggestion_id,)
+            )
+            msgs = c.fetchall()
+            if msgs:
+                t.append(f"\nRecent Messages:\n", style="bold")
+                for m in reversed(msgs):
+                    sender = m["sender_name"] or m["sender_type"]
+                    content = (m["content"] or "")[:120]
+                    sender_style = "cyan" if m["sender_type"] == "SYSTEM" else "yellow"
+                    t.append(f"  {sender}: ", style=sender_style)
+                    t.append(f"{content}\n")
+
+            return t
+        finally:
+            conn.close()
+
+    @on(Button.Pressed, "#close-btn")
+    def close(self) -> None:
+        self.dismiss()
 
 
-class ClaudeSession:
-    """Manages an interactive Claude CLI session for the user."""
+CSS = """
+#detail-container {
+    background: $surface;
+    border: thick $primary;
+    padding: 1 2;
+    margin: 2 4;
+    height: auto;
+    max-height: 90vh;
+}
 
-    def __init__(self, console):
-        self.console = console
-        self.history = []  # list of (role, text) tuples
-        self.working = False
-        self._lock = threading.Lock()
+#detail-content {
+    height: auto;
+}
 
-    def send_message(self, user_message):
-        """Send a message to Claude and get a response. Runs synchronously."""
-        self.working = True
-        self.history.append(("user", user_message))
+#status-bar {
+    height: 1;
+    background: $panel;
+    color: $text-muted;
+    padding: 0 1;
+}
 
+#command-input {
+    dock: bottom;
+    height: 3;
+}
+
+.stat-panel {
+    border: round $primary;
+    height: auto;
+    min-height: 12;
+    padding: 0 1;
+}
+
+.stat-label {
+    color: $text-muted;
+    width: 16;
+}
+
+.stat-value {
+    text-style: bold;
+}
+
+#services-tab {
+    height: 1fr;
+}
+
+#claude-log {
+    border: round $accent;
+    height: 1fr;
+    min-height: 8;
+}
+
+#claude-input-row {
+    height: 3;
+    dock: bottom;
+}
+
+#claude-msg-input {
+    width: 1fr;
+}
+
+#claude-send-btn {
+    width: 10;
+}
+
+#progress-bar {
+    width: 20;
+}
+
+.tab-content {
+    height: 1fr;
+}
+
+SuggestionsStats, TaskStats, ActivityStats {
+    width: 1fr;
+}
+
+DataTable {
+    height: 1fr;
+}
+"""
+
+
+class SuggestionsStats(Static):
+    def on_mount(self) -> None:
+        self.refresh_data()
+
+    def refresh_data(self) -> None:
+        conn = get_db()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT status, COUNT(*) FROM suggestions GROUP BY status")
+            counts = dict(c.fetchall())
+        finally:
+            conn.close()
+
+        total = sum(counts.values())
+        merged = counts.get("MERGED", 0)
+        in_prog = counts.get("IN_PROGRESS", 0)
+        denied = counts.get("DENIED", 0)
+        dev_complete = counts.get("DEV_COMPLETE", 0)
+        final_review = counts.get("FINAL_REVIEW", 0)
+        timed_out = counts.get("TIMED_OUT", 0)
+        rate = f"{merged / total * 100:.0f}%" if total > 0 else "0%"
+
+        t = Text()
+        t.append("Suggestions\n\n", style="bold")
+        rows = [
+            ("Total", str(total), "bold white"),
+            ("Merged", str(merged), "green"),
+            ("In Progress", str(in_prog), "blue"),
+            ("Dev Complete", str(dev_complete), "cyan"),
+            ("Final Review", str(final_review), "yellow"),
+            ("Denied", str(denied), "red"),
+            ("Timed Out", str(timed_out), "magenta"),
+            ("Success Rate", rate, "bold green"),
+        ]
+        for label, value, style in rows:
+            t.append(f"  {label:<14}", style="dim")
+            t.append(f"{value}\n", style=style)
+        self.update(t)
+
+
+class TaskStats(Static):
+    def on_mount(self) -> None:
+        self.refresh_data()
+
+    def refresh_data(self) -> None:
+        conn = get_db()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT status, COUNT(*) FROM plan_tasks GROUP BY status")
+            counts = dict(c.fetchall())
+        finally:
+            conn.close()
+
+        total = sum(counts.values())
+        completed = counts.get("COMPLETED", 0)
+        pending = counts.get("PENDING", 0)
+        reviewing = counts.get("REVIEWING", 0)
+        in_prog = counts.get("IN_PROGRESS", 0)
+        pct = int(completed / total * 100) if total > 0 else 0
+        bar_w = 18
+        filled = int(bar_w * pct / 100)
+        bar = "█" * filled + "░" * (bar_w - filled)
+
+        t = Text()
+        t.append("Plan Tasks\n\n", style="bold")
+        t.append(f"  {'Total':<14}", style="dim")
+        t.append(f"{total}\n", style="bold white")
+        t.append(f"  {'Completed':<14}", style="dim")
+        t.append(f"{completed}\n", style="green")
+        t.append(f"  {'Pending':<14}", style="dim")
+        t.append(f"{pending}\n", style="yellow")
+        t.append(f"  {'Reviewing':<14}", style="dim")
+        t.append(f"{reviewing}\n", style="cyan")
+        t.append(f"  {'In Progress':<14}", style="dim")
+        t.append(f"{in_prog}\n", style="blue")
+        t.append(f"\n  ")
+        t.append(bar, style="green")
+        t.append(f" {pct}%\n")
+        self.update(t)
+
+
+class ActivityStats(Static):
+    def on_mount(self) -> None:
+        self.refresh_data()
+
+    def refresh_data(self) -> None:
+        conn = get_db()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) FROM suggestion_messages")
+            total_msgs = c.fetchone()[0]
+            c.execute("SELECT COUNT(DISTINCT suggestion_id) FROM suggestion_messages")
+            active_threads = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM app_users")
+            user_count = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM suggestions WHERE pr_url IS NOT NULL")
+            pr_count = c.fetchone()[0]
+        finally:
+            conn.close()
+
+        db_size = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
+        db_size_mb = db_size / (1024 * 1024)
+
+        t = Text()
+        t.append("Activity\n\n", style="bold")
+        rows = [
+            ("Messages", str(total_msgs), "bold white"),
+            ("Active Threads", str(active_threads), "cyan"),
+            ("Users", str(user_count), "yellow"),
+            ("PRs Created", str(pr_count), "green"),
+            ("DB Size", f"{db_size_mb:.1f} MB", "dim"),
+        ]
+        for label, value, style in rows:
+            t.append(f"  {label:<14}", style="dim")
+            t.append(f"{value}\n", style=style)
+        self.update(t)
+
+
+class ServicesWidget(Static):
+    def on_mount(self) -> None:
+        self.refresh_data()
+
+    def refresh_data(self) -> None:
+        t = Table(box=box.ROUNDED, show_lines=False, padding=(0, 1))
+        t.add_column("Service", min_width=28, no_wrap=True)
+        t.add_column("Status", width=10)
+        t.add_column("PID", width=8, justify="right")
+        t.add_column("CPU%", width=6, justify="right")
+        t.add_column("MEM%", width=6, justify="right")
+        t.add_column("RSS", width=10, justify="right")
+        t.add_column("Uptime", width=14)
+
+        for key, svc in SERVICES.items():
+            running, pid, info = get_service_status(key)
+            status_str = "[green]RUNNING[/]" if running else "[red]DOWN[/]"
+            pid_str = str(pid) if pid else "-"
+            cpu = info.get("cpu", "-")
+            mem = info.get("mem", "-")
+            rss_kb = info.get("rss", "0")
+            try:
+                rss_val = int(rss_kb)
+                rss_str = f"{rss_val // 1024} MB" if rss_val > 1024 else f"{rss_val} KB"
+            except (ValueError, TypeError):
+                rss_str = "-"
+            uptime = info.get("uptime", "-")
+            t.add_row(svc["name"], status_str, pid_str, cpu, mem, rss_str, uptime)
+
+        try:
+            result = subprocess.run(["free", "-m"], capture_output=True, text=True)
+            for line in result.stdout.splitlines():
+                if line.startswith("Mem:"):
+                    parts = line.split()
+                    total_mem, used = int(parts[1]), int(parts[2])
+                    pct = used * 100 // total_mem if total_mem else 0
+                    t.add_row(
+                        "[dim]System Memory[/]", f"[dim]{pct}%[/]", "-",
+                        "-", f"[dim]{pct}[/]", f"[dim]{used}MB[/]", f"[dim]{total_mem}MB total[/]",
+                    )
+        except Exception:
+            pass
+
+        try:
+            result = subprocess.run(["df", "-h", "/home/claude"], capture_output=True, text=True)
+            lines = result.stdout.strip().splitlines()
+            if len(lines) >= 2:
+                parts = lines[1].split()
+                t.add_row(
+                    "[dim]Disk (/home/claude)[/]", f"[dim]{parts[4]}[/]", "-",
+                    "-", "-", f"[dim]{parts[2]}[/]", f"[dim]{parts[1]} total[/]",
+                )
+        except Exception:
+            pass
+
+        self.update(t)
+
+
+# ── Main App ─────────────────────────────────────────────────────────
+
+class SiteManagerApp(App):
+    CSS = CSS
+    TITLE = "Site Manager Dashboard"
+    BINDINGS = [
+        Binding("ctrl+q", "quit", "Quit"),
+        Binding("r", "refresh", "Refresh"),
+        Binding("escape", "focus_command", "Command"),
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self.claude_history = []  # list of (role, text, timestamp)
+        self.claude_working = False
+        self.claude_current_prompt = ""
+        self.claude_start_time = None
+        self.claude_thinking_snippet = ""
+        self.claude_is_thinking = False
+        self.claude_response_so_far = ""
+        self.status_message = ""
+        self.list_page = 0
+        self.list_filter = None
+        self.list_sort = "id"
+
+    def compose(self) -> ComposeResult:
+        conn = get_db()
+        settings = get_settings(conn)
+        conn.close()
+        site_name = settings.get("site_name") or "Site Manager"
+        model = settings.get("claude_model") or "unknown"
+        repo = (settings.get("target_repo_url") or "").split("/")[-1].replace(".git", "")
+
+        yield Header(show_clock=True)
+        yield Label(f" {site_name}  |  Model: {model}  |  Repo: {repo}", id="subtitle")
+
+        with TabbedContent(initial="dashboard"):
+            with TabPane("Dashboard", id="dashboard"):
+                with Horizontal():
+                    yield SuggestionsStats(classes="stat-panel")
+                    yield TaskStats(classes="stat-panel")
+                    yield ActivityStats(classes="stat-panel")
+                with Horizontal():
+                    yield Static(id="recent-activity", classes="stat-panel")
+                    yield ServicesWidget(id="services-widget", classes="stat-panel")
+                    yield Static(id="claude-panel", classes="stat-panel")
+
+            with TabPane("Suggestions", id="suggestions"):
+                yield DataTable(id="suggestions-table", cursor_type="row")
+
+            with TabPane("Activity", id="activity"):
+                yield DataTable(id="activity-table", cursor_type="row")
+
+            with TabPane("Services", id="services"):
+                yield ServicesWidget(id="services-full")
+                with Horizontal(id="claude-input-row"):
+                    yield Input(placeholder='Claude command (e.g. "check app logs")', id="claude-msg-input")
+                    yield Button("Send", id="claude-send-btn", variant="primary")
+                yield RichLog(id="claude-log", highlight=True, markup=True)
+
+            with TabPane("Claude", id="claude"):
+                with Horizontal(id="claude-input-row"):
+                    yield Input(placeholder="Send message to Claude...", id="claude-msg-input2")
+                    yield Button("Send", id="claude-send-btn2", variant="primary")
+                yield RichLog(id="claude-log2", highlight=True, markup=True)
+
+            with TabPane("Help", id="help"):
+                yield Static(self._build_help(), id="help-content")
+
+        yield Label("", id="status-bar")
+        yield Input(
+            placeholder="Command: [c] Claude  [v <id>] Detail  [start/stop/restart <svc>]  [f <status>]  [n/p] pages  [r] Refresh  [q] Quit",
+            id="command-input",
+        )
+        yield Footer()
+
+    def _build_help(self) -> Text:
+        t = Text()
+        t.append("Navigation\n", style="bold underline")
+        t.append("  Ctrl+Q    ", style="bold cyan"); t.append("Quit\n")
+        t.append("  R         ", style="bold cyan"); t.append("Refresh\n")
+        t.append("  Tab       ", style="bold cyan"); t.append("Switch tabs\n")
+
+        t.append("\nCommand Bar (press Escape to focus)\n", style="bold underline")
+        t.append("  c <msg>   ", style="bold cyan"); t.append("Send message to Claude\n")
+        t.append("  v <id>    ", style="bold cyan"); t.append("View suggestion detail\n")
+        t.append("  start <svc>    ", style="bold cyan"); t.append("Start service (app, extractor)\n")
+        t.append("  stop <svc>     ", style="bold cyan"); t.append("Stop service\n")
+        t.append("  restart <svc>  ", style="bold cyan"); t.append("Restart service\n")
+        t.append("  restart all    ", style="bold cyan"); t.append("Restart all services\n")
+        t.append("  f <status>     ", style="bold cyan"); t.append("Filter suggestions list\n")
+        t.append("  f clear        ", style="bold cyan"); t.append("Clear filter\n")
+        t.append("  s <field>      ", style="bold cyan"); t.append("Sort: id, votes, activity, created, status\n")
+        t.append("  n / p          ", style="bold cyan"); t.append("Next/prev page in suggestions\n")
+        t.append("  q              ", style="bold cyan"); t.append("Quit\n")
+
+        t.append("\nStatus Values\n", style="bold underline")
+        for status, color in STATUS_COLORS.items():
+            t.append(f"  {status:<16}", style=color)
+        t.append("\n")
+        return t
+
+    def on_mount(self) -> None:
+        self.set_interval(30, self._auto_refresh)
+        self.set_interval(2, self._tick_claude_panel)
+        self._populate_suggestions_table()
+        self._populate_activity_table()
+        self._refresh_recent_activity()
+        self._refresh_claude_panel()
+        self.query_one("#command-input", Input).focus()
+
+    def _auto_refresh(self) -> None:
+        self._refresh_stats()
+        self._refresh_recent_activity()
+        self._refresh_claude_panel()
+
+    def action_refresh(self) -> None:
+        self._refresh_stats()
+        self._populate_suggestions_table()
+        self._populate_activity_table()
+        self._refresh_recent_activity()
+        self._refresh_claude_panel()
+        svc = self.query_one("#services-widget", ServicesWidget)
+        svc.refresh_data()
+        try:
+            svc2 = self.query_one("#services-full", ServicesWidget)
+            svc2.refresh_data()
+        except Exception:
+            pass
+        self.set_status("[green]Refreshed[/]")
+
+    def action_focus_command(self) -> None:
+        self.query_one("#command-input", Input).focus()
+
+    def _refresh_stats(self) -> None:
+        for widget_type in (SuggestionsStats, TaskStats, ActivityStats):
+            for w in self.query(widget_type):
+                w.refresh_data()
+
+    def _refresh_recent_activity(self) -> None:
+        conn = get_db()
+        try:
+            c = conn.cursor()
+            c.execute("""
+                SELECT sm.sender_name, sm.sender_type, sm.content, sm.created_at, sm.suggestion_id
+                FROM suggestion_messages sm
+                ORDER BY sm.created_at DESC
+                LIMIT 10
+            """)
+            msgs = c.fetchall()
+        finally:
+            conn.close()
+
+        t = Text()
+        t.append("Recent Activity\n\n", style="bold")
+        for m in msgs:
+            when = time_ago(m["created_at"])
+            sid = f"#{m['suggestion_id']}"
+            sender = m["sender_name"] or m["sender_type"] or "?"
+            content = (m["content"] or "")[:80]
+            sender_style = "cyan" if m["sender_type"] == "SYSTEM" else "yellow"
+            t.append(f"  {when:<8}", style="dim")
+            t.append(f"{sid:<6}", style="dim")
+            t.append(f"{sender}: ", style=sender_style)
+            t.append(f"{content}\n")
+
+        try:
+            self.query_one("#recent-activity", Static).update(t)
+        except Exception:
+            pass
+
+    def _tick_claude_panel(self) -> None:
+        if self.claude_working:
+            self._refresh_claude_panel()
+
+    def _refresh_claude_panel(self) -> None:
+        t = Text()
+        t.append("Claude Activity\n\n", style="bold white")
+
+        # Live status block
+        if self.claude_working:
+            elapsed = time.time() - self.claude_start_time if self.claude_start_time else 0
+            prompt_preview = (self.claude_current_prompt or "")[:60]
+            if len(self.claude_current_prompt) > 60:
+                prompt_preview += "..."
+            t.append("  STATUS  ", style="bold black on yellow")
+            if self.claude_is_thinking:
+                t.append(f" THINKING  ({elapsed:.0f}s)\n", style="bold yellow")
+                t.append("  Prompt:  ", style="dim")
+                t.append(f"{prompt_preview}\n", style="white")
+                if self.claude_thinking_snippet:
+                    snippet = self.claude_thinking_snippet[:90]
+                    t.append("  Thought: ", style="dim cyan")
+                    t.append(f"{snippet}...\n", style="cyan")
+            else:
+                t.append(f" RESPONDING  ({elapsed:.0f}s)\n", style="bold green")
+                t.append("  Prompt:  ", style="dim")
+                t.append(f"{prompt_preview}\n", style="white")
+                if self.claude_response_so_far:
+                    preview = self.claude_response_so_far[:90]
+                    t.append("  Writing: ", style="dim green")
+                    t.append(f"{preview}...\n", style="green")
+            t.append("\n")
+        else:
+            t.append("  STATUS  ", style="bold black on green")
+            t.append(" IDLE\n\n", style="bold green")
+
+        # Recent history
+        history = self.claude_history[-4:]
+        if not history:
+            t.append("  Ready. Use command bar: c <message>\n", style="dim")
+        else:
+            for entry in history:
+                role = entry[0]
+                text = entry[1]
+                ts = entry[2] if len(entry) > 2 else None
+                elapsed_str = ""
+                if role == "claude" and len(entry) > 3:
+                    elapsed_str = f" [{entry[3]:.1f}s]"
+                when = time_ago(ts * 1000) if ts else ""
+                if role == "user":
+                    t.append("  You", style="bold yellow")
+                    t.append(f" {when}: ", style="dim yellow")
+                    display = text if len(text) <= 80 else text[:77] + "..."
+                    t.append(f"{display}\n", style="white")
+                else:
+                    t.append("  Claude", style="bold cyan")
+                    t.append(f"{elapsed_str} {when}: ", style="dim cyan")
+                    lines = text.split("\n")
+                    preview = lines[0][:80]
+                    if len(lines) > 1 or len(text) > 80:
+                        preview += "..."
+                    t.append(f"{preview}\n", style="white")
+        try:
+            self.query_one("#claude-panel", Static).update(t)
+        except Exception:
+            pass
+
+    def _populate_suggestions_table(self) -> None:
+        try:
+            table = self.query_one("#suggestions-table", DataTable)
+        except Exception:
+            return
+
+        conn = get_db()
+        try:
+            c = conn.cursor()
+            query = "SELECT id, title, status, up_votes, down_votes, priority, pr_url, last_activity_at FROM suggestions"
+            params = []
+            if self.list_filter:
+                query += " WHERE status = ?"
+                params.append(self.list_filter)
+            sort_map = {
+                "id": "id DESC",
+                "votes": "(up_votes - down_votes) DESC",
+                "activity": "last_activity_at DESC",
+                "created": "created_at DESC",
+                "status": "status ASC",
+            }
+            query += f" ORDER BY {sort_map.get(self.list_sort, 'id DESC')}"
+            query += f" LIMIT 50 OFFSET {self.list_page * 50}"
+            c.execute(query, params)
+            rows = c.fetchall()
+        finally:
+            conn.close()
+
+        table.clear(columns=True)
+        table.add_columns("#", "Title", "Status", "Priority", "Votes", "PR", "Activity")
+        for row in rows:
+            title = (row["title"] or "(untitled)")[:48]
+            status = row["status"] or "UNKNOWN"
+            priority = row["priority"] or "-"
+            votes = row["up_votes"] - row["down_votes"]
+            vote_str = f"+{votes}" if votes > 0 else str(votes)
+            has_pr = "Y" if row["pr_url"] else "-"
+            activity = time_ago(row["last_activity_at"])
+            table.add_row(
+                str(row["id"]), title, status, priority, vote_str, has_pr, activity,
+                key=str(row["id"]),
+            )
+
+    def _populate_activity_table(self) -> None:
+        try:
+            table = self.query_one("#activity-table", DataTable)
+        except Exception:
+            return
+
+        conn = get_db()
+        try:
+            c = conn.cursor()
+            c.execute("""
+                SELECT sm.sender_name, sm.sender_type, sm.content, sm.created_at, sm.suggestion_id, s.title
+                FROM suggestion_messages sm
+                JOIN suggestions s ON s.id = sm.suggestion_id
+                ORDER BY sm.created_at DESC
+                LIMIT 100
+            """)
+            msgs = c.fetchall()
+        finally:
+            conn.close()
+
+        table.clear(columns=True)
+        table.add_columns("Time", "Sug#", "From", "Message")
+        for m in msgs:
+            when = time_ago(m["created_at"])
+            sid = f"#{m['suggestion_id']}"
+            sender = m["sender_name"] or m["sender_type"] or "?"
+            content = (m["content"] or "")[:100]
+            table.add_row(when, sid, sender, content)
+
+    def set_status(self, msg: str) -> None:
+        try:
+            self.query_one("#status-bar", Label).update(msg)
+        except Exception:
+            pass
+
+    @on(Input.Submitted, "#command-input")
+    def handle_command(self, event: Input.Submitted) -> None:
+        cmd = event.value.strip()
+        event.input.clear()
+        if not cmd:
+            return
+        self._process_command(cmd)
+
+    @on(Button.Pressed, "#claude-send-btn")
+    def send_claude_services(self) -> None:
+        inp = self.query_one("#claude-msg-input", Input)
+        msg = inp.value.strip()
+        if msg:
+            inp.clear()
+            self._send_to_claude(msg)
+
+    @on(Input.Submitted, "#claude-msg-input")
+    def submit_claude_services(self, event: Input.Submitted) -> None:
+        msg = event.value.strip()
+        if msg:
+            event.input.clear()
+            self._send_to_claude(msg)
+
+    @on(Button.Pressed, "#claude-send-btn2")
+    def send_claude_tab(self) -> None:
+        inp = self.query_one("#claude-msg-input2", Input)
+        msg = inp.value.strip()
+        if msg:
+            inp.clear()
+            self._send_to_claude(msg)
+
+    @on(Input.Submitted, "#claude-msg-input2")
+    def submit_claude_tab(self, event: Input.Submitted) -> None:
+        msg = event.value.strip()
+        if msg:
+            event.input.clear()
+            self._send_to_claude(msg)
+
+    def _process_command(self, cmd: str) -> None:
+        cmd_lower = cmd.lower()
+
+        if cmd_lower == "q":
+            self.exit()
+        elif cmd_lower == "r":
+            self.action_refresh()
+        elif cmd_lower == "n":
+            self.list_page += 1
+            self._populate_suggestions_table()
+            self.set_status(f"Page {self.list_page + 1}")
+        elif cmd_lower == "p":
+            self.list_page = max(0, self.list_page - 1)
+            self._populate_suggestions_table()
+            self.set_status(f"Page {self.list_page + 1}")
+        elif cmd_lower.startswith("v "):
+            try:
+                sid = int(cmd.split()[1])
+                self.push_screen(DetailScreen(sid))
+            except (ValueError, IndexError):
+                self.set_status("[red]Usage: v <suggestion_id>[/]")
+        elif cmd_lower.startswith("f "):
+            arg = cmd_lower[2:].strip().upper()
+            if arg == "CLEAR":
+                self.list_filter = None
+                self.set_status("[dim]Filter cleared[/]")
+            else:
+                self.list_filter = arg
+                self.set_status(f"Filter: {arg}")
+            self.list_page = 0
+            self._populate_suggestions_table()
+        elif cmd_lower.startswith("s ") and not cmd_lower.startswith("start") and not cmd_lower.startswith("stop"):
+            arg = cmd_lower[2:].strip()
+            if arg in ("id", "votes", "activity", "created", "status"):
+                self.list_sort = arg
+                self._populate_suggestions_table()
+                self.set_status(f"Sort: {arg}")
+            else:
+                self.set_status(f"[red]Unknown sort: {arg}. Use: id, votes, activity, created, status[/]")
+        elif cmd_lower.startswith("start "):
+            svc_key = cmd_lower.split(None, 1)[1].strip()
+            if svc_key in SERVICES:
+                self.set_status(f"[yellow]Starting {svc_key}...[/]")
+                self._run_service_cmd(start_service, svc_key)
+            else:
+                self.set_status(f"[red]Unknown service: {svc_key}[/]")
+        elif cmd_lower.startswith("stop "):
+            svc_key = cmd_lower.split(None, 1)[1].strip()
+            if svc_key in SERVICES:
+                self.set_status(f"[yellow]Stopping {svc_key}...[/]")
+                self._run_service_cmd(stop_service, svc_key)
+            else:
+                self.set_status(f"[red]Unknown service: {svc_key}[/]")
+        elif cmd_lower.startswith("restart "):
+            svc_key = cmd_lower.split(None, 1)[1].strip()
+            if svc_key == "all":
+                self.set_status("[yellow]Restarting all services...[/]")
+                self._run_service_cmd_all()
+            elif svc_key in SERVICES:
+                self.set_status(f"[yellow]Restarting {svc_key}...[/]")
+                self._run_service_cmd(restart_service, svc_key)
+            else:
+                self.set_status(f"[red]Unknown service: {svc_key}[/]")
+        elif cmd_lower.startswith("c "):
+            msg = cmd[2:].strip()
+            if msg:
+                self._send_to_claude(msg)
+        elif cmd_lower == "c":
+            self.set_status("[dim]Use: c <message>[/]")
+        else:
+            self.set_status(f"[red]Unknown command: {cmd}[/]")
+
+    @work(thread=True)
+    def _run_service_cmd(self, fn, svc_key: str) -> None:
+        ok, msg = fn(svc_key)
+        style = "green" if ok else "red"
+        self.call_from_thread(self.set_status, f"[{style}]{msg}[/]")
+        self.call_from_thread(self._refresh_services)
+
+    @work(thread=True)
+    def _run_service_cmd_all(self) -> None:
+        msgs = []
+        for key in SERVICES:
+            ok, msg = restart_service(key)
+            msgs.append(f"[{'green' if ok else 'red'}]{msg}[/]")
+        self.call_from_thread(self.set_status, " | ".join(msgs))
+        self.call_from_thread(self._refresh_services)
+
+    def _refresh_services(self) -> None:
+        for w in self.query(ServicesWidget):
+            w.refresh_data()
+
+    def _send_to_claude(self, message: str) -> None:
+        self.claude_history.append(("user", message, time.time()))
+        self.claude_working = True
+        self.claude_current_prompt = message
+        self.claude_start_time = time.time()
+        self.claude_thinking_snippet = ""
+        self.claude_is_thinking = False
+        self.claude_response_so_far = ""
+        self._refresh_claude_panel()
+        self._update_claude_logs()
+        self.set_status("[yellow]Claude is working...[/]")
+        self._claude_worker(message)
+
+    @work(thread=True)
+    def _claude_worker(self, message: str) -> None:
         system_context = (
             "You are managing the site-manager application at /home/claude/site-manager. "
             "The user is interacting with you through a dashboard terminal. "
@@ -216,849 +1038,105 @@ class ClaudeSession:
             "Current directory: /home/claude/site-manager "
             "IMPORTANT: Do exactly what the user requests and nothing more. Do not get creative or make changes beyond what was explicitly asked. If the user asks to move something in a specific way, do only that exact move."
         )
-
+        response_parts = []
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 [
                     "claude", "--dangerously-skip-permissions",
-                    "-p", f"{system_context}\n\nUser request: {user_message}",
+                    "-p", f"{system_context}\n\nUser request: {message}",
                     "--model", "sonnet",
-                    "--output-format", "text",
+                    "--output-format", "stream-json",
+                    "--verbose",
                 ],
-                capture_output=True, text=True,
-                cwd=SCRIPT_DIR,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, cwd=SCRIPT_DIR,
             )
-            response = result.stdout.strip() if result.stdout else "(no response)"
-            if result.returncode != 0 and result.stderr:
-                response += f"\n[stderr]: {result.stderr.strip()[:200]}"
+            for raw_line in proc.stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ev_type = ev.get("type", "")
+                if ev_type == "assistant":
+                    content = ev.get("message", {}).get("content", [])
+                    for block in content:
+                        btype = block.get("type", "")
+                        if btype == "thinking":
+                            thinking = block.get("thinking", "")
+                            snippet = thinking[:120].replace("\n", " ") if thinking else ""
+                            self.claude_is_thinking = True
+                            self.claude_thinking_snippet = snippet
+                            self.call_from_thread(self._refresh_claude_panel)
+                        elif btype == "text":
+                            text_chunk = block.get("text", "")
+                            response_parts.append(text_chunk)
+                            self.claude_is_thinking = False
+                            preview = "".join(response_parts)[:200].replace("\n", " ")
+                            self.claude_response_so_far = preview
+                            self.call_from_thread(self._refresh_claude_panel)
+                elif ev_type == "result":
+                    final = ev.get("result", "")
+                    if final:
+                        response_parts = [final]
+                        self.claude_response_so_far = final[:200].replace("\n", " ")
+            proc.wait()
+            response = "".join(response_parts).strip() if response_parts else "(no response)"
+            if proc.returncode != 0:
+                stderr = proc.stderr.read().strip()
+                if stderr and not response_parts:
+                    response = f"[error]: {stderr[:300]}"
         except Exception as e:
             response = f"[error: {e}]"
 
-        # Truncate very long responses for display
         if len(response) > 3000:
             response = response[:2900] + "\n... (truncated)"
 
-        self.history.append(("claude", response))
-        self.working = False
-        return response
-
-    def send_async(self, user_message, callback=None):
-        """Send a message in a background thread."""
-        def _run():
-            response = self.send_message(user_message)
-            if callback:
-                callback(response)
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-        return t
-
-    def get_recent_history(self, n=10):
-        """Return the last n history entries."""
-        return self.history[-n:]
-
-
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def ts_to_str(ts):
-    """Convert epoch millis to readable string."""
-    if not ts:
-        return "N/A"
-    try:
-        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except (OSError, ValueError):
-        return "N/A"
-
-
-def time_ago(ts):
-    """Convert epoch millis to relative time."""
-    if not ts:
-        return "N/A"
-    try:
-        now = time.time() * 1000
-        diff_sec = (now - ts) / 1000
-        if diff_sec < 60:
-            return f"{int(diff_sec)}s ago"
-        elif diff_sec < 3600:
-            return f"{int(diff_sec / 60)}m ago"
-        elif diff_sec < 86400:
-            return f"{int(diff_sec / 3600)}h ago"
-        else:
-            return f"{int(diff_sec / 86400)}d ago"
-    except (OSError, ValueError):
-        return "N/A"
-
-
-# ── Panel builders ──────────────────────────────────────────────────
-
-
-def build_header(settings):
-    site_name = settings["site_name"] or "Site Manager"
-    model = settings["claude_model"] or "unknown"
-    repo = (settings["target_repo_url"] or "").split("/")[-1].replace(".git", "")
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    header_text = Text()
-    header_text.append(f"  {site_name}", style="bold white")
-    header_text.append(f"   Model: ", style="dim")
-    header_text.append(model, style="cyan")
-    header_text.append(f"   Repo: ", style="dim")
-    header_text.append(repo, style="green")
-    header_text.append(f"   {now}", style="dim")
-    return Panel(header_text, style="bold blue", height=3)
-
-
-def build_status_summary(conn):
-    c = conn.cursor()
-    c.execute("SELECT status, COUNT(*) FROM suggestions GROUP BY status")
-    status_counts = dict(c.fetchall())
-
-    total = sum(status_counts.values())
-    merged = status_counts.get("MERGED", 0)
-    in_progress = status_counts.get("IN_PROGRESS", 0)
-    denied = status_counts.get("DENIED", 0)
-    dev_complete = status_counts.get("DEV_COMPLETE", 0)
-    final_review = status_counts.get("FINAL_REVIEW", 0)
-    timed_out = status_counts.get("TIMED_OUT", 0)
-    success_rate = (merged / total * 100) if total > 0 else 0
-
-    table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
-    table.add_column("label", style="dim", width=14)
-    table.add_column("value", width=6)
-
-    table.add_row("Total", f"[bold white]{total}[/]")
-    table.add_row("Merged", f"[green]{merged}[/]")
-    table.add_row("In Progress", f"[blue]{in_progress}[/]")
-    table.add_row("Dev Complete", f"[cyan]{dev_complete}[/]")
-    table.add_row("Final Review", f"[yellow]{final_review}[/]")
-    table.add_row("Denied", f"[red]{denied}[/]")
-    table.add_row("Timed Out", f"[magenta]{timed_out}[/]")
-    table.add_row("Success Rate", f"[bold green]{success_rate:.0f}%[/]")
-
-    return Panel(table, title="[bold]Suggestions", border_style="green")
-
-
-def build_task_summary(conn):
-    c = conn.cursor()
-    c.execute("SELECT status, COUNT(*) FROM plan_tasks GROUP BY status")
-    task_counts = dict(c.fetchall())
-
-    total = sum(task_counts.values())
-    completed = task_counts.get("COMPLETED", 0)
-    pending = task_counts.get("PENDING", 0)
-    reviewing = task_counts.get("REVIEWING", 0)
-    in_progress = task_counts.get("IN_PROGRESS", 0)
-
-    # Progress bar
-    pct = (completed / total * 100) if total > 0 else 0
-    bar_width = 20
-    filled = int(bar_width * pct / 100)
-    bar = f"[green]{'█' * filled}[/][dim]{'░' * (bar_width - filled)}[/] {pct:.0f}%"
-
-    table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
-    table.add_column("label", style="dim", width=12)
-    table.add_column("value", width=22)
-
-    table.add_row("Total", f"[bold white]{total}[/]")
-    table.add_row("Completed", f"[green]{completed}[/]")
-    table.add_row("Pending", f"[yellow]{pending}[/]")
-    table.add_row("Reviewing", f"[cyan]{reviewing}[/]")
-    table.add_row("In Progress", f"[blue]{in_progress}[/]")
-    table.add_row("Completion", bar)
-
-    return Panel(table, title="[bold]Plan Tasks", border_style="cyan")
-
-
-def build_activity_summary(conn):
-    c = conn.cursor()
-
-    c.execute("SELECT COUNT(*) FROM suggestion_messages")
-    total_msgs = c.fetchone()[0]
-
-    c.execute("SELECT COUNT(DISTINCT suggestion_id) FROM suggestion_messages")
-    active_threads = c.fetchone()[0]
-
-    c.execute("SELECT COUNT(*) FROM app_users")
-    user_count = c.fetchone()[0]
-
-    c.execute("SELECT COUNT(*) FROM suggestions WHERE pr_url IS NOT NULL")
-    pr_count = c.fetchone()[0]
-
-    db_size = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
-    db_size_mb = db_size / (1024 * 1024)
-
-    table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
-    table.add_column("label", style="dim", width=14)
-    table.add_column("value", width=12)
-
-    table.add_row("Messages", f"[bold white]{total_msgs}[/]")
-    table.add_row("Active Threads", f"[cyan]{active_threads}[/]")
-    table.add_row("Users", f"[yellow]{user_count}[/]")
-    table.add_row("PRs Created", f"[green]{pr_count}[/]")
-    table.add_row("DB Size", f"[dim]{db_size_mb:.1f} MB[/]")
-
-    return Panel(table, title="[bold]Activity", border_style="yellow")
-
-
-def build_suggestions_table(conn, page=0, page_size=10, filter_status=None, sort_by="id"):
-    c = conn.cursor()
-
-    query = "SELECT id, title, status, up_votes, down_votes, priority, pr_url, created_at, last_activity_at FROM suggestions"
-    params = []
-    if filter_status:
-        query += " WHERE status = ?"
-        params.append(filter_status)
-
-    sort_map = {
-        "id": "id DESC",
-        "votes": "(up_votes - down_votes) DESC",
-        "activity": "last_activity_at DESC",
-        "created": "created_at DESC",
-        "status": "status ASC",
-    }
-    query += f" ORDER BY {sort_map.get(sort_by, 'id DESC')}"
-
-    # Get total count for pagination
-    count_query = "SELECT COUNT(*) FROM suggestions"
-    if filter_status:
-        count_query += " WHERE status = ?"
-    c.execute(count_query, params)
-    total = c.fetchone()[0]
-    total_pages = max(1, (total + page_size - 1) // page_size)
-    page = max(0, min(page, total_pages - 1))
-
-    query += f" LIMIT {page_size} OFFSET {page * page_size}"
-    c.execute(query, params)
-    rows = c.fetchall()
-
-    table = Table(box=box.ROUNDED, show_lines=False, padding=(0, 1))
-    table.add_column("#", style="dim", width=4, justify="right")
-    table.add_column("Title", min_width=30, max_width=50, no_wrap=True)
-    table.add_column("Status", width=14)
-    table.add_column("Priority", width=8)
-    table.add_column("Votes", width=6, justify="center")
-    table.add_column("PR", width=5, justify="center")
-    table.add_column("Activity", width=10)
-
-    for row in rows:
-        sid = str(row["id"])
-        title = row["title"] or "(untitled)"
-        if len(title) > 48:
-            title = title[:45] + "..."
-        status = row["status"] or "UNKNOWN"
-        status_style = STATUS_COLORS.get(status, "white")
-        priority = row["priority"] or "-"
-        priority_style = PRIORITY_COLORS.get(priority, "dim")
-        votes = row["up_votes"] - row["down_votes"]
-        vote_str = f"+{votes}" if votes > 0 else str(votes)
-        vote_style = "green" if votes > 0 else ("red" if votes < 0 else "dim")
-        has_pr = "[green]Y[/]" if row["pr_url"] else "[dim]-[/]"
-        activity = time_ago(row["last_activity_at"])
-
-        table.add_row(
-            sid,
-            title,
-            f"[{status_style}]{status}[/]",
-            f"[{priority_style}]{priority}[/]",
-            f"[{vote_style}]{vote_str}[/]",
-            has_pr,
-            activity,
-        )
-
-    filter_label = f" | Filter: {filter_status}" if filter_status else ""
-    sort_label = f" | Sort: {sort_by}"
-    title = f"[bold]Suggestions[/] [dim](Page {page + 1}/{total_pages}{filter_label}{sort_label})[/]"
-    return Panel(table, title=title, border_style="blue")
-
-
-def build_suggestion_detail(conn, suggestion_id):
-    c = conn.cursor()
-    c.execute("SELECT * FROM suggestions WHERE id = ?", (suggestion_id,))
-    row = c.fetchone()
-    if not row:
-        return Panel(f"[red]Suggestion #{suggestion_id} not found[/]", title="Detail", border_style="red")
-
-    detail = Text()
-    detail.append(f"#{row['id']} ", style="bold dim")
-    detail.append(f"{row['title']}\n", style="bold white")
-    detail.append(f"\nStatus: ", style="dim")
-    detail.append(f"{row['status']}\n", style=STATUS_COLORS.get(row["status"], "white"))
-    detail.append(f"Priority: ", style="dim")
-    detail.append(f"{row['priority'] or 'N/A'}\n", style=PRIORITY_COLORS.get(row["priority"] or "", "dim"))
-    detail.append(f"Author: ", style="dim")
-    detail.append(f"{row['author_name'] or 'N/A'}\n", style="white")
-    detail.append(f"Created: ", style="dim")
-    detail.append(f"{ts_to_str(row['created_at'])}\n", style="white")
-    detail.append(f"Last Activity: ", style="dim")
-    detail.append(f"{time_ago(row['last_activity_at'])}\n", style="white")
-
-    if row["pr_url"]:
-        detail.append(f"PR: ", style="dim")
-        detail.append(f"{row['pr_url']}\n", style="cyan underline")
-
-    if row["description"]:
-        desc = row["description"]
-        if len(desc) > 300:
-            desc = desc[:297] + "..."
-        detail.append(f"\n{desc}\n", style="white")
-
-    if row["plan_display_summary"]:
-        summary = row["plan_display_summary"]
-        if len(summary) > 500:
-            summary = summary[:497] + "..."
-        detail.append(f"\n[bold]Plan Summary:[/]\n{summary}\n")
-
-    # Tasks for this suggestion
-    c.execute("SELECT title, status, status_detail FROM plan_tasks WHERE suggestion_id = ? ORDER BY task_order", (suggestion_id,))
-    tasks = c.fetchall()
-    if tasks:
-        detail.append(f"\n[bold]Tasks ({len(tasks)}):[/]\n")
-        for t in tasks:
-            icon = {"COMPLETED": "[green]✓[/]", "PENDING": "[yellow]○[/]", "IN_PROGRESS": "[blue]►[/]", "REVIEWING": "[cyan]◎[/]", "FAILED": "[red]✗[/]"}.get(t["status"], "?")
-            task_title = t["title"] or "(untitled)"
-            if len(task_title) > 60:
-                task_title = task_title[:57] + "..."
-            detail.append(f"  {icon} {task_title}\n")
-
-    # Recent messages
-    c.execute("SELECT sender_name, sender_type, content, created_at FROM suggestion_messages WHERE suggestion_id = ? ORDER BY created_at DESC LIMIT 5", (suggestion_id,))
-    msgs = c.fetchall()
-    if msgs:
-        detail.append(f"\n[bold]Recent Messages ({len(msgs)}):[/]\n")
-        for m in reversed(msgs):
-            sender = m["sender_name"] or m["sender_type"]
-            content = m["content"] or ""
-            if len(content) > 120:
-                content = content[:117] + "..."
-            sender_style = "cyan" if m["sender_type"] == "SYSTEM" else "yellow"
-            detail.append(f"  [{sender_style}]{sender}[/]: {content}\n")
-
-    return Panel(detail, title=f"[bold]Suggestion #{suggestion_id}", border_style="magenta")
-
-
-def build_recent_activity(conn, limit=8):
-    c = conn.cursor()
-    c.execute("""
-        SELECT sm.sender_name, sm.sender_type, sm.content, sm.created_at, sm.suggestion_id, s.title
-        FROM suggestion_messages sm
-        JOIN suggestions s ON s.id = sm.suggestion_id
-        ORDER BY sm.created_at DESC
-        LIMIT ?
-    """, (limit,))
-    msgs = c.fetchall()
-
-    table = Table(box=box.SIMPLE, show_header=True, padding=(0, 1))
-    table.add_column("Time", width=8, style="dim")
-    table.add_column("Sug#", width=5, style="dim")
-    table.add_column("From", width=12)
-    table.add_column("Message", min_width=30, no_wrap=True)
-
-    for m in msgs:
-        when = time_ago(m["created_at"])
-        sid = f"#{m['suggestion_id']}"
-        sender = m["sender_name"] or m["sender_type"] or "?"
-        content = m["content"] or ""
-        if len(content) > 80:
-            content = content[:77] + "..."
-        sender_style = "cyan" if m["sender_type"] == "SYSTEM" else "yellow"
-        table.add_row(when, sid, f"[{sender_style}]{sender}[/]", content)
-
-    return Panel(table, title="[bold]Recent Activity", border_style="magenta")
-
-
-def build_services_panel():
-    """Build a panel showing status of all managed services."""
-    table = Table(box=box.ROUNDED, show_lines=False, padding=(0, 1))
-    table.add_column("Service", min_width=28, no_wrap=True)
-    table.add_column("Status", width=10)
-    table.add_column("PID", width=8, justify="right")
-    table.add_column("CPU%", width=6, justify="right")
-    table.add_column("MEM%", width=6, justify="right")
-    table.add_column("RSS", width=10, justify="right")
-    table.add_column("Uptime", width=14)
-
-    for key, svc in SERVICES.items():
-        running, pid, info = get_service_status(key)
-        status_str = "[green]RUNNING[/]" if running else "[red]DOWN[/]"
-        pid_str = str(pid) if pid else "-"
-        cpu = info.get("cpu", "-")
-        mem = info.get("mem", "-")
-        rss_kb = info.get("rss", "0")
-        try:
-            rss_val = int(rss_kb)
-            rss_str = f"{rss_val // 1024} MB" if rss_val > 1024 else f"{rss_val} KB"
-        except (ValueError, TypeError):
-            rss_str = "-"
-        uptime = info.get("uptime", "-")
-        table.add_row(svc["name"], status_str, pid_str, cpu, mem, rss_str, uptime)
-
-    # System resources
-    try:
-        result = subprocess.run(["free", "-m"], capture_output=True, text=True)
-        for line in result.stdout.splitlines():
-            if line.startswith("Mem:"):
-                parts = line.split()
-                total, used = int(parts[1]), int(parts[2])
-                pct = used * 100 // total if total else 0
-                table.add_row(
-                    "[dim]System Memory[/]", f"[dim]{pct}%[/]", "-",
-                    "-", f"[dim]{pct}[/]", f"[dim]{used}MB[/]", f"[dim]{total}MB total[/]",
-                )
-    except Exception:
-        pass
-
-    try:
-        result = subprocess.run(["df", "-h", "/home/claude"], capture_output=True, text=True)
-        lines = result.stdout.strip().splitlines()
-        if len(lines) >= 2:
-            parts = lines[1].split()
-            table.add_row(
-                "[dim]Disk (/home/claude)[/]", f"[dim]{parts[4]}[/]", "-",
-                "-", "-", f"[dim]{parts[2]}[/]", f"[dim]{parts[1]} total[/]",
-            )
-    except Exception:
-        pass
-
-    return Panel(table, title="[bold]Services & Resources", border_style="yellow")
-
-
-def build_claude_panel(claude_session):
-    """Build a panel showing recent Claude conversation history."""
-    content = Text()
-
-    if claude_session is None:
-        content.append("  No Claude session active. Press [c] to chat with Claude.\n", style="dim")
-        return Panel(content, title="[bold]Claude Session", border_style="cyan", height=12)
-
-    history = claude_session.get_recent_history(6)
-    if not history:
-        content.append("  Session ready. Press [c] to send a message to Claude.\n", style="dim")
-    else:
-        for role, text in history:
-            if role == "user":
-                content.append("  You: ", style="bold yellow")
-                # Truncate long messages for display
-                display_text = text if len(text) <= 100 else text[:97] + "..."
-                content.append(f"{display_text}\n", style="white")
-            else:
-                content.append("  Claude: ", style="bold cyan")
-                # Show first few lines
-                lines = text.split("\n")
-                preview = "\n         ".join(lines[:6])
-                if len(lines) > 6:
-                    preview += "\n         ..."
-                content.append(f"{preview}\n", style="white")
-            content.append("\n")
-
-    if claude_session.working:
-        content.append("  [bold yellow]Working...[/]\n")
-
-    return Panel(content, title="[bold]Claude Session", border_style="cyan")
-
-
-def build_commands_panel():
-    t = Text()
-    t.append("  Navigation\n", style="bold underline")
-    t.append("  [d] ", style="bold cyan"); t.append("Dashboard  ")
-    t.append("[l] ", style="bold cyan"); t.append("List  ")
-    t.append("[a] ", style="bold cyan"); t.append("Activity\n")
-    t.append("  [sv] ", style="bold cyan"); t.append("Services  ")
-    t.append("[h] ", style="bold cyan"); t.append("Help  ")
-    t.append("[r] ", style="bold cyan"); t.append("Refresh  ")
-    t.append("[q] ", style="bold cyan"); t.append("Quit\n")
-
-    t.append("\n  Suggestions\n", style="bold underline")
-    t.append("  [v] <id>  ", style="bold cyan"); t.append("View detail\n")
-    t.append("  [n] / [p] ", style="bold cyan"); t.append("Next/prev page\n")
-    t.append("  [f] <status> ", style="bold cyan"); t.append("Filter list\n")
-    t.append("  [s] <field>  ", style="bold cyan"); t.append("Sort list\n")
-
-    t.append("\n  Services\n", style="bold underline")
-    t.append("  [start/stop/restart] ", style="bold cyan"); t.append("<svc>\n")
-    t.append("  [restart all]        ", style="bold cyan"); t.append("All svcs\n")
-
-    t.append("\n  Claude\n", style="bold underline")
-    t.append("  [c] <msg>  ", style="bold cyan"); t.append("Send message\n")
-    t.append("  [c]        ", style="bold cyan"); t.append("Multi-line mode\n")
-    return Panel(t, title="[bold]Commands", border_style="green")
-
-
-def build_help():
-    help_text = Text()
-    help_text.append("  Navigation & Views\n", style="bold underline")
-    help_text.append("  [h]  ", style="bold cyan")
-    help_text.append("Help          ")
-    help_text.append("[d]  ", style="bold cyan")
-    help_text.append("Dashboard     ")
-    help_text.append("[l]  ", style="bold cyan")
-    help_text.append("List view     ")
-    help_text.append("[a]  ", style="bold cyan")
-    help_text.append("Activity feed\n")
-    help_text.append("  [sv] ", style="bold cyan")
-    help_text.append("Services view\n")
-
-    help_text.append("\n  Suggestion Detail\n", style="bold underline")
-    help_text.append("  [v] <id>  ", style="bold cyan")
-    help_text.append("View suggestion detail\n")
-
-    help_text.append("\n  Service Management\n", style="bold underline")
-    help_text.append("  [start] <svc>   ", style="bold cyan")
-    help_text.append("Start a service (app, extractor)\n")
-    help_text.append("  [stop] <svc>    ", style="bold cyan")
-    help_text.append("Stop a service\n")
-    help_text.append("  [restart] <svc> ", style="bold cyan")
-    help_text.append("Restart a service\n")
-    help_text.append("  [restart] all   ", style="bold cyan")
-    help_text.append("Restart all services\n")
-
-    help_text.append("\n  Claude Interaction\n", style="bold underline")
-    help_text.append("  [c] <message>   ", style="bold cyan")
-    help_text.append("Send a message to Claude\n")
-    help_text.append("  [c]             ", style="bold cyan")
-    help_text.append("Enter multi-line Claude chat mode (empty line to send)\n")
-
-    help_text.append("\n  List Controls\n", style="bold underline")
-    help_text.append("  [n/p]     ", style="bold cyan")
-    help_text.append("Next/previous page\n")
-    help_text.append("  [f] <status>  ", style="bold cyan")
-    help_text.append("Filter by status (MERGED, IN_PROGRESS, DENIED, etc.)\n")
-    help_text.append("  [f] clear     ", style="bold cyan")
-    help_text.append("Clear filter\n")
-    help_text.append("  [s] <field>   ", style="bold cyan")
-    help_text.append("Sort by: id, votes, activity, created, status\n")
-
-    help_text.append("\n  Other\n", style="bold underline")
-    help_text.append("  [r]  ", style="bold cyan")
-    help_text.append("Refresh data  ")
-    help_text.append("[q]  ", style="bold cyan")
-    help_text.append("Quit\n")
-
-    return Panel(help_text, title="[bold]Keyboard Commands", border_style="green")
-
-
-# ── Main views ──────────────────────────────────────────────────────
-
-
-def _available_height(reserved_lines=2):
-    """Return the height available for the layout, reserving lines for cmd bar and prompt."""
-    term_h = shutil.get_terminal_size((80, 24)).lines
-    return max(12, term_h - reserved_lines)
-
-
-def render_dashboard(conn, settings, claude_session=None):
-    avail = _available_height()
-    header_h = 3
-    top_h = min(14, max(8, (avail - header_h) * 4 // 10))
-    commands_h = min(14, max(10, avail // 4))
-    mid_h = avail - header_h - top_h - commands_h
-
-    layout = Layout(size=avail)
-    layout.split_column(
-        Layout(name="header", size=header_h),
-        Layout(name="top", size=top_h),
-        Layout(name="mid", size=max(4, mid_h)),
-        Layout(name="commands", size=commands_h),
-    )
-    layout["header"].update(build_header(settings))
-    layout["top"].split_row(
-        Layout(build_status_summary(conn), name="status"),
-        Layout(build_task_summary(conn), name="tasks"),
-        Layout(build_activity_summary(conn), name="activity"),
-    )
-    activity_limit = max(3, mid_h - 3)
-    layout["mid"].split_row(
-        Layout(build_recent_activity(conn, limit=activity_limit), name="recent_activity", ratio=3),
-        Layout(build_services_panel(), name="services", ratio=2),
-        Layout(build_claude_panel(claude_session), name="claude", ratio=2),
-    )
-    layout["commands"].update(build_commands_panel())
-    return layout
-
-
-def render_list(conn, settings, page, filter_status, sort_by):
-    avail = _available_height()
-    layout = Layout(size=avail)
-    layout.split_column(
-        Layout(name="header", size=3),
-        Layout(name="table"),
-    )
-    layout["header"].update(build_header(settings))
-    page_size = max(5, avail - 3 - 5)  # header + table chrome
-    layout["table"].update(build_suggestions_table(conn, page, page_size, filter_status, sort_by))
-    return layout
-
-
-def render_detail(conn, settings, suggestion_id):
-    avail = _available_height()
-    layout = Layout(size=avail)
-    layout.split_column(
-        Layout(name="header", size=3),
-        Layout(name="detail"),
-    )
-    layout["header"].update(build_header(settings))
-    layout["detail"].update(build_suggestion_detail(conn, suggestion_id))
-    return layout
-
-
-def render_activity(conn, settings):
-    avail = _available_height()
-    layout = Layout(size=avail)
-    layout.split_column(
-        Layout(name="header", size=3),
-        Layout(name="activity"),
-    )
-    layout["header"].update(build_header(settings))
-    activity_limit = max(5, avail - 3 - 4)
-    layout["activity"].update(build_recent_activity(conn, limit=activity_limit))
-    return layout
-
-
-def render_services(conn, settings, claude_session=None):
-    avail = _available_height()
-    svc_h = min(12, max(6, avail // 3))
-    layout = Layout(size=avail)
-    layout.split_column(
-        Layout(name="header", size=3),
-        Layout(name="services", size=svc_h),
-        Layout(name="claude"),
-    )
-    layout["header"].update(build_header(settings))
-    layout["services"].update(build_services_panel())
-    layout["claude"].update(build_claude_panel(claude_session))
-    return layout
-
-
-def render_claude_view(conn, settings, claude_session):
-    avail = _available_height()
-    layout = Layout(size=avail)
-    layout.split_column(
-        Layout(name="header", size=3),
-        Layout(name="claude"),
-    )
-    layout["header"].update(build_header(settings))
-    layout["claude"].update(build_claude_panel(claude_session))
-    return layout
-
-
-def get_settings(conn):
-    c = conn.cursor()
-    c.execute("SELECT * FROM site_settings LIMIT 1")
-    row = c.fetchone()
-    if row:
-        return dict(row)
-    return {"site_name": "Site Manager", "claude_model": "unknown", "target_repo_url": ""}
-
-
-# ── Interactive loop ────────────────────────────────────────────────
+        elapsed = time.time() - self.claude_start_time if self.claude_start_time else 0
+        self.claude_history.append(("claude", response, time.time(), elapsed))
+        self.claude_working = False
+        self.claude_is_thinking = False
+        self.claude_response_so_far = ""
+        self.call_from_thread(self._refresh_claude_panel)
+        self.call_from_thread(self._update_claude_logs)
+        self.call_from_thread(self.set_status, f"[green]Claude responded ({elapsed:.1f}s)[/]")
+
+    def _update_claude_logs(self) -> None:
+        for log_id in ("#claude-log", "#claude-log2"):
+            try:
+                log = self.query_one(log_id, RichLog)
+                log.clear()
+                for entry in self.claude_history[-20:]:
+                    role = entry[0]
+                    text = entry[1]
+                    ts = entry[2] if len(entry) > 2 else None
+                    elapsed_str = f" [{entry[3]:.1f}s]" if role == "claude" and len(entry) > 3 else ""
+                    when = f" ({time_ago(ts * 1000)})" if ts else ""
+                    if role == "user":
+                        header = Text(f"You{when}: ", style="bold yellow")
+                        log.write(header + Text(text))
+                    else:
+                        header = Text(f"Claude{elapsed_str}{when}: ", style="bold cyan")
+                        log.write(header + Text(text))
+                    log.write("")
+            except Exception:
+                pass
+
+    @on(DataTable.RowSelected, "#suggestions-table")
+    def on_suggestion_selected(self, event: DataTable.RowSelected) -> None:
+        if event.row_key and event.row_key.value:
+            try:
+                sid = int(event.row_key.value)
+                self.push_screen(DetailScreen(sid))
+            except (ValueError, TypeError):
+                pass
 
 
 def main():
-    console = Console()
-
-    # Initialize Claude session
-    claude_session = ClaudeSession(console)
-
-    # State
-    view = "dashboard"  # dashboard, list, detail, activity, help, services, claude
-    page = 0
-    filter_status = None
-    sort_by = "id"
-    detail_id = None
-    status_msg = None  # one-line status message shown after command bar
-
-    def refresh():
-        conn = get_db()
-        settings = get_settings(conn)
-        if view == "dashboard":
-            result = render_dashboard(conn, settings, claude_session)
-        elif view == "list":
-            result = render_list(conn, settings, page, filter_status, sort_by)
-        elif view == "detail" and detail_id:
-            result = render_detail(conn, settings, detail_id)
-        elif view == "activity":
-            result = render_activity(conn, settings)
-        elif view == "services":
-            result = render_services(conn, settings, claude_session)
-        elif view == "claude":
-            result = render_claude_view(conn, settings, claude_session)
-        elif view == "help":
-            avail = _available_height()
-            layout = Layout(size=avail)
-            layout.split_column(
-                Layout(name="header", size=3),
-                Layout(name="help"),
-            )
-            layout["header"].update(build_header(settings))
-            layout["help"].update(build_help())
-            result = layout
-        else:
-            result = render_dashboard(conn, settings, claude_session)
-        conn.close()
-        return result
-
-    # ── Startup: launch Claude for initial health check ──
-    console.clear()
-    console.print(Panel(
-        "[bold cyan]Site Manager Dashboard[/]\n\n"
-        "Starting Claude session and checking service health...",
-        border_style="cyan",
-    ))
-
-    # Run initial health check via Claude
-    with console.status("[bold cyan]Claude is checking service status...", spinner="dots"):
-        startup_response = claude_session.send_message(
-            "Check the current status of the site-manager application. "
-            "Run: ps aux | grep -E 'auto-update|extract-errors|gradlew|bootRun' | grep -v grep "
-            "to see what's running. Also check if app.log and error.log exist and show "
-            "the last 5 lines of each if they do. Report a brief status summary."
-        )
-
-    console.clear()
-    console.print(refresh())
-    if status_msg:
-        console.print(f"\n{status_msg}")
-        status_msg = None
-
-    while True:
-        try:
-            cmd = Prompt.ask("[bold blue]>[/]").strip()
-        except (KeyboardInterrupt, EOFError):
-            break
-
-        cmd_lower = cmd.lower()
-
-        if not cmd:
-            continue
-        elif cmd_lower == "q":
-            console.print("[dim]Goodbye![/]")
-            break
-        elif cmd_lower == "d":
-            view = "dashboard"
-        elif cmd_lower == "l":
-            view = "list"
-            page = 0
-        elif cmd_lower == "a":
-            view = "activity"
-        elif cmd_lower == "sv":
-            view = "services"
-        elif cmd_lower == "h":
-            view = "help"
-        elif cmd_lower == "r":
-            pass  # just refresh
-        elif cmd_lower == "n":
-            page += 1
-            view = "list"
-        elif cmd_lower == "p":
-            page = max(0, page - 1)
-            view = "list"
-
-        # ── Service management commands ──
-        elif cmd_lower.startswith("start "):
-            svc_key = cmd_lower.split(None, 1)[1].strip()
-            if svc_key in SERVICES:
-                with console.status(f"[bold yellow]Starting {SERVICES[svc_key]['name']}..."):
-                    ok, msg = start_service(svc_key)
-                status_msg = f"[green]{msg}[/]" if ok else f"[red]{msg}[/]"
-                view = "services"
-            else:
-                status_msg = f"[red]Unknown service: {svc_key}. Available: {', '.join(SERVICES.keys())}[/]"
-
-        elif cmd_lower.startswith("stop "):
-            svc_key = cmd_lower.split(None, 1)[1].strip()
-            if svc_key in SERVICES:
-                with console.status(f"[bold yellow]Stopping {SERVICES[svc_key]['name']}..."):
-                    ok, msg = stop_service(svc_key)
-                status_msg = f"[green]{msg}[/]" if ok else f"[red]{msg}[/]"
-                view = "services"
-            else:
-                status_msg = f"[red]Unknown service: {svc_key}. Available: {', '.join(SERVICES.keys())}[/]"
-
-        elif cmd_lower.startswith("restart "):
-            svc_key = cmd_lower.split(None, 1)[1].strip()
-            if svc_key == "all":
-                msgs = []
-                for key in SERVICES:
-                    with console.status(f"[bold yellow]Restarting {SERVICES[key]['name']}..."):
-                        ok, msg = restart_service(key)
-                    msgs.append(f"[green]{msg}[/]" if ok else f"[red]{msg}[/]")
-                status_msg = " | ".join(msgs)
-                view = "services"
-            elif svc_key in SERVICES:
-                with console.status(f"[bold yellow]Restarting {SERVICES[svc_key]['name']}..."):
-                    ok, msg = restart_service(svc_key)
-                status_msg = f"[green]{msg}[/]" if ok else f"[red]{msg}[/]"
-                view = "services"
-            else:
-                status_msg = f"[red]Unknown service: {svc_key}. Available: {', '.join(SERVICES.keys())}, all[/]"
-
-        # ── Claude interaction ──
-        elif cmd_lower == "c":
-            # Multi-line chat mode
-            console.print("[bold cyan]Claude chat mode[/] [dim](type your message, empty line to send, 'exit' to cancel)[/]")
-            lines = []
-            while True:
-                try:
-                    line = Prompt.ask("[dim]...[/]")
-                    if line.strip().lower() == "exit":
-                        lines = []
-                        break
-                    if line == "" and lines:
-                        break
-                    lines.append(line)
-                except (KeyboardInterrupt, EOFError):
-                    lines = []
-                    break
-            if lines:
-                message = "\n".join(lines)
-                with console.status("[bold cyan]Claude is working..."):
-                    claude_session.send_message(message)
-                view = "claude"
-            else:
-                status_msg = "[dim]Chat cancelled[/]"
-
-        elif cmd_lower.startswith("c "):
-            message = cmd[2:].strip()
-            if message:
-                with console.status("[bold cyan]Claude is working..."):
-                    claude_session.send_message(message)
-                view = "claude"
-
-        elif cmd_lower.startswith("v "):
-            try:
-                detail_id = int(cmd.split()[1])
-                view = "detail"
-            except (ValueError, IndexError):
-                console.print("[red]Usage: v <suggestion_id>[/]")
-                continue
-        elif cmd_lower.startswith("f "):
-            arg = cmd_lower[2:].strip().upper()
-            if arg == "CLEAR":
-                filter_status = None
-            else:
-                filter_status = arg
-            page = 0
-            view = "list"
-        elif cmd_lower.startswith("s ") and not cmd_lower.startswith("start") and not cmd_lower.startswith("stop"):
-            arg = cmd_lower[2:].strip()
-            if arg in ("id", "votes", "activity", "created", "status"):
-                sort_by = arg
-            else:
-                console.print(f"[red]Unknown sort field: {arg}. Use: id, votes, activity, created, status[/]")
-                continue
-            view = "list"
-        else:
-            console.print(f"[red]Unknown command: {cmd}. Press 'h' for help.[/]")
-            continue
-
-        console.clear()
-        console.print(refresh())
-        if status_msg:
-            console.print(f"\n{status_msg}")
-            status_msg = None
+    app = SiteManagerApp()
+    app.run()
 
 
 if __name__ == "__main__":
