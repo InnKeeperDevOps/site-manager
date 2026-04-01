@@ -33,6 +33,7 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "site
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PID_FILE = "/tmp/site-manager-auto-update.pid"
 CLAUDE_LOG_FILE = os.path.join(SCRIPT_DIR, "claude-output.log")
+APP_LOG_FILE = os.path.join(SCRIPT_DIR, "app.log")
 
 STATUS_COLORS = {
     "MERGED": "green",
@@ -673,6 +674,13 @@ CSS = """
     margin: 0 1;
 }
 
+#recommendations-log {
+    border: round $warning;
+    height: auto;
+    min-height: 8;
+    max-height: 20;
+}
+
 #claude-log {
     border: round $accent;
     height: 1fr;
@@ -828,6 +836,74 @@ class ActivityStats(Static):
         self.update(t)
 
 
+def get_recommendation_logs(max_lines=30):
+    """Read recent recommendation-related log lines from app.log."""
+    if not os.path.exists(APP_LOG_FILE):
+        return []
+    lines = []
+    try:
+        with open(APP_LOG_FILE, "r", errors="replace") as f:
+            for raw in f:
+                if "[RECOMMENDATIONS]" in raw or "[recommendations]" in raw:
+                    lines.append(raw.rstrip())
+    except Exception:
+        return []
+    return lines[-max_lines:]
+
+
+class RecommendationsLog(Static):
+    def on_mount(self) -> None:
+        self.refresh_data()
+
+    def refresh_data(self) -> None:
+        t = Text()
+        t.append("AI Recommendations Log\n\n", style="bold")
+
+        lines = get_recommendation_logs(20)
+        if not lines:
+            t.append("  No recommendation activity found in app.log\n", style="dim")
+        else:
+            for line in lines:
+                # Classify log level
+                if "ERROR" in line or "error" in line.split("]")[0] if "]" in line else False:
+                    style = "red"
+                    tag = "ERR "
+                elif "WARN" in line:
+                    style = "yellow"
+                    tag = "WARN"
+                else:
+                    style = "dim white"
+                    tag = "INFO"
+
+                # Extract timestamp if present (Spring Boot format: 2024-01-15T10:30:45 or 2024-01-15 10:30:45)
+                ts_display = ""
+                parts = line.split(" ", 2)
+                if len(parts) >= 2:
+                    # Try to grab date+time portion
+                    date_part = parts[0]
+                    if len(date_part) >= 10 and ("-" in date_part or "T" in date_part):
+                        time_part = parts[1] if len(parts) > 1 else ""
+                        ts_display = time_part.split(".")[0] if "." in time_part else time_part[:8]
+
+                # Extract the message after [RECOMMENDATIONS] or [recommendations]
+                msg = line
+                for marker in ("[RECOMMENDATIONS]", "[recommendations]"):
+                    idx = line.find(marker)
+                    if idx >= 0:
+                        msg = line[idx + len(marker):].strip()
+                        break
+
+                if len(msg) > 100:
+                    msg = msg[:97] + "..."
+
+                t.append(f"  {tag} ", style=f"bold {style}")
+                if ts_display:
+                    t.append(f"{ts_display} ", style="dim")
+                t.append(f"{msg}\n", style=style)
+
+        self.update(t)
+
+
 class ServicesWidget(Vertical):
     def compose(self) -> ComposeResult:
         yield Static(classes="services-table-inner")
@@ -941,6 +1017,8 @@ class SiteManagerApp(App):
                     yield Static(id="recent-activity", classes="stat-panel")
                     yield ServicesWidget(id="services-widget", classes="stat-panel")
                     yield Static(id="claude-panel", classes="stat-panel")
+                with Horizontal():
+                    yield RecommendationsLog(id="recommendations-log", classes="stat-panel")
 
             with TabPane("Suggestions", id="suggestions"):
                 yield DataTable(id="suggestions-table", cursor_type="row")
@@ -1022,6 +1100,7 @@ class SiteManagerApp(App):
         self._refresh_stats()
         self._refresh_recent_activity()
         self._refresh_claude_panel()
+        self._refresh_recommendations_log()
 
     def action_refresh(self) -> None:
         self._refresh_stats()
@@ -1029,6 +1108,7 @@ class SiteManagerApp(App):
         self._populate_activity_table()
         self._refresh_recent_activity()
         self._refresh_claude_panel()
+        self._refresh_recommendations_log()
         svc = self.query_one("#services-widget", ServicesWidget)
         svc.refresh_data()
         try:
@@ -1045,6 +1125,12 @@ class SiteManagerApp(App):
         for widget_type in (SuggestionsStats, TaskStats, ActivityStats):
             for w in self.query(widget_type):
                 w.refresh_data()
+
+    def _refresh_recommendations_log(self) -> None:
+        try:
+            self.query_one("#recommendations-log", RecommendationsLog).refresh_data()
+        except Exception:
+            pass
 
     def _refresh_recent_activity(self) -> None:
         conn = get_db()

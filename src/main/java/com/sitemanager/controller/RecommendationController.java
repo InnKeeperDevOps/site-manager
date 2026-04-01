@@ -67,11 +67,14 @@ public class RecommendationController {
 
         executor.submit(() -> {
             try {
+                log.info("[RECOMMENDATIONS] Starting recommendation request (taskId={})", taskId);
                 ensureMainRepoAvailable(settings);
                 String projectDefinition = readProjectDefinition();
                 String prompt = buildPrompt(settings, statusCounts, total, projectDefinition);
+                log.info("[RECOMMENDATIONS] Sending prompt to Claude ({} total suggestions)", total);
                 String rawResponse = claudeService.getRecommendations(prompt);
                 List<Map<String, String>> recommendations = parseRecommendations(rawResponse);
+                log.info("[RECOMMENDATIONS] Completed successfully with {} recommendations (taskId={})", recommendations.size(), taskId);
                 tasks.put(taskId, new TaskResult("done", recommendations, null));
             } catch (IllegalStateException e) {
                 log.warn("[RECOMMENDATIONS] Failed to parse response: {}", e.getMessage());
