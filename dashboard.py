@@ -658,6 +658,21 @@ CSS = """
     height: 1fr;
 }
 
+.svc-btn-row {
+    height: 3;
+    padding: 0 1;
+}
+
+.svc-btn-label {
+    width: 30;
+    padding: 1 1;
+}
+
+.svc-btn {
+    min-width: 10;
+    margin: 0 1;
+}
+
 #claude-log {
     border: round $accent;
     height: 1fr;
@@ -813,7 +828,16 @@ class ActivityStats(Static):
         self.update(t)
 
 
-class ServicesWidget(Static):
+class ServicesWidget(Vertical):
+    def compose(self) -> ComposeResult:
+        yield Static(classes="services-table-inner")
+        for key in SERVICES:
+            with Horizontal(classes="svc-btn-row"):
+                yield Label(SERVICES[key]["name"], classes="svc-btn-label")
+                yield Button("Restart", id=f"svc-restart-{key}-{self.id or 'x'}", variant="warning", classes="svc-btn")
+                yield Button("Stop", id=f"svc-stop-{key}-{self.id or 'x'}", variant="error", classes="svc-btn")
+                yield Button("Start", id=f"svc-start-{key}-{self.id or 'x'}", variant="success", classes="svc-btn")
+
     def on_mount(self) -> None:
         self.refresh_data()
 
@@ -868,7 +892,7 @@ class ServicesWidget(Static):
         except Exception:
             pass
 
-        self.update(t)
+        self.query_one(".services-table-inner", Static).update(t)
 
 
 # ── Main App ─────────────────────────────────────────────────────────
@@ -1236,6 +1260,22 @@ class SiteManagerApp(App):
         if msg:
             event.input.clear()
             self._send_to_claude(msg)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        btn_id = event.button.id or ""
+        for prefix, fn, action_word in [
+            ("svc-restart-", restart_service, "Restarting"),
+            ("svc-stop-", stop_service, "Stopping"),
+            ("svc-start-", start_service, "Starting"),
+        ]:
+            if btn_id.startswith(prefix):
+                remainder = btn_id[len(prefix):]
+                for svc_key in SERVICES:
+                    if remainder.startswith(svc_key):
+                        self.set_status(f"[yellow]{action_word} {SERVICES[svc_key]['name']}...[/]")
+                        self._run_service_cmd(fn, svc_key)
+                        return
+                return
 
     def _process_command(self, cmd: str) -> None:
         cmd_lower = cmd.lower()
