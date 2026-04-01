@@ -1097,6 +1097,8 @@ class SiteManagerApp(App):
 
                 if ev_type == "assistant":
                     content = ev.get("message", {}).get("content", [])
+                    if not isinstance(content, list):
+                        continue
                     for block in content:
                         btype = block.get("type", "")
                         if btype == "thinking":
