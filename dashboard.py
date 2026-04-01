@@ -22,6 +22,7 @@ from textual.screen import Screen, ModalScreen
 from textual.reactive import reactive
 from textual import on, work
 from textual.binding import Binding
+from textual.suggester import SuggestFromList
 from rich.text import Text
 from rich.table import Table
 from rich import box
@@ -638,6 +639,17 @@ class SiteManagerApp(App):
         yield Input(
             placeholder="Command: [c] Claude  [v <id>] Detail  [start/stop/restart <svc>]  [f <status>]  [n/p] pages  [r] Refresh  [q] Quit",
             id="command-input",
+            suggester=SuggestFromList([
+                "q", "r", "n", "p",
+                "c ",
+                "v ",
+                "f MERGED", "f DEV_COMPLETE", "f FINAL_REVIEW", "f IN_PROGRESS",
+                "f PENDING", "f DENIED", "f TIMED_OUT", "f DRAFT", "f CLEAR",
+                "s id", "s votes", "s activity", "s created", "s status",
+                "start app", "start extractor",
+                "stop app", "stop extractor",
+                "restart app", "restart extractor", "restart all",
+            ], case_sensitive=False),
         )
         yield Footer()
 
