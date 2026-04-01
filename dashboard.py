@@ -34,6 +34,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PID_FILE = "/tmp/site-manager-auto-update.pid"
 CLAUDE_LOG_FILE = os.path.join(SCRIPT_DIR, "claude-output.log")
 APP_LOG_FILE = os.path.join(SCRIPT_DIR, "app.log")
+ERROR_FIXER_LOG = os.path.join(SCRIPT_DIR, "error-fixer.log")
 
 STATUS_COLORS = {
     "MERGED": "green",
@@ -66,6 +67,13 @@ SERVICES = {
         "start_cmd": f"nohup bash {SCRIPT_DIR}/extract-errors.sh > /dev/null 2>&1 & echo $!",
         "grep_pattern": "extract-errors.sh",
         "log_file": os.path.join(SCRIPT_DIR, "error.log"),
+    },
+    "errorfixer": {
+        "name": "Error Fixer (5m cron)",
+        "pid_file": "/tmp/error-fixer.lock",
+        "start_cmd": f"nohup bash {SCRIPT_DIR}/fix-errors.sh > /dev/null 2>&1 & echo $!",
+        "grep_pattern": "fix-errors.sh",
+        "log_file": os.path.join(SCRIPT_DIR, "error-fixer.log"),
     },
 }
 
@@ -681,6 +689,13 @@ CSS = """
     max-height: 20;
 }
 
+#error-fixer-monitor {
+    border: round $error;
+    height: auto;
+    min-height: 8;
+    max-height: 20;
+}
+
 #claude-log {
     border: round $accent;
     height: 1fr;
@@ -904,6 +919,109 @@ class RecommendationsLog(Static):
         self.update(t)
 
 
+def get_error_fixer_logs(max_lines=25):
+    """Read recent lines from error-fixer.log."""
+    if not os.path.exists(ERROR_FIXER_LOG):
+        return []
+    lines = []
+    try:
+        with open(ERROR_FIXER_LOG, "r", errors="replace") as f:
+            for raw in f:
+                lines.append(raw.rstrip())
+    except Exception:
+        return []
+    return lines[-max_lines:]
+
+
+class ErrorFixerMonitor(Static):
+    def on_mount(self) -> None:
+        self.refresh_data()
+
+    def refresh_data(self) -> None:
+        t = Text()
+        t.append("Error Fixer Monitor (5m cron)\n\n", style="bold")
+
+        # Show service status
+        running, pid, info = get_service_status("errorfixer")
+        if running:
+            t.append("  Status: ", style="dim")
+            t.append("RUNNING", style="bold green")
+            t.append(f"  PID: {pid}", style="dim")
+            if info.get("uptime"):
+                t.append(f"  Uptime: {info['uptime']}", style="dim")
+            t.append("\n")
+        else:
+            t.append("  Status: ", style="dim")
+            t.append("DOWN", style="bold red")
+            t.append("  (start with: start errorfixer)\n", style="dim")
+
+        # Show last offset / state
+        state_file = os.path.join(SCRIPT_DIR, ".error-fixer-offset")
+        if os.path.exists(state_file):
+            try:
+                offset = open(state_file).read().strip()
+                t.append(f"  Last offset: {offset} bytes\n", style="dim")
+            except Exception:
+                pass
+
+        t.append("\n")
+
+        lines = get_error_fixer_logs(15)
+        if not lines:
+            t.append("  No error fixer activity yet\n", style="dim")
+        else:
+            for line in lines:
+                if "[ERROR-FIXER]" in line:
+                    # Extract timestamp and message
+                    ts_display = ""
+                    msg = line
+                    idx = line.find("[ERROR-FIXER]")
+                    if idx >= 0:
+                        ts_display = line[:idx].strip()
+                        msg = line[idx + len("[ERROR-FIXER]"):].strip()
+
+                    # Color based on content
+                    if "error" in msg.lower() or "failed" in msg.lower():
+                        style = "red"
+                        tag = "ERR "
+                    elif "Found" in msg and "new error" in msg:
+                        style = "yellow"
+                        tag = "FIX "
+                    elif "Invoking Claude" in msg:
+                        style = "cyan"
+                        tag = "RUN "
+                    elif "completed" in msg.lower() or "complete" in msg.lower():
+                        style = "green"
+                        tag = "DONE"
+                    elif "No new errors" in msg or "no actionable" in msg.lower():
+                        style = "dim"
+                        tag = "IDLE"
+                    elif "Starting" in msg:
+                        style = "blue"
+                        tag = "INIT"
+                    else:
+                        style = "dim white"
+                        tag = "LOG "
+
+                    if len(msg) > 90:
+                        msg = msg[:87] + "..."
+
+                    t.append(f"  {tag} ", style=f"bold {style}")
+                    if ts_display:
+                        # Show just the time portion
+                        time_part = ts_display.split("T")[-1].replace("Z", "") if "T" in ts_display else ts_display[-8:]
+                        t.append(f"{time_part} ", style="dim")
+                    t.append(f"{msg}\n", style=style)
+                else:
+                    # Claude response lines (indented output)
+                    snippet = line[:100]
+                    if len(line) > 100:
+                        snippet += "..."
+                    t.append(f"         {snippet}\n", style="dim white")
+
+        self.update(t)
+
+
 class ServicesWidget(Vertical):
     def compose(self) -> ComposeResult:
         yield Static(classes="services-table-inner")
@@ -1019,6 +1137,7 @@ class SiteManagerApp(App):
                     yield Static(id="claude-panel", classes="stat-panel")
                 with Horizontal():
                     yield RecommendationsLog(id="recommendations-log", classes="stat-panel")
+                    yield ErrorFixerMonitor(id="error-fixer-monitor", classes="stat-panel")
 
             with TabPane("Suggestions", id="suggestions"):
                 yield DataTable(id="suggestions-table", cursor_type="row")
@@ -1053,9 +1172,9 @@ class SiteManagerApp(App):
                 "f MERGED", "f DEV_COMPLETE", "f FINAL_REVIEW", "f IN_PROGRESS",
                 "f PENDING", "f DENIED", "f TIMED_OUT", "f DRAFT", "f CLEAR",
                 "s id", "s votes", "s activity", "s created", "s status",
-                "start app", "start extractor",
-                "stop app", "stop extractor",
-                "restart app", "restart extractor", "restart all",
+                "start app", "start extractor", "start errorfixer",
+                "stop app", "stop extractor", "stop errorfixer",
+                "restart app", "restart extractor", "restart errorfixer", "restart all",
             ], case_sensitive=False),
         )
         yield Footer()
@@ -1070,7 +1189,7 @@ class SiteManagerApp(App):
         t.append("\nCommand Bar (press Escape to focus)\n", style="bold underline")
         t.append("  c <msg>   ", style="bold cyan"); t.append("Send message to Claude\n")
         t.append("  v <id>    ", style="bold cyan"); t.append("View suggestion detail\n")
-        t.append("  start <svc>    ", style="bold cyan"); t.append("Start service (app, extractor)\n")
+        t.append("  start <svc>    ", style="bold cyan"); t.append("Start service (app, extractor, errorfixer)\n")
         t.append("  stop <svc>     ", style="bold cyan"); t.append("Stop service\n")
         t.append("  restart <svc>  ", style="bold cyan"); t.append("Restart service\n")
         t.append("  restart all    ", style="bold cyan"); t.append("Restart all services\n")
@@ -1101,6 +1220,7 @@ class SiteManagerApp(App):
         self._refresh_recent_activity()
         self._refresh_claude_panel()
         self._refresh_recommendations_log()
+        self._refresh_error_fixer()
 
     def action_refresh(self) -> None:
         self._refresh_stats()
@@ -1109,6 +1229,7 @@ class SiteManagerApp(App):
         self._refresh_recent_activity()
         self._refresh_claude_panel()
         self._refresh_recommendations_log()
+        self._refresh_error_fixer()
         svc = self.query_one("#services-widget", ServicesWidget)
         svc.refresh_data()
         try:
@@ -1129,6 +1250,12 @@ class SiteManagerApp(App):
     def _refresh_recommendations_log(self) -> None:
         try:
             self.query_one("#recommendations-log", RecommendationsLog).refresh_data()
+        except Exception:
+            pass
+
+    def _refresh_error_fixer(self) -> None:
+        try:
+            self.query_one("#error-fixer-monitor", ErrorFixerMonitor).refresh_data()
         except Exception:
             pass
 
