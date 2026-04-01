@@ -9,8 +9,12 @@ import signal
 import subprocess
 import threading
 import json
+import hashlib
+import re
 from datetime import datetime, timezone
 from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.widgets import (
@@ -64,6 +68,147 @@ SERVICES = {
         "log_file": os.path.join(SCRIPT_DIR, "error.log"),
     },
 }
+
+ERROR_LOG_FILE = os.path.join(SCRIPT_DIR, "error.log")
+ERROR_CHECK_INTERVAL = 10  # seconds between error log checks
+ERROR_FIX_LOG_FILE = os.path.join(SCRIPT_DIR, "error-fix.log")
+
+
+@dataclass
+class TrackedError:
+    error_hash: str
+    first_seen: float
+    last_seen: float
+    count: int
+    message: str
+    full_text: str
+    status: str = "NEW"  # NEW, FIXING, FIXED, FAILED, IGNORED
+    fix_attempts: int = 0
+    fix_output: str = ""
+    claude_pid: Optional[int] = None
+
+
+class ErrorManager:
+    """Tracks unique errors from error.log and manages auto-fix sessions."""
+
+    def __init__(self):
+        self.errors: dict[str, TrackedError] = {}
+        self.last_log_position: int = 0
+        self.last_log_inode: int = 0
+        self.fix_in_progress: bool = False
+        self.total_fixes_attempted: int = 0
+        self.total_fixes_succeeded: int = 0
+        self.lock = threading.Lock()
+
+    def _hash_error(self, message: str) -> str:
+        cleaned = re.sub(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}', '', message)
+        cleaned = re.sub(r'0x[0-9a-fA-F]+', '', cleaned)
+        cleaned = re.sub(r'\b\d{3,}\b', 'N', cleaned)
+        return hashlib.sha256(cleaned.strip().encode()).hexdigest()[:16]
+
+    def check_for_new_errors(self) -> list[TrackedError]:
+        """Read error.log for new entries since last check."""
+        new_errors = []
+        if not os.path.exists(ERROR_LOG_FILE):
+            return new_errors
+
+        try:
+            stat = os.stat(ERROR_LOG_FILE)
+            if stat.st_ino != self.last_log_inode:
+                self.last_log_position = 0
+                self.last_log_inode = stat.st_ino
+
+            if stat.st_size < self.last_log_position:
+                self.last_log_position = 0
+
+            with open(ERROR_LOG_FILE, "r") as f:
+                f.seek(self.last_log_position)
+                new_lines = f.readlines()
+                self.last_log_position = f.tell()
+
+            current_block = []
+            for line in new_lines:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if re.match(r'^\d{4}-\d{2}-\d{2}', stripped) and current_block:
+                    self._process_error_block(current_block, new_errors)
+                    current_block = [stripped]
+                else:
+                    current_block.append(stripped)
+
+            if current_block:
+                self._process_error_block(current_block, new_errors)
+
+        except (OSError, IOError):
+            pass
+
+        return new_errors
+
+    def _process_error_block(self, lines: list[str], new_errors: list[TrackedError]):
+        full_text = "\n".join(lines)
+        first_line = lines[0] if lines else ""
+        error_hash = self._hash_error(first_line)
+        now = time.time()
+
+        with self.lock:
+            if error_hash in self.errors:
+                existing = self.errors[error_hash]
+                existing.last_seen = now
+                existing.count += 1
+                if existing.status == "FIXED":
+                    existing.status = "NEW"
+                    new_errors.append(existing)
+            else:
+                tracked = TrackedError(
+                    error_hash=error_hash,
+                    first_seen=now,
+                    last_seen=now,
+                    count=1,
+                    message=first_line[:200],
+                    full_text=full_text[:2000],
+                )
+                self.errors[error_hash] = tracked
+                new_errors.append(tracked)
+
+    def get_unfixed_errors(self) -> list[TrackedError]:
+        with self.lock:
+            return [e for e in self.errors.values() if e.status in ("NEW", "FAILED")]
+
+    def get_all_errors(self) -> list[TrackedError]:
+        with self.lock:
+            return sorted(self.errors.values(), key=lambda e: e.last_seen, reverse=True)
+
+    def mark_fixing(self, error_hash: str, pid: int):
+        with self.lock:
+            if error_hash in self.errors:
+                self.errors[error_hash].status = "FIXING"
+                self.errors[error_hash].fix_attempts += 1
+                self.errors[error_hash].claude_pid = pid
+                self.fix_in_progress = True
+                self.total_fixes_attempted += 1
+
+    def mark_fixed(self, error_hash: str, output: str):
+        with self.lock:
+            if error_hash in self.errors:
+                self.errors[error_hash].status = "FIXED"
+                self.errors[error_hash].fix_output = output[:2000]
+                self.errors[error_hash].claude_pid = None
+            self.fix_in_progress = False
+            self.total_fixes_succeeded += 1
+
+    def mark_failed(self, error_hash: str, output: str):
+        with self.lock:
+            if error_hash in self.errors:
+                self.errors[error_hash].status = "FAILED"
+                self.errors[error_hash].fix_output = output[:2000]
+                self.errors[error_hash].claude_pid = None
+            self.fix_in_progress = False
+
+    def mark_ignored(self, error_hash: str):
+        with self.lock:
+            if error_hash in self.errors:
+                self.errors[error_hash].status = "IGNORED"
 
 
 # ── DB helpers ──────────────────────────────────────────────────────
@@ -386,6 +531,42 @@ SuggestionsStats, TaskStats, ActivityStats {
 DataTable {
     height: 1fr;
 }
+
+#error-fix-log {
+    border: round $error;
+    height: 1fr;
+    min-height: 8;
+}
+
+#error-stats-panel {
+    border: round $error;
+    height: auto;
+    min-height: 10;
+    padding: 0 1;
+    width: 1fr;
+}
+
+#error-table {
+    height: 1fr;
+}
+
+.error-status-new {
+    color: red;
+    text-style: bold;
+}
+
+.error-status-fixing {
+    color: yellow;
+    text-style: bold;
+}
+
+.error-status-fixed {
+    color: green;
+}
+
+.error-status-failed {
+    color: red;
+}
 """
 
 
@@ -565,6 +746,67 @@ class ServicesWidget(Static):
         self.update(t)
 
 
+class ErrorStatsWidget(Static):
+    """Displays error monitoring statistics."""
+
+    def __init__(self, error_manager: Optional["ErrorManager"] = None, **kwargs):
+        super().__init__(**kwargs)
+        self._error_manager = error_manager
+
+    def refresh_data(self, error_manager: Optional["ErrorManager"] = None) -> None:
+        em = error_manager or self._error_manager
+        if not em:
+            self.update(Text("Error monitor not initialized", style="dim"))
+            return
+
+        all_errors = em.get_all_errors()
+        total = len(all_errors)
+        new = sum(1 for e in all_errors if e.status == "NEW")
+        fixing = sum(1 for e in all_errors if e.status == "FIXING")
+        fixed = sum(1 for e in all_errors if e.status == "FIXED")
+        failed = sum(1 for e in all_errors if e.status == "FAILED")
+        ignored = sum(1 for e in all_errors if e.status == "IGNORED")
+
+        t = Text()
+        t.append("Error Monitor\n\n", style="bold")
+
+        if em.fix_in_progress:
+            t.append("  STATUS  ", style="bold black on yellow")
+            t.append(" FIXING ERROR\n\n", style="bold yellow")
+        elif new > 0:
+            t.append("  STATUS  ", style="bold black on red")
+            t.append(f" {new} NEW ERROR{'S' if new > 1 else ''}\n\n", style="bold red")
+        else:
+            t.append("  STATUS  ", style="bold black on green")
+            t.append(" MONITORING\n\n", style="bold green")
+
+        rows = [
+            ("Total Tracked", str(total), "bold white"),
+            ("New", str(new), "red bold" if new > 0 else "dim"),
+            ("Fixing", str(fixing), "yellow bold" if fixing > 0 else "dim"),
+            ("Fixed", str(fixed), "green"),
+            ("Failed", str(failed), "red" if failed > 0 else "dim"),
+            ("Ignored", str(ignored), "dim"),
+            ("", "", ""),
+            ("Fixes Tried", str(em.total_fixes_attempted), "bold white"),
+            ("Fixes OK", str(em.total_fixes_succeeded), "green"),
+        ]
+        for label, value, style in rows:
+            if not label:
+                t.append("\n")
+                continue
+            t.append(f"  {label:<14}", style="dim")
+            t.append(f"{value}\n", style=style)
+
+        log_size = 0
+        if os.path.exists(ERROR_LOG_FILE):
+            log_size = os.path.getsize(ERROR_LOG_FILE)
+        t.append(f"\n  {'Error Log':<14}", style="dim")
+        t.append(f"{log_size / 1024:.1f} KB\n", style="dim")
+
+        self.update(t)
+
+
 # ── Main App ─────────────────────────────────────────────────────────
 
 class SiteManagerApp(App):
@@ -589,6 +831,8 @@ class SiteManagerApp(App):
         self.list_page = 0
         self.list_filter = None
         self.list_sort = "id"
+        self.error_manager = ErrorManager()
+        self.error_auto_fix = True
 
     def compose(self) -> ComposeResult:
         conn = get_db()
@@ -611,6 +855,9 @@ class SiteManagerApp(App):
                     yield Static(id="recent-activity", classes="stat-panel")
                     yield ServicesWidget(id="services-widget", classes="stat-panel")
                     yield Static(id="claude-panel", classes="stat-panel")
+                with Horizontal():
+                    yield ErrorStatsWidget(self.error_manager, id="error-dashboard-panel", classes="stat-panel")
+                    yield Static(id="error-recent-panel", classes="stat-panel")
 
             with TabPane("Suggestions", id="suggestions"):
                 yield DataTable(id="suggestions-table", cursor_type="row")
@@ -631,12 +878,19 @@ class SiteManagerApp(App):
                     yield Button("Send", id="claude-send-btn2", variant="primary")
                 yield RichLog(id="claude-log2", highlight=True, markup=True)
 
+            with TabPane("Errors", id="errors"):
+                with Horizontal():
+                    yield ErrorStatsWidget(self.error_manager, id="error-stats-panel")
+                    yield Static(id="error-actions-panel", classes="stat-panel")
+                yield DataTable(id="error-table", cursor_type="row")
+                yield RichLog(id="error-fix-log", highlight=True, markup=True)
+
             with TabPane("Help", id="help"):
                 yield Static(self._build_help(), id="help-content")
 
         yield Label("", id="status-bar")
         yield Input(
-            placeholder="Command: [c] Claude  [v <id>] Detail  [start/stop/restart <svc>]  [f <status>]  [n/p] pages  [r] Refresh  [q] Quit",
+            placeholder="[c] Claude  [v <id>] Detail  [start/stop/restart <svc>]  [fix <hash>] Fix error  [autofix on/off]  [r] Refresh  [q] Quit",
             id="command-input",
         )
         yield Footer()
@@ -661,6 +915,12 @@ class SiteManagerApp(App):
         t.append("  n / p          ", style="bold cyan"); t.append("Next/prev page in suggestions\n")
         t.append("  q              ", style="bold cyan"); t.append("Quit\n")
 
+        t.append("\nError Management\n", style="bold underline")
+        t.append("  fix <hash>     ", style="bold cyan"); t.append("Manually trigger Claude fix for error hash\n")
+        t.append("  ignore <hash>  ", style="bold cyan"); t.append("Ignore an error (don't auto-fix)\n")
+        t.append("  autofix on/off ", style="bold cyan"); t.append("Toggle automatic error fixing\n")
+        t.append("  errors         ", style="bold cyan"); t.append("Show error summary\n")
+
         t.append("\nStatus Values\n", style="bold underline")
         for status, color in STATUS_COLORS.items():
             t.append(f"  {status:<16}", style=color)
@@ -670,10 +930,14 @@ class SiteManagerApp(App):
     def on_mount(self) -> None:
         self.set_interval(30, self._auto_refresh)
         self.set_interval(2, self._tick_claude_panel)
+        self.set_interval(ERROR_CHECK_INTERVAL, self._check_errors)
+        self.set_interval(5, self._refresh_error_displays)
         self._populate_suggestions_table()
         self._populate_activity_table()
+        self._populate_error_table()
         self._refresh_recent_activity()
         self._refresh_claude_panel()
+        self._refresh_error_displays()
         self.query_one("#command-input", Input).focus()
 
     def _auto_refresh(self) -> None:
@@ -685,8 +949,10 @@ class SiteManagerApp(App):
         self._refresh_stats()
         self._populate_suggestions_table()
         self._populate_activity_table()
+        self._populate_error_table()
         self._refresh_recent_activity()
         self._refresh_claude_panel()
+        self._refresh_error_displays()
         svc = self.query_one("#services-widget", ServicesWidget)
         svc.refresh_data()
         try:
@@ -800,6 +1066,353 @@ class SiteManagerApp(App):
                     t.append(f"{preview}\n", style="white")
         try:
             self.query_one("#claude-panel", Static).update(t)
+        except Exception:
+            pass
+
+    # ── Error management methods ────────────────────────────────────
+
+    def _check_errors(self) -> None:
+        """Periodically check error.log for new errors and trigger auto-fix."""
+        new_errors = self.error_manager.check_for_new_errors()
+        if not new_errors:
+            return
+
+        for err in new_errors:
+            self._append_error_log(
+                f"[bold red]NEW ERROR[/] [{err.error_hash}] {err.message[:100]}"
+            )
+
+        self._populate_error_table()
+        self._refresh_error_displays()
+
+        if self.error_auto_fix and not self.error_manager.fix_in_progress:
+            unfixed = self.error_manager.get_unfixed_errors()
+            if unfixed:
+                self._trigger_error_fix(unfixed[0])
+
+    def _trigger_error_fix(self, error: TrackedError) -> None:
+        """Start a Claude CLI session to fix the given error."""
+        if self.error_manager.fix_in_progress:
+            self.set_status("[yellow]Fix already in progress, queued[/]")
+            return
+
+        self._append_error_log(
+            f"[bold yellow]FIXING[/] [{error.error_hash}] Launching Claude CLI..."
+        )
+        self.set_status(f"[yellow]Claude fixing error {error.error_hash}...[/]")
+        self._error_fix_worker(error)
+
+    def _append_error_log(self, line: str) -> None:
+        """Write a line to the error fix log widgets."""
+        for log_id in ("#error-fix-log",):
+            try:
+                log = self.query_one(log_id, RichLog)
+                log.write(Text.from_markup(f"[dim]{datetime.now().strftime('%H:%M:%S')}[/] {line}"))
+            except Exception:
+                pass
+
+    @work(thread=True)
+    def _error_fix_worker(self, error: TrackedError) -> None:
+        """Spawn Claude CLI with all permissions to diagnose and fix the error."""
+        error_context = error.full_text
+        error_msg = error.message
+
+        fix_prompt = (
+            f"An error has been detected in the site-manager application at {SCRIPT_DIR}. "
+            f"Your job is to diagnose the root cause and fix it.\n\n"
+            f"## Error Details\n"
+            f"Error hash: {error.error_hash}\n"
+            f"Occurrences: {error.count}\n"
+            f"First seen: {datetime.fromtimestamp(error.first_seen).isoformat()}\n"
+            f"Last seen: {datetime.fromtimestamp(error.last_seen).isoformat()}\n\n"
+            f"## Error Message\n```\n{error_context}\n```\n\n"
+            f"## Instructions\n"
+            f"1. Read the error log at {ERROR_LOG_FILE} for full context\n"
+            f"2. Read the application log at {os.path.join(SCRIPT_DIR, 'app.log')} for surrounding context\n"
+            f"3. Identify the source file(s) causing the error\n"
+            f"4. Read those source files to understand the code\n"
+            f"5. Make targeted fixes - do NOT make speculative or unrelated changes\n"
+            f"6. If it's a Java/Spring Boot error, check src/main/java/com/sitemanager/\n"
+            f"7. If it's a build error, check pom.xml\n"
+            f"8. If it's a database error, check the Flyway migrations in src/main/resources/db/migration/\n"
+            f"9. After fixing, commit and push:\n"
+            f"   git add <changed-files>\n"
+            f"   git commit -m \"fix: <description of fix>\"\n"
+            f"   git push origin main\n"
+            f"10. Report what you fixed and why\n\n"
+            f"IMPORTANT: Be concise. Fix only what's broken. Do not refactor unrelated code."
+        )
+
+        try:
+            with open(ERROR_FIX_LOG_FILE, "a") as log_f:
+                log_f.write(f"\n{'='*60}\n")
+                log_f.write(f"Error Fix Session: {datetime.now().isoformat()}\n")
+                log_f.write(f"Error Hash: {error.error_hash}\n")
+                log_f.write(f"Error: {error_msg}\n")
+                log_f.write(f"{'='*60}\n")
+
+            proc = subprocess.Popen(
+                [
+                    "claude",
+                    "--dangerously-skip-permissions",
+                    "-p", fix_prompt,
+                    "--output-format", "stream-json",
+                    "--verbose",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=SCRIPT_DIR,
+            )
+
+            self.error_manager.mark_fixing(error.error_hash, proc.pid)
+            self.call_from_thread(self._refresh_error_displays)
+            self.call_from_thread(self._populate_error_table)
+
+            response_parts = []
+            tools_used = []
+
+            for raw_line in proc.stdout:
+                with open(ERROR_FIX_LOG_FILE, "a") as log_f:
+                    log_f.write(raw_line)
+
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                ev_type = ev.get("type", "")
+
+                if ev_type == "assistant":
+                    content = ev.get("message", {}).get("content", [])
+                    for block in content:
+                        btype = block.get("type", "")
+                        if btype == "text":
+                            text_chunk = block.get("text", "")
+                            response_parts.append(text_chunk)
+                            preview = text_chunk[:120].replace("\n", " ")
+                            self.call_from_thread(
+                                self._append_error_log,
+                                f"[green]CLAUDE[/] {preview}"
+                            )
+                        elif btype == "tool_use":
+                            tool_name = block.get("name", "?")
+                            tools_used.append(tool_name)
+                            tool_input = block.get("input", {})
+                            input_preview = json.dumps(tool_input, separators=(",", ":"))[:100]
+                            self.call_from_thread(
+                                self._append_error_log,
+                                f"[bold blue]TOOL[/] [cyan]{tool_name}[/] [dim]{input_preview}[/]"
+                            )
+                        elif btype == "thinking":
+                            snippet = (block.get("thinking", "") or "")[:80].replace("\n", " ")
+                            if snippet:
+                                self.call_from_thread(
+                                    self._append_error_log,
+                                    f"[dim cyan]THINK[/] {snippet}"
+                                )
+
+                elif ev_type == "user":
+                    content = ev.get("message", {}).get("content", [])
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "tool_result":
+                                is_err = block.get("is_error", False)
+                                result_content = block.get("content", "")
+                                if isinstance(result_content, list):
+                                    result_content = " ".join(
+                                        c.get("text", "") for c in result_content
+                                        if isinstance(c, dict)
+                                    )
+                                snippet = str(result_content)[:80].replace("\n", " ")
+                                color = "red" if is_err else "green"
+                                self.call_from_thread(
+                                    self._append_error_log,
+                                    f"[{color}]{'ERR' if is_err else 'OK'}[/] [dim]{snippet}[/]"
+                                )
+
+                elif ev_type == "result":
+                    final = ev.get("result", "")
+                    if final:
+                        response_parts = [final]
+                    stats = ev.get("stats", {})
+                    if stats:
+                        cost = stats.get("cost_usd", None)
+                        turns = stats.get("num_turns", "?")
+                        cost_str = f" cost=${cost:.4f}" if cost is not None else ""
+                        self.call_from_thread(
+                            self._append_error_log,
+                            f"[dim]DONE turns={turns}{cost_str}[/]"
+                        )
+
+            proc.wait()
+            response = "".join(response_parts).strip() if response_parts else ""
+
+            if proc.returncode != 0:
+                stderr_out = proc.stderr.read().strip()
+                if not response and stderr_out:
+                    response = f"Error: {stderr_out[:500]}"
+
+            git_committed = any(t in tools_used for t in ["Bash", "bash", "execute_command"])
+            fix_indicators = ["fix", "commit", "push", "changed", "updated", "modified"]
+            likely_fixed = any(ind in response.lower() for ind in fix_indicators) or git_committed
+
+            if likely_fixed:
+                self.error_manager.mark_fixed(error.error_hash, response[:2000])
+                self.call_from_thread(
+                    self._append_error_log,
+                    f"[bold green]FIXED[/] [{error.error_hash}] Error appears resolved"
+                )
+                self.call_from_thread(
+                    self.set_status,
+                    f"[green]Error {error.error_hash} fixed by Claude[/]"
+                )
+            else:
+                self.error_manager.mark_failed(error.error_hash, response[:2000])
+                self.call_from_thread(
+                    self._append_error_log,
+                    f"[bold red]FAILED[/] [{error.error_hash}] Fix attempt unsuccessful"
+                )
+                self.call_from_thread(
+                    self.set_status,
+                    f"[red]Error {error.error_hash} fix failed[/]"
+                )
+
+        except Exception as e:
+            self.error_manager.mark_failed(error.error_hash, str(e))
+            self.call_from_thread(
+                self._append_error_log,
+                f"[bold red]ERROR[/] Fix process failed: {e}"
+            )
+            self.call_from_thread(
+                self.set_status,
+                f"[red]Error fix failed: {e}[/]"
+            )
+
+        self.call_from_thread(self._refresh_error_displays)
+        self.call_from_thread(self._populate_error_table)
+
+        if self.error_auto_fix and not self.error_manager.fix_in_progress:
+            unfixed = self.error_manager.get_unfixed_errors()
+            if unfixed:
+                next_err = unfixed[0]
+                self.call_from_thread(self._trigger_error_fix, next_err)
+
+    def _populate_error_table(self) -> None:
+        """Populate the error tracking table."""
+        try:
+            table = self.query_one("#error-table", DataTable)
+        except Exception:
+            return
+
+        all_errors = self.error_manager.get_all_errors()
+
+        table.clear(columns=True)
+        table.add_columns("Hash", "Status", "Count", "First Seen", "Last Seen", "Message")
+
+        status_styles = {
+            "NEW": "red bold",
+            "FIXING": "yellow bold",
+            "FIXED": "green",
+            "FAILED": "red",
+            "IGNORED": "dim",
+        }
+
+        for err in all_errors:
+            status_style = status_styles.get(err.status, "white")
+            first = time_ago(err.first_seen * 1000)
+            last = time_ago(err.last_seen * 1000)
+            msg = err.message[:80]
+
+            table.add_row(
+                err.error_hash[:12],
+                Text(err.status, style=status_style),
+                str(err.count),
+                first,
+                last,
+                msg,
+                key=err.error_hash,
+            )
+
+    def _refresh_error_displays(self) -> None:
+        """Refresh all error-related display widgets."""
+        for widget_id in ("#error-stats-panel", "#error-dashboard-panel"):
+            try:
+                widget = self.query_one(widget_id, ErrorStatsWidget)
+                widget.refresh_data(self.error_manager)
+            except Exception:
+                pass
+
+        self._refresh_error_actions_panel()
+        self._refresh_error_recent_panel()
+
+    def _refresh_error_actions_panel(self) -> None:
+        """Update the error actions panel in the Errors tab."""
+        t = Text()
+        t.append("Actions & Config\n\n", style="bold")
+
+        t.append("  Auto-Fix:  ", style="dim")
+        if self.error_auto_fix:
+            t.append("ON", style="bold green")
+            t.append("  (errors auto-fixed by Claude)\n", style="dim")
+        else:
+            t.append("OFF", style="bold red")
+            t.append("  (manual fixes only)\n", style="dim")
+
+        t.append(f"  Check Interval: ", style="dim")
+        t.append(f"{ERROR_CHECK_INTERVAL}s\n", style="white")
+
+        t.append(f"  Error Log: ", style="dim")
+        t.append(f"{ERROR_LOG_FILE}\n", style="dim")
+
+        t.append(f"  Fix Log: ", style="dim")
+        t.append(f"{ERROR_FIX_LOG_FILE}\n", style="dim")
+
+        if self.error_manager.fix_in_progress:
+            t.append("\n  ", style="")
+            t.append("  FIX IN PROGRESS  ", style="bold black on yellow")
+            t.append("\n", style="")
+
+        t.append("\nCommands:\n", style="bold")
+        t.append("  fix <hash>     ", style="cyan")
+        t.append("trigger fix\n", style="dim")
+        t.append("  ignore <hash>  ", style="cyan")
+        t.append("ignore error\n", style="dim")
+        t.append("  autofix on/off ", style="cyan")
+        t.append("toggle auto-fix\n", style="dim")
+
+        try:
+            self.query_one("#error-actions-panel", Static).update(t)
+        except Exception:
+            pass
+
+    def _refresh_error_recent_panel(self) -> None:
+        """Update the recent errors panel on the dashboard tab."""
+        t = Text()
+        t.append("Recent Errors\n\n", style="bold red")
+
+        all_errors = self.error_manager.get_all_errors()
+        if not all_errors:
+            t.append("  No errors detected\n", style="dim green")
+        else:
+            for err in all_errors[:5]:
+                status_style = {
+                    "NEW": "red bold", "FIXING": "yellow bold",
+                    "FIXED": "green", "FAILED": "red", "IGNORED": "dim",
+                }.get(err.status, "white")
+
+                t.append(f"  {err.error_hash[:8]} ", style="dim")
+                t.append(f"{err.status:<8}", style=status_style)
+                t.append(f" x{err.count} ", style="bold white")
+                t.append(f"{time_ago(err.last_seen * 1000)}\n", style="dim")
+                msg_preview = err.message[:60]
+                t.append(f"    {msg_preview}\n", style="dim")
+
+        try:
+            self.query_one("#error-recent-panel", Static).update(t)
         except Exception:
             pass
 
@@ -988,6 +1601,62 @@ class SiteManagerApp(App):
                 self._send_to_claude(msg)
         elif cmd_lower == "c":
             self.set_status("[dim]Use: c <message>[/]")
+        elif cmd_lower.startswith("fix "):
+            error_hash = cmd_lower.split(None, 1)[1].strip()
+            matched = None
+            for eh, err in self.error_manager.errors.items():
+                if eh.startswith(error_hash):
+                    matched = err
+                    break
+            if matched:
+                if matched.status == "FIXING":
+                    self.set_status(f"[yellow]Error {error_hash} is already being fixed[/]")
+                else:
+                    matched.status = "NEW"
+                    self._trigger_error_fix(matched)
+            else:
+                self.set_status(f"[red]Error hash not found: {error_hash}[/]")
+        elif cmd_lower.startswith("ignore "):
+            error_hash = cmd_lower.split(None, 1)[1].strip()
+            matched_hash = None
+            for eh in self.error_manager.errors:
+                if eh.startswith(error_hash):
+                    matched_hash = eh
+                    break
+            if matched_hash:
+                self.error_manager.mark_ignored(matched_hash)
+                self._populate_error_table()
+                self._refresh_error_displays()
+                self.set_status(f"[dim]Error {error_hash} ignored[/]")
+            else:
+                self.set_status(f"[red]Error hash not found: {error_hash}[/]")
+        elif cmd_lower.startswith("autofix"):
+            arg = cmd_lower.replace("autofix", "").strip()
+            if arg == "on":
+                self.error_auto_fix = True
+                self.set_status("[green]Auto-fix enabled[/]")
+                self._refresh_error_displays()
+                unfixed = self.error_manager.get_unfixed_errors()
+                if unfixed and not self.error_manager.fix_in_progress:
+                    self._trigger_error_fix(unfixed[0])
+            elif arg == "off":
+                self.error_auto_fix = False
+                self.set_status("[yellow]Auto-fix disabled[/]")
+                self._refresh_error_displays()
+            else:
+                status = "ON" if self.error_auto_fix else "OFF"
+                self.set_status(f"Auto-fix is {status}. Use: autofix on/off")
+        elif cmd_lower == "errors":
+            all_errors = self.error_manager.get_all_errors()
+            if not all_errors:
+                self.set_status("[green]No errors tracked[/]")
+            else:
+                new = sum(1 for e in all_errors if e.status == "NEW")
+                fixing = sum(1 for e in all_errors if e.status == "FIXING")
+                fixed = sum(1 for e in all_errors if e.status == "FIXED")
+                self.set_status(
+                    f"Errors: {len(all_errors)} total, {new} new, {fixing} fixing, {fixed} fixed"
+                )
         else:
             self.set_status(f"[red]Unknown command: {cmd}[/]")
 
