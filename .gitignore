@@ -10,3 +10,5 @@ build/
 target/
 *.log
 .env
+__pycache__/
+*.pyc
