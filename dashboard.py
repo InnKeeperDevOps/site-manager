@@ -29,6 +29,7 @@ from rich import box
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sitemanager.db")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PID_FILE = "/tmp/site-manager-auto-update.pid"
+CLAUDE_LOG_FILE = os.path.join(SCRIPT_DIR, "claude-output.log")
 
 STATUS_COLORS = {
     "MERGED": "green",
@@ -1023,6 +1024,14 @@ class SiteManagerApp(App):
         self.set_status("[yellow]Claude is working...[/]")
         self._claude_worker(message)
 
+    def _append_verbose_line(self, line: str) -> None:
+        for log_id in ("#claude-log", "#claude-log2"):
+            try:
+                log = self.query_one(log_id, RichLog)
+                log.write(Text.from_markup(line))
+            except Exception:
+                pass
+
     @work(thread=True)
     def _claude_worker(self, message: str) -> None:
         system_context = (
@@ -1039,7 +1048,16 @@ class SiteManagerApp(App):
             "IMPORTANT: Do exactly what the user requests and nothing more. Do not get creative or make changes beyond what was explicitly asked. If the user asks to move something in a specific way, do only that exact move."
         )
         response_parts = []
+        session_ts = datetime.now().isoformat()
         try:
+            with open(CLAUDE_LOG_FILE, "a") as log_f:
+                log_f.write(f"\n{'='*60}\n")
+                log_f.write(f"Session: {session_ts}\n")
+                log_f.write(f"Prompt: {message}\n")
+                log_f.write(f"{'='*60}\n")
+
+            self.call_from_thread(self._append_verbose_line, f"[bold yellow]>[/] {message}")
+
             proc = subprocess.Popen(
                 [
                     "claude", "--dangerously-skip-permissions",
@@ -1052,6 +1070,10 @@ class SiteManagerApp(App):
                 text=True, cwd=SCRIPT_DIR,
             )
             for raw_line in proc.stdout:
+                # Write every raw line to the log file
+                with open(CLAUDE_LOG_FILE, "a") as log_f:
+                    log_f.write(raw_line)
+
                 line = raw_line.strip()
                 if not line:
                     continue
@@ -1060,6 +1082,7 @@ class SiteManagerApp(App):
                 except json.JSONDecodeError:
                     continue
                 ev_type = ev.get("type", "")
+
                 if ev_type == "assistant":
                     content = ev.get("message", {}).get("content", [])
                     for block in content:
@@ -1070,6 +1093,11 @@ class SiteManagerApp(App):
                             self.claude_is_thinking = True
                             self.claude_thinking_snippet = snippet
                             self.call_from_thread(self._refresh_claude_panel)
+                            if snippet:
+                                self.call_from_thread(
+                                    self._append_verbose_line,
+                                    f"[dim cyan]THINK[/] {snippet}",
+                                )
                         elif btype == "text":
                             text_chunk = block.get("text", "")
                             response_parts.append(text_chunk)
@@ -1077,11 +1105,60 @@ class SiteManagerApp(App):
                             preview = "".join(response_parts)[:200].replace("\n", " ")
                             self.claude_response_so_far = preview
                             self.call_from_thread(self._refresh_claude_panel)
+                        elif btype == "tool_use":
+                            tool_name = block.get("name", "?")
+                            tool_input = block.get("input", {})
+                            input_str = json.dumps(tool_input, separators=(",", ":"))[:120]
+                            self.call_from_thread(
+                                self._append_verbose_line,
+                                f"[bold blue]TOOL[/] [cyan]{tool_name}[/] [dim]{input_str}[/]",
+                            )
+
+                elif ev_type == "user":
+                    # tool_result blocks come back as user messages
+                    content = ev.get("message", {}).get("content", [])
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "tool_result":
+                                result_content = block.get("content", "")
+                                if isinstance(result_content, list):
+                                    result_content = " ".join(
+                                        c.get("text", "") for c in result_content
+                                        if isinstance(c, dict)
+                                    )
+                                snippet = str(result_content)[:100].replace("\n", " ")
+                                is_err = block.get("is_error", False)
+                                color = "red" if is_err else "green"
+                                self.call_from_thread(
+                                    self._append_verbose_line,
+                                    f"[{color}]{'ERR' if is_err else 'OK '}[/] [dim]{snippet}[/]",
+                                )
+
+                elif ev_type == "system":
+                    subtype = ev.get("subtype", "")
+                    if subtype == "init":
+                        tools = ev.get("tools", [])
+                        tool_names = ", ".join(t.get("name", "?") for t in tools[:8])
+                        self.call_from_thread(
+                            self._append_verbose_line,
+                            f"[dim]INIT tools: {tool_names}[/]",
+                        )
+
                 elif ev_type == "result":
                     final = ev.get("result", "")
                     if final:
                         response_parts = [final]
                         self.claude_response_so_far = final[:200].replace("\n", " ")
+                    stats = ev.get("stats", {})
+                    if stats:
+                        turns = stats.get("num_turns", "?")
+                        cost = stats.get("cost_usd", None)
+                        cost_str = f"  cost=${cost:.4f}" if cost is not None else ""
+                        self.call_from_thread(
+                            self._append_verbose_line,
+                            f"[dim]DONE  turns={turns}{cost_str}[/]",
+                        )
+
             proc.wait()
             response = "".join(response_parts).strip() if response_parts else "(no response)"
             if proc.returncode != 0:
