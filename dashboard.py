@@ -9,8 +9,10 @@ import signal
 import subprocess
 import threading
 import json
+import queue
 from datetime import datetime, timezone
 from pathlib import Path
+from flask import Flask, Response, render_template_string
 
 from textual.app import App, ComposeResult
 from textual.widgets import (
@@ -207,6 +209,309 @@ def restart_service(svc_key):
         time.sleep(1)
     ok, msg = start_service(svc_key)
     return ok, msg
+
+
+# ── Live Stream Server ──────────────────────────────────────────────
+
+stream_clients = []  # list of queue.Queue, one per SSE client
+stream_clients_lock = threading.Lock()
+stream_history = []  # last N events for new clients
+STREAM_HISTORY_MAX = 200
+
+
+def broadcast_stream_event(event_type: str, data: dict):
+    """Send an event to all connected SSE clients and store in history."""
+    payload = json.dumps({"type": event_type, **data})
+    entry = f"event: {event_type}\ndata: {payload}\n\n"
+    with stream_clients_lock:
+        stream_history.append(entry)
+        if len(stream_history) > STREAM_HISTORY_MAX:
+            del stream_history[:len(stream_history) - STREAM_HISTORY_MAX]
+        for q in stream_clients:
+            try:
+                q.put_nowait(entry)
+            except queue.Full:
+                pass
+
+
+STREAM_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aibe.app — Live Claude Stream</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --dim: #7d8590; --accent: #58a6ff;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149;
+    --cyan: #39d353; --purple: #bc8cff; --blue: #58a6ff;
+    --orange: #f0883e;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
+    font-size: 13px; line-height: 1.6; overflow: hidden; height: 100vh;
+  }
+  header {
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    padding: 12px 24px; display: flex; align-items: center; gap: 16px;
+    position: sticky; top: 0; z-index: 10;
+  }
+  header .logo { font-size: 18px; font-weight: 700; color: var(--accent); }
+  header .logo span { color: var(--dim); font-weight: 400; }
+  header .status {
+    margin-left: auto; display: flex; align-items: center; gap: 8px;
+  }
+  header .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--green);
+    animation: pulse 2s infinite;
+  }
+  header .dot.disconnected { background: var(--red); animation: none; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .stats {
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    padding: 8px 24px; display: flex; gap: 24px; font-size: 12px; color: var(--dim);
+  }
+  .stats .stat-val { color: var(--text); font-weight: 600; }
+  #stream {
+    height: calc(100vh - 100px); overflow-y: auto; padding: 16px 24px;
+    scroll-behavior: smooth;
+  }
+  #stream::-webkit-scrollbar { width: 6px; }
+  #stream::-webkit-scrollbar-track { background: transparent; }
+  #stream::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .event {
+    margin-bottom: 2px; padding: 3px 8px; border-radius: 4px;
+    display: flex; align-items: flex-start; gap: 10px;
+    animation: fadeIn 0.3s ease;
+  }
+  .event:hover { background: rgba(255,255,255,0.02); }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
+  .event .ts { color: var(--dim); font-size: 11px; white-space: nowrap; min-width: 70px; flex-shrink: 0; }
+  .event .tag {
+    font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 3px;
+    white-space: nowrap; min-width: 64px; text-align: center; flex-shrink: 0;
+  }
+  .event .body { flex: 1; word-break: break-word; white-space: pre-wrap; }
+
+  .tag-session-start { background: var(--accent); color: var(--bg); }
+  .tag-prompt { background: var(--yellow); color: var(--bg); }
+  .tag-thinking { background: #1f1d2e; color: var(--purple); border: 1px solid #332e54; }
+  .tag-text { background: #0d2818; color: var(--green); border: 1px solid #1a4028; }
+  .tag-tool { background: #0d2444; color: var(--blue); border: 1px solid #1a3a64; }
+  .tag-tool-ok { background: #0d2818; color: var(--cyan); border: 1px solid #1a4028; }
+  .tag-tool-err { background: #2d1014; color: var(--red); border: 1px solid #4a1a1e; }
+  .tag-init { background: var(--surface); color: var(--dim); border: 1px solid var(--border); }
+  .tag-done { background: #1a2a14; color: var(--green); border: 1px solid #2a4a24; }
+  .tag-result { background: #1a2016; color: var(--green); border: 1px solid #2a3a24; }
+  .tag-error { background: #2d1014; color: var(--red); border: 1px solid #4a1a1e; }
+  .tag-verbose { background: var(--surface); color: var(--dim); border: 1px solid var(--border); }
+
+  .session-divider {
+    border-top: 1px solid var(--border); margin: 16px 0 12px;
+    padding-top: 12px; display: flex; align-items: center; gap: 12px;
+  }
+  .session-divider .label {
+    font-size: 12px; font-weight: 600; color: var(--accent);
+    background: rgba(88,166,255,0.1); padding: 2px 10px; border-radius: 10px;
+  }
+  .session-divider .line { flex: 1; height: 1px; background: var(--border); }
+
+  .tool-name { color: var(--cyan); font-weight: 600; }
+  .tool-input { color: var(--dim); font-size: 12px; }
+  .thinking-text { color: var(--purple); font-style: italic; }
+  .response-text { color: var(--green); }
+  .cost { color: var(--orange); }
+
+  .empty-state {
+    text-align: center; padding: 80px 20px; color: var(--dim);
+  }
+  .empty-state .icon { font-size: 48px; margin-bottom: 16px; opacity: 0.3; }
+  .empty-state h2 { color: var(--text); font-size: 16px; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">aibe<span>.app</span></div>
+  <div style="color:var(--dim);font-size:12px;">Live Claude Session Stream</div>
+  <div class="status">
+    <div class="dot" id="statusDot"></div>
+    <span id="statusText" style="font-size:12px;color:var(--dim);">Connected</span>
+  </div>
+</header>
+<div class="stats">
+  <div>Sessions: <span class="stat-val" id="sessionCount">0</span></div>
+  <div>Events: <span class="stat-val" id="eventCount">0</span></div>
+  <div>Tools Used: <span class="stat-val" id="toolCount">0</span></div>
+  <div>Total Cost: <span class="stat-val" id="totalCost">$0.00</span></div>
+</div>
+<div id="stream">
+  <div class="empty-state" id="emptyState">
+    <div class="icon">&#9678;</div>
+    <h2>Waiting for Claude sessions...</h2>
+    <p>Events will appear here in real-time as Claude processes requests.</p>
+  </div>
+</div>
+<script>
+const stream = document.getElementById('stream');
+const emptyState = document.getElementById('emptyState');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+let eventCount = 0, sessionCount = 0, toolCount = 0, totalCost = 0;
+let autoScroll = true;
+
+stream.addEventListener('scroll', () => {
+  const atBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60;
+  autoScroll = atBottom;
+});
+
+function esc(s) {
+  const d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+}
+
+function ts() {
+  return new Date().toLocaleTimeString('en-US', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
+}
+
+function addEvent(tag, tagClass, body) {
+  if (emptyState) emptyState.remove();
+  const div = document.createElement('div');
+  div.className = 'event';
+  div.innerHTML = '<span class="ts">' + ts() + '</span>'
+    + '<span class="tag ' + tagClass + '">' + esc(tag) + '</span>'
+    + '<span class="body">' + body + '</span>';
+  stream.appendChild(div);
+  eventCount++;
+  document.getElementById('eventCount').textContent = eventCount;
+  if (autoScroll) stream.scrollTop = stream.scrollHeight;
+}
+
+function addDivider(prompt) {
+  if (emptyState) emptyState.remove();
+  sessionCount++;
+  document.getElementById('sessionCount').textContent = sessionCount;
+  const div = document.createElement('div');
+  div.className = 'session-divider';
+  div.innerHTML = '<span class="label">Session #' + sessionCount + '</span><span class="line"></span>';
+  stream.appendChild(div);
+  if (autoScroll) stream.scrollTop = stream.scrollHeight;
+}
+
+function connect() {
+  const es = new EventSource('/stream');
+  es.onopen = () => {
+    statusDot.className = 'dot';
+    statusText.textContent = 'Connected';
+  };
+  es.onerror = () => {
+    statusDot.className = 'dot disconnected';
+    statusText.textContent = 'Reconnecting...';
+  };
+  es.addEventListener('session_start', (e) => {
+    const d = JSON.parse(e.data);
+    addDivider(d.prompt || '');
+    addEvent('PROMPT', 'tag-prompt', esc(d.prompt || ''));
+  });
+  es.addEventListener('thinking', (e) => {
+    const d = JSON.parse(e.data);
+    addEvent('THINK', 'tag-thinking', '<span class="thinking-text">' + esc(d.text || '') + '</span>');
+  });
+  es.addEventListener('text', (e) => {
+    const d = JSON.parse(e.data);
+    addEvent('TEXT', 'tag-text', '<span class="response-text">' + esc(d.text || '') + '</span>');
+  });
+  es.addEventListener('tool_use', (e) => {
+    const d = JSON.parse(e.data);
+    toolCount++;
+    document.getElementById('toolCount').textContent = toolCount;
+    addEvent('TOOL', 'tag-tool',
+      '<span class="tool-name">' + esc(d.name || '?') + '</span> <span class="tool-input">' + esc(d.input || '') + '</span>');
+  });
+  es.addEventListener('tool_result', (e) => {
+    const d = JSON.parse(e.data);
+    const cls = d.is_error ? 'tag-tool-err' : 'tag-tool-ok';
+    const label = d.is_error ? 'ERR' : 'OK';
+    addEvent(label, cls, esc(d.text || ''));
+  });
+  es.addEventListener('init', (e) => {
+    const d = JSON.parse(e.data);
+    addEvent('INIT', 'tag-init', 'Tools: ' + esc(d.tools || ''));
+  });
+  es.addEventListener('done', (e) => {
+    const d = JSON.parse(e.data);
+    if (d.cost) {
+      totalCost += parseFloat(d.cost) || 0;
+      document.getElementById('totalCost').textContent = '$' + totalCost.toFixed(4);
+    }
+    addEvent('DONE', 'tag-done',
+      'Turns: ' + esc(String(d.turns || '?')) + (d.cost ? '  <span class="cost">Cost: $' + esc(d.cost) + '</span>' : ''));
+  });
+  es.addEventListener('result', (e) => {
+    const d = JSON.parse(e.data);
+    const text = (d.text || '').substring(0, 500);
+    addEvent('RESULT', 'tag-result', '<span class="response-text">' + esc(text) + (d.text && d.text.length > 500 ? '...' : '') + '</span>');
+  });
+  es.addEventListener('error_msg', (e) => {
+    const d = JSON.parse(e.data);
+    addEvent('ERROR', 'tag-error', esc(d.text || ''));
+  });
+  es.addEventListener('verbose', (e) => {
+    const d = JSON.parse(e.data);
+    addEvent('LOG', 'tag-verbose', esc(d.text || ''));
+  });
+}
+connect();
+</script>
+</body>
+</html>"""
+
+flask_app = Flask(__name__)
+flask_app.logger.disabled = True
+import logging
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+
+
+@flask_app.route("/")
+def index():
+    return render_template_string(STREAM_HTML)
+
+
+@flask_app.route("/stream")
+def sse_stream():
+    def generate():
+        q = queue.Queue(maxsize=500)
+        with stream_clients_lock:
+            # Send history to new clients
+            for entry in stream_history:
+                yield entry
+            stream_clients.append(q)
+        try:
+            while True:
+                try:
+                    data = q.get(timeout=30)
+                    yield data
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+        except GeneratorExit:
+            pass
+        finally:
+            with stream_clients_lock:
+                if q in stream_clients:
+                    stream_clients.remove(q)
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                             "Access-Control-Allow-Origin": "*"})
+
+
+def start_stream_server(port=5555):
+    """Start Flask SSE server in a daemon thread."""
+    t = threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=port, threaded=True), daemon=True)
+    t.start()
+    return t
 
 
 # ── Screens ──────────────────────────────────────────────────────────
@@ -680,6 +985,7 @@ class SiteManagerApp(App):
         return t
 
     def on_mount(self) -> None:
+        start_stream_server(port=5555)
         self.set_interval(30, self._auto_refresh)
         self.set_interval(2, self._tick_claude_panel)
         self._populate_suggestions_table()
@@ -1069,6 +1375,7 @@ class SiteManagerApp(App):
                 log_f.write(f"{'='*60}\n")
 
             self.call_from_thread(self._append_verbose_line, f"[bold yellow]>[/] {message}")
+            broadcast_stream_event("session_start", {"prompt": message, "ts": session_ts})
 
             proc = subprocess.Popen(
                 [
@@ -1112,6 +1419,7 @@ class SiteManagerApp(App):
                                     self._append_verbose_line,
                                     f"[dim cyan]THINK[/] {snippet}",
                                 )
+                            broadcast_stream_event("thinking", {"text": thinking[:500] if thinking else ""})
                         elif btype == "text":
                             text_chunk = block.get("text", "")
                             response_parts.append(text_chunk)
@@ -1119,6 +1427,7 @@ class SiteManagerApp(App):
                             preview = "".join(response_parts)[:200].replace("\n", " ")
                             self.claude_response_so_far = preview
                             self.call_from_thread(self._refresh_claude_panel)
+                            broadcast_stream_event("text", {"text": text_chunk})
                         elif btype == "tool_use":
                             tool_name = block.get("name", "?")
                             tool_input = block.get("input", {})
@@ -1127,6 +1436,7 @@ class SiteManagerApp(App):
                                 self._append_verbose_line,
                                 f"[bold blue]TOOL[/] [cyan]{tool_name}[/] [dim]{input_str}[/]",
                             )
+                            broadcast_stream_event("tool_use", {"name": tool_name, "input": input_str})
 
                 elif ev_type == "user":
                     # tool_result blocks come back as user messages
@@ -1147,6 +1457,7 @@ class SiteManagerApp(App):
                                     self._append_verbose_line,
                                     f"[{color}]{'ERR' if is_err else 'OK '}[/] [dim]{snippet}[/]",
                                 )
+                                broadcast_stream_event("tool_result", {"text": snippet, "is_error": is_err})
 
                 elif ev_type == "system":
                     subtype = ev.get("subtype", "")
@@ -1157,12 +1468,14 @@ class SiteManagerApp(App):
                             self._append_verbose_line,
                             f"[dim]INIT tools: {tool_names}[/]",
                         )
+                        broadcast_stream_event("init", {"tools": tool_names})
 
                 elif ev_type == "result":
                     final = ev.get("result", "")
                     if final:
                         response_parts = [final]
                         self.claude_response_so_far = final[:200].replace("\n", " ")
+                        broadcast_stream_event("result", {"text": final[:2000]})
                     stats = ev.get("stats", {})
                     if stats:
                         turns = stats.get("num_turns", "?")
@@ -1172,6 +1485,10 @@ class SiteManagerApp(App):
                             self._append_verbose_line,
                             f"[dim]DONE  turns={turns}{cost_str}[/]",
                         )
+                        broadcast_stream_event("done", {
+                            "turns": str(turns),
+                            "cost": f"{cost:.4f}" if cost is not None else None,
+                        })
 
             proc.wait()
             response = "".join(response_parts).strip() if response_parts else "(no response)"
@@ -1181,6 +1498,7 @@ class SiteManagerApp(App):
                     response = f"[error]: {stderr[:300]}"
         except Exception as e:
             response = f"[error: {e}]"
+            broadcast_stream_event("error_msg", {"text": str(e)})
 
         if len(response) > 3000:
             response = response[:2900] + "\n... (truncated)"
