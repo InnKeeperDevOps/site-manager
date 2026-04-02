@@ -2,6 +2,14 @@
 # Monitors app.log and extracts ERROR lines into error.log
 # Runs as a background tail process
 
+# Ensure only one instance runs at a time
+LOCK_FILE="/tmp/extract-errors.lock"
+exec 200>"$LOCK_FILE"
+if ! flock -n 200; then
+    echo "Another extract-errors.sh instance is already running, exiting." >&2
+    exit 0
+fi
+
 LOG_FILE="/home/claude/site-manager/app.log"
 ERROR_LOG="/home/claude/site-manager/error.log"
 
