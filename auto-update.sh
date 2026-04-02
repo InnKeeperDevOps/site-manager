@@ -161,12 +161,18 @@ while true; do
         log "Update detected on $AUTO_UPDATE_BRANCH, pulling and restarting..."
         stop_app
         stop_extractor
+        # Stash any local changes that could cause rebase conflicts
+        git stash --quiet 2>/dev/null || true
         if git pull --rebase origin "$AUTO_UPDATE_BRANCH"; then
             log "Pull succeeded, starting updated application..."
             start_app
             start_extractor
         else
             log "[ERROR] git pull failed, restarting existing version..."
+            # Abort any in-progress rebase to prevent repeated failures
+            git rebase --abort 2>/dev/null || true
+            # Reset to the last known good state
+            git reset --hard HEAD 2>/dev/null || true
             start_app
             start_extractor
         fi
