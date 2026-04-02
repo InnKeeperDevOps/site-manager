@@ -928,7 +928,7 @@ class SiteManagerApp(App):
         return t
 
     def on_mount(self) -> None:
-        self.set_interval(30, self._auto_refresh)
+        self.set_interval(1, self._auto_refresh)
         self.set_interval(2, self._tick_claude_panel)
         self.set_interval(ERROR_CHECK_INTERVAL, self._check_errors)
         self.set_interval(5, self._refresh_error_displays)
