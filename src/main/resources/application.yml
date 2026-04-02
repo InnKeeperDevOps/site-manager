@@ -25,6 +25,7 @@ spring:
 
 server:
   port: 8080
+  max-http-request-header-size: 16KB
 
 logging:
   level:
@@ -32,6 +33,7 @@ logging:
     com.sitemanager.service.SuggestionService: INFO
     org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration: ERROR
     org.springframework.security.web.DefaultSecurityFilterChain: OFF
+    org.apache.coyote.http11.Http11Processor: WARN
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
 
