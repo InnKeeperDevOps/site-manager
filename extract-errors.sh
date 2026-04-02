@@ -20,9 +20,15 @@ ERROR_LOG="/home/claude/site-manager/error.log"
 # auto-update [ERROR] lines, and git fatal errors
 ERROR_PATTERN='\] (ERROR|FATAL) |\[ERROR\]|^\tat |^Caused by:|^fatal:|BUILD FAILED'
 
-# Process existing errors first (overwrites stale entries)
+# Process errors from the CURRENT app session only (not stale errors from prior runs).
+# Find the last Spring Boot startup line and only extract errors after it.
 if [ -f "$LOG_FILE" ]; then
-    grep -E "$ERROR_PATTERN" "$LOG_FILE" > "$ERROR_LOG" 2>/dev/null
+    LAST_STARTUP_LINE=$(grep -n "Starting SiteManagerApplication using Java\|Starting application\.\.\." "$LOG_FILE" | tail -1 | cut -d: -f1)
+    if [ -n "$LAST_STARTUP_LINE" ]; then
+        tail -n +"$LAST_STARTUP_LINE" "$LOG_FILE" | grep -E "$ERROR_PATTERN" > "$ERROR_LOG" 2>/dev/null
+    else
+        grep -E "$ERROR_PATTERN" "$LOG_FILE" > "$ERROR_LOG" 2>/dev/null
+    fi
 fi
 
 # Then follow new lines, checking for script changes periodically
