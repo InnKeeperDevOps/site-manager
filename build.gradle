@@ -46,6 +46,12 @@ tasks.named('test') {
     useJUnitPlatform()
 }
 
+bootRun {
+    dependsOn 'processResources'
+    // Ensure resources are always freshly copied to avoid stale build output
+    processResources.outputs.upToDateWhen { false }
+}
+
 flyway {
     url = "jdbc:sqlite:${project.projectDir}/data/test-migration.db"
     driver = 'org.sqlite.JDBC'
