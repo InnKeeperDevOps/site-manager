@@ -148,7 +148,7 @@ class ErrorManager:
         self.total_fixes_succeeded: int = 0
         self.current_fix: Optional[FixSession] = None
         self.fix_history: list[FixSession] = []
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
 
     def _hash_error(self, message: str) -> str:
         cleaned = re.sub(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}', '', message)
@@ -1321,16 +1321,21 @@ class SiteManagerApp(App):
         self._populate_error_table()
         self._refresh_error_displays()
 
-        if self.error_auto_fix and not self.error_manager.fix_in_progress:
-            unfixed = self.error_manager.get_unfixed_errors()
-            if unfixed:
-                self._trigger_error_fix(unfixed[0])
+        if self.error_auto_fix:
+            with self.error_manager.lock:
+                already_fixing = self.error_manager.fix_in_progress
+            if not already_fixing:
+                unfixed = self.error_manager.get_unfixed_errors()
+                if unfixed:
+                    self._trigger_error_fix(unfixed[0])
 
     def _trigger_error_fix(self, error: TrackedError) -> None:
         """Start a Claude CLI session to fix the given error."""
-        if self.error_manager.fix_in_progress:
-            self.set_status("[yellow]Fix already in progress, queued[/]")
-            return
+        with self.error_manager.lock:
+            if self.error_manager.fix_in_progress:
+                self.set_status("[yellow]Fix already in progress, queued[/]")
+                return
+            self.error_manager.fix_in_progress = True
 
         self._append_error_log(
             f"[bold yellow]FIXING[/] [{error.error_hash}] Launching Claude CLI..."
@@ -1380,6 +1385,7 @@ class SiteManagerApp(App):
         )
 
         session = self.error_manager.start_fix_session(error.error_hash)
+        proc = None
 
         try:
             with open(ERROR_FIX_LOG_FILE, "a") as log_f:
@@ -1401,7 +1407,7 @@ class SiteManagerApp(App):
                     "--verbose",
                 ],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 cwd=SCRIPT_DIR,
             )
@@ -1476,7 +1482,7 @@ class SiteManagerApp(App):
                                         cmd_str = str(tool_input.get("command", ""))[:50]
                                         if any(g in cmd_str for g in ["git commit", "git push", "git add"]):
                                             self.error_manager.update_fix_stage("COMMITTING", cmd_str)
-                                        elif any(t in cmd_str for t in ["mvn", "gradle", "test", "build", "npm"]):
+                                        elif any(kw in cmd_str for kw in ["mvn", "gradle", "test", "build", "npm"]):
                                             self.error_manager.update_fix_stage("TESTING", cmd_str)
                                         else:
                                             session.current_action = cmd_str
@@ -1542,11 +1548,6 @@ class SiteManagerApp(App):
             proc.wait()
             response = "".join(response_parts).strip() if response_parts else ""
 
-            if proc.returncode != 0:
-                stderr_out = proc.stderr.read().strip()
-                if not response and stderr_out:
-                    response = f"Error: {stderr_out[:500]}"
-
             git_committed = any(t in tools_used for t in ["Bash", "bash", "execute_command"])
             fix_indicators = ["fix", "commit", "push", "changed", "updated", "modified"]
             likely_fixed = any(ind in response.lower() for ind in fix_indicators) or git_committed
@@ -1585,15 +1586,28 @@ class SiteManagerApp(App):
                 self.set_status,
                 f"[red]Error fix failed: {e}[/]"
             )
+        finally:
+            if proc is not None:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
 
         self.call_from_thread(self._refresh_error_displays)
         self.call_from_thread(self._populate_error_table)
 
-        if self.error_auto_fix and not self.error_manager.fix_in_progress:
-            unfixed = self.error_manager.get_unfixed_errors()
-            if unfixed:
-                next_err = unfixed[0]
-                self.call_from_thread(self._trigger_error_fix, next_err)
+        if self.error_auto_fix:
+            with self.error_manager.lock:
+                already_fixing = self.error_manager.fix_in_progress
+            if not already_fixing:
+                unfixed = self.error_manager.get_unfixed_errors()
+                if unfixed:
+                    next_err = unfixed[0]
+                    self.call_from_thread(self._trigger_error_fix, next_err)
 
     def _populate_error_table(self) -> None:
         """Populate the error tracking table."""
@@ -1939,9 +1953,12 @@ class SiteManagerApp(App):
                 self.error_auto_fix = True
                 self.set_status("[green]Auto-fix enabled[/]")
                 self._refresh_error_displays()
-                unfixed = self.error_manager.get_unfixed_errors()
-                if unfixed and not self.error_manager.fix_in_progress:
-                    self._trigger_error_fix(unfixed[0])
+                with self.error_manager.lock:
+                    already_fixing = self.error_manager.fix_in_progress
+                if not already_fixing:
+                    unfixed = self.error_manager.get_unfixed_errors()
+                    if unfixed:
+                        self._trigger_error_fix(unfixed[0])
             elif arg == "off":
                 self.error_auto_fix = False
                 self.set_status("[yellow]Auto-fix disabled[/]")
@@ -2021,6 +2038,7 @@ class SiteManagerApp(App):
         )
         response_parts = []
         session_ts = datetime.now().isoformat()
+        proc = None
         try:
             with open(CLAUDE_LOG_FILE, "a") as log_f:
                 log_f.write(f"\n{'='*60}\n")
@@ -2038,11 +2056,10 @@ class SiteManagerApp(App):
                     "--output-format", "stream-json",
                     "--verbose",
                 ],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, cwd=SCRIPT_DIR,
             )
             for raw_line in proc.stdout:
-                # Write every raw line to the log file
                 with open(CLAUDE_LOG_FILE, "a") as log_f:
                     log_f.write(raw_line)
 
@@ -2087,7 +2104,6 @@ class SiteManagerApp(App):
                             )
 
                 elif ev_type == "user":
-                    # tool_result blocks come back as user messages
                     content = ev.get("message", {}).get("content", [])
                     if isinstance(content, list):
                         for block in content:
@@ -2133,12 +2149,18 @@ class SiteManagerApp(App):
 
             proc.wait()
             response = "".join(response_parts).strip() if response_parts else "(no response)"
-            if proc.returncode != 0:
-                stderr = proc.stderr.read().strip()
-                if stderr and not response_parts:
-                    response = f"[error]: {stderr[:300]}"
         except Exception as e:
             response = f"[error: {e}]"
+        finally:
+            if proc is not None:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
 
         if len(response) > 3000:
             response = response[:2900] + "\n... (truncated)"
