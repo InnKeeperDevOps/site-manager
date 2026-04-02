@@ -18,7 +18,14 @@ log() {
 }
 
 start_app() {
-    # Ensure port 8080 is free before starting (Java child from setsid may outlive Gradle)
+    # Kill any orphaned Gradle/Java processes from previous runs that may not
+    # yet have bound port 8080 (setsid puts them in a new session, so stop_app's
+    # process-group kill cannot reach them).
+    pkill -f "gradlew.*bootRun" 2>/dev/null || true
+    pkill -f "com.sitemanager.SiteManagerApplication" 2>/dev/null || true
+    sleep 2
+
+    # Ensure port 8080 is free before starting
     local waited=0
     while ss -tlnp 2>/dev/null | grep -q ':8080 '; do
         if [ "$waited" -ge 30 ]; then
@@ -62,8 +69,12 @@ stop_app() {
 
     rm -f "$PID_FILE"
 
-    # setsid creates a new process group, so the Java child may still be running
-    # even after the setsid parent exits. Wait for port 8080 to be released.
+    # setsid creates a new session, so the Java child lives in a different
+    # process group that the kill above cannot reach.  Kill by name as fallback.
+    pkill -f "gradlew.*bootRun" 2>/dev/null || true
+    pkill -f "com.sitemanager.SiteManagerApplication" 2>/dev/null || true
+
+    # Wait for port 8080 to be released.
     waited=0
     while ss -tlnp 2>/dev/null | grep -q ':8080 '; do
         if [ "$waited" -ge 30 ]; then
