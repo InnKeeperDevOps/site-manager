@@ -102,7 +102,7 @@ while true; do
     if check_for_updates; then
         log "Update detected on $AUTO_UPDATE_BRANCH, pulling and restarting..."
         stop_app
-        if git pull origin "$AUTO_UPDATE_BRANCH"; then
+        if git pull --rebase origin "$AUTO_UPDATE_BRANCH"; then
             log "Pull succeeded, starting updated application..."
             start_app
         else
