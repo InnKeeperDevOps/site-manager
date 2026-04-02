@@ -88,6 +88,54 @@ class TrackedError:
     claude_pid: Optional[int] = None
 
 
+FIX_STAGES = [
+    ("INIT", "Initializing"),
+    ("ANALYZING", "Analyzing error"),
+    ("READING", "Reading source files"),
+    ("DIAGNOSING", "Diagnosing root cause"),
+    ("FIXING", "Applying fix"),
+    ("TESTING", "Testing changes"),
+    ("COMMITTING", "Committing & pushing"),
+    ("DONE", "Fix complete"),
+    ("FAILED", "Fix failed"),
+]
+
+FIX_STAGE_NAMES = [s[0] for s in FIX_STAGES]
+FIX_STAGE_PROGRESS = {name: i / (len(FIX_STAGES) - 1) for i, (name, _) in enumerate(FIX_STAGES)}
+FIX_STAGE_LABELS = {name: label for name, label in FIX_STAGES}
+
+
+@dataclass
+class FixSession:
+    """Tracks the progress of a single Claude CLI error-fix session."""
+    error_hash: str
+    error_message: str
+    stage: str = "INIT"
+    start_time: float = 0.0
+    files_read: list = field(default_factory=list)
+    files_modified: list = field(default_factory=list)
+    tools_used: list = field(default_factory=list)
+    tool_call_count: int = 0
+    current_action: str = ""
+    thinking_snippet: str = ""
+    response_snippet: str = ""
+    turns: int = 0
+    cost: Optional[float] = None
+    finished: bool = False
+
+    @property
+    def progress(self) -> float:
+        return FIX_STAGE_PROGRESS.get(self.stage, 0.0)
+
+    @property
+    def elapsed(self) -> float:
+        return time.time() - self.start_time if self.start_time else 0.0
+
+    @property
+    def stage_label(self) -> str:
+        return FIX_STAGE_LABELS.get(self.stage, self.stage)
+
+
 class ErrorManager:
     """Tracks unique errors from error.log and manages auto-fix sessions."""
 
@@ -98,6 +146,8 @@ class ErrorManager:
         self.fix_in_progress: bool = False
         self.total_fixes_attempted: int = 0
         self.total_fixes_succeeded: int = 0
+        self.current_fix: Optional[FixSession] = None
+        self.fix_history: list[FixSession] = []
         self.lock = threading.Lock()
 
     def _hash_error(self, message: str) -> str:
@@ -209,6 +259,34 @@ class ErrorManager:
         with self.lock:
             if error_hash in self.errors:
                 self.errors[error_hash].status = "IGNORED"
+
+    def start_fix_session(self, error_hash: str) -> FixSession:
+        with self.lock:
+            msg = self.errors[error_hash].message if error_hash in self.errors else ""
+            session = FixSession(
+                error_hash=error_hash,
+                error_message=msg,
+                start_time=time.time(),
+            )
+            self.current_fix = session
+            return session
+
+    def finish_fix_session(self, success: bool):
+        with self.lock:
+            if self.current_fix:
+                self.current_fix.finished = True
+                self.current_fix.stage = "DONE" if success else "FAILED"
+                self.fix_history.append(self.current_fix)
+                if len(self.fix_history) > 20:
+                    self.fix_history = self.fix_history[-20:]
+                self.current_fix = None
+
+    def update_fix_stage(self, stage: str, action: str = ""):
+        with self.lock:
+            if self.current_fix:
+                self.current_fix.stage = stage
+                if action:
+                    self.current_fix.current_action = action
 
 
 # ── DB helpers ──────────────────────────────────────────────────────
@@ -567,6 +645,14 @@ DataTable {
 .error-status-failed {
     color: red;
 }
+
+#fix-progress-panel {
+    border: round $warning;
+    height: auto;
+    min-height: 10;
+    padding: 0 1;
+    width: 1fr;
+}
 """
 
 
@@ -807,6 +893,149 @@ class ErrorStatsWidget(Static):
         self.update(t)
 
 
+class FixProgressWidget(Static):
+    """Displays the progress of the current Claude CLI error-fix session."""
+
+    def __init__(self, error_manager: Optional["ErrorManager"] = None, **kwargs):
+        super().__init__(**kwargs)
+        self._error_manager = error_manager
+
+    def refresh_data(self, error_manager: Optional["ErrorManager"] = None) -> None:
+        em = error_manager or self._error_manager
+        if not em:
+            self.update(Text("Fix progress not available", style="dim"))
+            return
+
+        t = Text()
+        session = em.current_fix
+
+        if session and not session.finished:
+            t.append("  Fix In Progress  \n\n", style="bold black on yellow")
+            t.append("  Error: ", style="dim")
+            t.append(f"{session.error_hash[:12]}\n", style="bold white")
+            msg_preview = session.error_message[:70]
+            if len(session.error_message) > 70:
+                msg_preview += "..."
+            t.append(f"  {msg_preview}\n\n", style="dim")
+
+            elapsed = session.elapsed
+            t.append(f"  Elapsed: ", style="dim")
+            t.append(f"{elapsed:.0f}s\n", style="bold white")
+
+            # Stage progress bar
+            pct = int(session.progress * 100)
+            bar_w = 30
+            filled = int(bar_w * session.progress)
+            bar = "█" * filled + "░" * (bar_w - filled)
+            t.append(f"\n  ")
+            t.append(bar, style="yellow")
+            t.append(f" {pct}%\n\n", style="bold yellow")
+
+            # Stage pipeline
+            for stage_name, stage_label in FIX_STAGES:
+                if stage_name in ("DONE", "FAILED"):
+                    continue
+                if stage_name == session.stage:
+                    t.append("  ► ", style="bold yellow")
+                    t.append(f"{stage_label}", style="bold yellow")
+                    if session.current_action:
+                        t.append(f"  {session.current_action}", style="dim yellow")
+                    t.append("\n")
+                elif FIX_STAGE_PROGRESS.get(stage_name, 0) < session.progress:
+                    t.append("  ✓ ", style="green")
+                    t.append(f"{stage_label}\n", style="dim green")
+                else:
+                    t.append("  ○ ", style="dim")
+                    t.append(f"{stage_label}\n", style="dim")
+
+            t.append("\n")
+
+            if session.thinking_snippet:
+                t.append("  Thinking: ", style="dim cyan")
+                snippet = session.thinking_snippet[:80]
+                t.append(f"{snippet}\n", style="cyan")
+
+            if session.response_snippet:
+                t.append("  Output: ", style="dim green")
+                snippet = session.response_snippet[:80]
+                t.append(f"{snippet}\n", style="green")
+
+            t.append("\n")
+
+            if session.files_read:
+                t.append("  Files Read:\n", style="bold")
+                for f in session.files_read[-6:]:
+                    t.append(f"    {f}\n", style="dim")
+                if len(session.files_read) > 6:
+                    t.append(f"    ... and {len(session.files_read) - 6} more\n", style="dim")
+
+            if session.files_modified:
+                t.append("  Files Modified:\n", style="bold green")
+                for f in session.files_modified[-6:]:
+                    t.append(f"    {f}\n", style="green")
+
+            if session.tools_used:
+                t.append(f"\n  Tool Calls: ", style="dim")
+                t.append(f"{session.tool_call_count}\n", style="bold white")
+                unique_tools = list(dict.fromkeys(session.tools_used[-10:]))
+                tools_str = ", ".join(unique_tools)
+                t.append(f"  Recent: {tools_str}\n", style="dim")
+
+        elif em.fix_history:
+            last = em.fix_history[-1]
+            t.append("  Last Fix Session  \n\n", style="bold black on green" if last.stage == "DONE" else "bold black on red")
+
+            status_style = "bold green" if last.stage == "DONE" else "bold red"
+            t.append("  Status: ", style="dim")
+            t.append(f"{last.stage_label}\n", style=status_style)
+            t.append("  Error: ", style="dim")
+            t.append(f"{last.error_hash[:12]}\n", style="white")
+            msg_preview = last.error_message[:70]
+            t.append(f"  {msg_preview}\n\n", style="dim")
+
+            elapsed = last.elapsed
+            t.append(f"  Duration: ", style="dim")
+            t.append(f"{elapsed:.1f}s\n", style="white")
+            t.append(f"  Tools Used: ", style="dim")
+            t.append(f"{last.tool_call_count}\n", style="white")
+
+            if last.files_modified:
+                t.append("  Files Changed:\n", style="bold")
+                for f in last.files_modified:
+                    t.append(f"    {f}\n", style="green" if last.stage == "DONE" else "red")
+
+            if last.cost is not None:
+                t.append(f"  Cost: ", style="dim")
+                t.append(f"${last.cost:.4f}\n", style="dim")
+
+            # Show recent history
+            if len(em.fix_history) > 1:
+                t.append(f"\n  Fix History ({len(em.fix_history)} sessions):\n", style="bold")
+                for h in em.fix_history[-5:]:
+                    icon = "✓" if h.stage == "DONE" else "✗"
+                    icon_style = "green" if h.stage == "DONE" else "red"
+                    t.append(f"    {icon} ", style=icon_style)
+                    t.append(f"{h.error_hash[:8]} ", style="dim")
+                    t.append(f"{h.elapsed:.0f}s ", style="dim")
+                    t.append(f"{h.stage_label}\n", style=icon_style)
+
+        else:
+            t.append("  Fix Progress  \n\n", style="bold black on green")
+            t.append("  No fix sessions yet.\n", style="dim")
+            t.append("  Errors will be auto-fixed when detected,\n", style="dim")
+            t.append("  or use: ", style="dim")
+            t.append("fix <hash>", style="cyan")
+            t.append(" to trigger manually.\n\n", style="dim")
+
+            t.append("  Fix Stages:\n", style="bold")
+            for stage_name, stage_label in FIX_STAGES:
+                if stage_name in ("DONE", "FAILED"):
+                    continue
+                t.append(f"    ○ {stage_label}\n", style="dim")
+
+        self.update(t)
+
+
 # ── Main App ─────────────────────────────────────────────────────────
 
 class SiteManagerApp(App):
@@ -881,8 +1110,10 @@ class SiteManagerApp(App):
             with TabPane("Errors", id="errors"):
                 with Horizontal():
                     yield ErrorStatsWidget(self.error_manager, id="error-stats-panel")
+                    yield FixProgressWidget(self.error_manager, id="fix-progress-panel")
                     yield Static(id="error-actions-panel", classes="stat-panel")
-                yield DataTable(id="error-table", cursor_type="row")
+                with Horizontal():
+                    yield DataTable(id="error-table", cursor_type="row")
                 yield RichLog(id="error-fix-log", highlight=True, markup=True)
 
             with TabPane("Help", id="help"):
@@ -930,6 +1161,7 @@ class SiteManagerApp(App):
     def on_mount(self) -> None:
         self.set_interval(30, self._auto_refresh)
         self.set_interval(2, self._tick_claude_panel)
+        self.set_interval(2, self._tick_fix_progress)
         self.set_interval(ERROR_CHECK_INTERVAL, self._check_errors)
         self.set_interval(5, self._refresh_error_displays)
         self._populate_suggestions_table()
@@ -1005,6 +1237,10 @@ class SiteManagerApp(App):
     def _tick_claude_panel(self) -> None:
         if self.claude_working:
             self._refresh_claude_panel()
+
+    def _tick_fix_progress(self) -> None:
+        if self.error_manager.fix_in_progress:
+            self._refresh_fix_progress()
 
     def _refresh_claude_panel(self) -> None:
         t = Text()
@@ -1143,6 +1379,8 @@ class SiteManagerApp(App):
             f"IMPORTANT: Be concise. Fix only what's broken. Do not refactor unrelated code."
         )
 
+        session = self.error_manager.start_fix_session(error.error_hash)
+
         try:
             with open(ERROR_FIX_LOG_FILE, "a") as log_f:
                 log_f.write(f"\n{'='*60}\n")
@@ -1150,6 +1388,9 @@ class SiteManagerApp(App):
                 log_f.write(f"Error Hash: {error.error_hash}\n")
                 log_f.write(f"Error: {error_msg}\n")
                 log_f.write(f"{'='*60}\n")
+
+            self.error_manager.update_fix_stage("ANALYZING", "Launching Claude CLI")
+            self.call_from_thread(self._refresh_error_displays)
 
             proc = subprocess.Popen(
                 [
@@ -1171,6 +1412,12 @@ class SiteManagerApp(App):
 
             response_parts = []
             tools_used = []
+
+            read_tools = {"Read", "ReadFile", "read_file", "View"}
+            write_tools = {"Write", "Edit", "WriteFile", "write_file", "str_replace_editor",
+                           "EditFile", "edit_file", "InsertText", "ReplaceText"}
+            exec_tools = {"Bash", "bash", "execute_command", "RunCommand", "Shell"}
+            git_tools = {"git_commit", "git_push", "git_add"}
 
             for raw_line in proc.stdout:
                 with open(ERROR_FIX_LOG_FILE, "a") as log_f:
@@ -1194,26 +1441,66 @@ class SiteManagerApp(App):
                             text_chunk = block.get("text", "")
                             response_parts.append(text_chunk)
                             preview = text_chunk[:120].replace("\n", " ")
+                            with self.error_manager.lock:
+                                if session:
+                                    session.response_snippet = preview
                             self.call_from_thread(
                                 self._append_error_log,
                                 f"[green]CLAUDE[/] {preview}"
                             )
+                            self.call_from_thread(self._refresh_fix_progress)
                         elif btype == "tool_use":
                             tool_name = block.get("name", "?")
                             tools_used.append(tool_name)
                             tool_input = block.get("input", {})
                             input_preview = json.dumps(tool_input, separators=(",", ":"))[:100]
+
+                            with self.error_manager.lock:
+                                if session:
+                                    session.tools_used.append(tool_name)
+                                    session.tool_call_count += 1
+
+                                    file_path = tool_input.get("path") or tool_input.get("file_path") or tool_input.get("filename") or ""
+                                    if file_path:
+                                        short_path = file_path.replace(SCRIPT_DIR + "/", "")
+
+                                    if tool_name in read_tools:
+                                        if file_path and short_path not in session.files_read:
+                                            session.files_read.append(short_path)
+                                        self.error_manager.update_fix_stage("READING", f"Reading {short_path}" if file_path else "")
+                                    elif tool_name in write_tools:
+                                        if file_path and short_path not in session.files_modified:
+                                            session.files_modified.append(short_path)
+                                        self.error_manager.update_fix_stage("FIXING", f"Editing {short_path}" if file_path else "")
+                                    elif tool_name in exec_tools:
+                                        cmd_str = str(tool_input.get("command", ""))[:50]
+                                        if any(g in cmd_str for g in ["git commit", "git push", "git add"]):
+                                            self.error_manager.update_fix_stage("COMMITTING", cmd_str)
+                                        elif any(t in cmd_str for t in ["mvn", "gradle", "test", "build", "npm"]):
+                                            self.error_manager.update_fix_stage("TESTING", cmd_str)
+                                        else:
+                                            session.current_action = cmd_str
+                                    elif tool_name in git_tools:
+                                        self.error_manager.update_fix_stage("COMMITTING", tool_name)
+
                             self.call_from_thread(
                                 self._append_error_log,
                                 f"[bold blue]TOOL[/] [cyan]{tool_name}[/] [dim]{input_preview}[/]"
                             )
+                            self.call_from_thread(self._refresh_fix_progress)
                         elif btype == "thinking":
                             snippet = (block.get("thinking", "") or "")[:80].replace("\n", " ")
                             if snippet:
+                                with self.error_manager.lock:
+                                    if session:
+                                        session.thinking_snippet = snippet
+                                        if session.stage == "ANALYZING":
+                                            self.error_manager.update_fix_stage("DIAGNOSING", "Thinking...")
                                 self.call_from_thread(
                                     self._append_error_log,
                                     f"[dim cyan]THINK[/] {snippet}"
                                 )
+                                self.call_from_thread(self._refresh_fix_progress)
 
                 elif ev_type == "user":
                     content = ev.get("message", {}).get("content", [])
@@ -1243,6 +1530,10 @@ class SiteManagerApp(App):
                         cost = stats.get("cost_usd", None)
                         turns = stats.get("num_turns", "?")
                         cost_str = f" cost=${cost:.4f}" if cost is not None else ""
+                        with self.error_manager.lock:
+                            if session:
+                                session.cost = cost
+                                session.turns = turns if isinstance(turns, int) else 0
                         self.call_from_thread(
                             self._append_error_log,
                             f"[dim]DONE turns={turns}{cost_str}[/]"
@@ -1262,6 +1553,7 @@ class SiteManagerApp(App):
 
             if likely_fixed:
                 self.error_manager.mark_fixed(error.error_hash, response[:2000])
+                self.error_manager.finish_fix_session(success=True)
                 self.call_from_thread(
                     self._append_error_log,
                     f"[bold green]FIXED[/] [{error.error_hash}] Error appears resolved"
@@ -1272,6 +1564,7 @@ class SiteManagerApp(App):
                 )
             else:
                 self.error_manager.mark_failed(error.error_hash, response[:2000])
+                self.error_manager.finish_fix_session(success=False)
                 self.call_from_thread(
                     self._append_error_log,
                     f"[bold red]FAILED[/] [{error.error_hash}] Fix attempt unsuccessful"
@@ -1283,6 +1576,7 @@ class SiteManagerApp(App):
 
         except Exception as e:
             self.error_manager.mark_failed(error.error_hash, str(e))
+            self.error_manager.finish_fix_session(success=False)
             self.call_from_thread(
                 self._append_error_log,
                 f"[bold red]ERROR[/] Fix process failed: {e}"
@@ -1337,6 +1631,14 @@ class SiteManagerApp(App):
                 key=err.error_hash,
             )
 
+    def _refresh_fix_progress(self) -> None:
+        """Refresh the fix progress widget."""
+        try:
+            widget = self.query_one("#fix-progress-panel", FixProgressWidget)
+            widget.refresh_data(self.error_manager)
+        except Exception:
+            pass
+
     def _refresh_error_displays(self) -> None:
         """Refresh all error-related display widgets."""
         for widget_id in ("#error-stats-panel", "#error-dashboard-panel"):
@@ -1346,6 +1648,7 @@ class SiteManagerApp(App):
             except Exception:
                 pass
 
+        self._refresh_fix_progress()
         self._refresh_error_actions_panel()
         self._refresh_error_recent_panel()
 
