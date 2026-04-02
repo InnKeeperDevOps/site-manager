@@ -4,6 +4,8 @@ CLAUDE_RUN_AS_USER=claude
 AUTO_UPDATE_BRANCH="${AUTO_UPDATE_BRANCH:-main}"
 AUTO_UPDATE_INTERVAL="${AUTO_UPDATE_INTERVAL:-60}"
 PID_FILE="/tmp/site-manager-auto-update.pid"
+EXTRACTOR_PID_FILE="/tmp/site-manager-extract-errors.pid"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Validate branch name
 if ! echo "$AUTO_UPDATE_BRANCH" | grep -qE '^[a-zA-Z0-9/_.-]+$'; then
@@ -89,15 +91,39 @@ check_for_updates() {
     return 1
 }
 
+start_extractor() {
+    stop_extractor
+    log "Starting error extractor..."
+    nohup bash "$SCRIPT_DIR/extract-errors.sh" > /dev/null 2>&1 &
+    echo "$!" > "$EXTRACTOR_PID_FILE"
+    log "Error extractor started with PID $!"
+}
+
+stop_extractor() {
+    if [ -f "$EXTRACTOR_PID_FILE" ]; then
+        local pid
+        pid=$(cat "$EXTRACTOR_PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null
+            wait "$pid" 2>/dev/null || true
+        fi
+        rm -f "$EXTRACTOR_PID_FILE"
+    fi
+    # Also kill any orphaned extract-errors.sh processes
+    pkill -f "extract-errors.sh" 2>/dev/null || true
+}
+
 handle_signal() {
     log "Signal received, shutting down..."
     stop_app
+    stop_extractor
     exit 0
 }
 
 trap handle_signal SIGTERM SIGINT
 
 start_app
+start_extractor
 
 while true; do
     sleep "$AUTO_UPDATE_INTERVAL"
@@ -115,12 +141,15 @@ while true; do
     if check_for_updates; then
         log "Update detected on $AUTO_UPDATE_BRANCH, pulling and restarting..."
         stop_app
+        stop_extractor
         if git pull --rebase origin "$AUTO_UPDATE_BRANCH"; then
             log "Pull succeeded, starting updated application..."
             start_app
+            start_extractor
         else
             log "[ERROR] git pull failed, restarting existing version..."
             start_app
+            start_extractor
         fi
     fi
 done
