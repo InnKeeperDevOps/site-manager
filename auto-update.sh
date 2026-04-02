@@ -16,6 +16,19 @@ log() {
 }
 
 start_app() {
+    # Ensure port 8080 is free before starting (Java child from setsid may outlive Gradle)
+    local waited=0
+    while ss -tlnp 2>/dev/null | grep -q ':8080 '; do
+        if [ "$waited" -ge 30 ]; then
+            log "Port 8080 still in use after 30s, force-killing process..."
+            fuser -k 8080/tcp 2>/dev/null
+            sleep 2
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
     log "Starting application..."
     setsid ./gradlew bootRun --no-daemon &
     local pid=$!
