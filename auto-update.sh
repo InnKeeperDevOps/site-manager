@@ -38,7 +38,7 @@ stop_app() {
     while kill -0 "$pid" 2>/dev/null; do
         if [ "$waited" -ge 30 ]; then
             log "Process did not stop after 30s, sending SIGKILL..."
-            kill -- -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null
+            kill -9 -- -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null
             break
         fi
         sleep 1
@@ -46,6 +46,21 @@ stop_app() {
     done
 
     rm -f "$PID_FILE"
+
+    # setsid creates a new process group, so the Java child may still be running
+    # even after the setsid parent exits. Wait for port 8080 to be released.
+    waited=0
+    while ss -tlnp 2>/dev/null | grep -q ':8080 '; do
+        if [ "$waited" -ge 30 ]; then
+            log "Port 8080 still in use after 30s, force-killing Java process..."
+            fuser -k 8080/tcp 2>/dev/null
+            sleep 2
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
     log "Application stopped"
 }
 
