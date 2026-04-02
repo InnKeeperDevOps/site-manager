@@ -23,7 +23,14 @@ start_app() {
     # process-group kill cannot reach them).
     pkill -f "gradlew.*bootRun" 2>/dev/null || true
     pkill -f "com.sitemanager.SiteManagerApplication" 2>/dev/null || true
+    # Gradle --no-daemon forks a single-use daemon (GradleDaemon) that actually
+    # runs Spring Boot.  The patterns above miss it, leaving it holding port 8080.
+    pkill -f "GradleDaemon" 2>/dev/null || true
     sleep 2
+
+    # Force-kill anything still on port 8080 before checking
+    fuser -k 8080/tcp 2>/dev/null || true
+    sleep 1
 
     # Ensure port 8080 is free before starting
     local waited=0
@@ -73,6 +80,7 @@ stop_app() {
     # process group that the kill above cannot reach.  Kill by name as fallback.
     pkill -f "gradlew.*bootRun" 2>/dev/null || true
     pkill -f "com.sitemanager.SiteManagerApplication" 2>/dev/null || true
+    pkill -f "GradleDaemon" 2>/dev/null || true
 
     # Wait for port 8080 to be released.
     waited=0
